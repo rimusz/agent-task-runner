@@ -61,10 +61,14 @@ where the keyring is locked.
    access tokens** → **Generate new token**.
 2. Resource owner / repository access: **only** the repos atr watches.
 3. Permissions (this repo):
-   - **Contents** — Read and write (push branches)
-   - **Issues** — Read and write (read issues, post comments)
-   - **Pull requests** — Read and write (open PRs)
+   - **Contents** — Read and write (`git clone`, `git push` of task branches)
+   - **Issues** — Read and write (`gh issue list/view/comment/edit`, `gh label create`)
+   - **Pull requests** — Read and write (`gh pr create`, `gh pr comment`)
+   - **Workflows** — Read and write, only if tasks push changes under `.github/workflows`
    - **Metadata** — Read (always required)
+
+   That is the minimal set. This one token covers both watching labels and
+   pushing: run `gh auth setup-git` so git uses it too. No SSH key needed.
 4. Generate. Copy once. Do not paste it into chat, config, or the plist.
 
 ```bash
@@ -94,9 +98,9 @@ token (`ghs_…`), put it in `GH_TOKEN` the same way as a PAT. It expires
 
 ## 3. SSH key for `git push`
 
-If the host already has an SSH key that GitHub accepts, atr just uses it: git
-clones and pushes with it, and atr never reads or stores the key. With HTTPS
-remotes, run `gh auth setup-git` instead so git borrows the `gh` login.
+Optional. A single token (§1 or §2) plus `gh auth setup-git` already covers
+git. An SSH key is only an alternative for git clone and push; if the host has
+one GitHub accepts, git uses it and atr never reads or stores it.
 
 **When:** `git remote -v` shows `git@github.com:owner/repo.git`. SSH does
 **not** replace `gh` — you still need [§1](#1-gh-auth-login) or
