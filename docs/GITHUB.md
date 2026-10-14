@@ -94,6 +94,10 @@ token (`ghs_…`), put it in `GH_TOKEN` the same way as a PAT. It expires
 
 ## 3. SSH key for `git push`
 
+If the host already has an SSH key that GitHub accepts, atr just uses it: git
+clones and pushes with it, and atr never reads or stores the key. With HTTPS
+remotes, run `gh auth setup-git` instead so git borrows the `gh` login.
+
 **When:** `git remote -v` shows `git@github.com:owner/repo.git`. SSH does
 **not** replace `gh` — you still need [§1](#1-gh-auth-login) or
 [§2](#2-token-in-shadowenv) for issues, comments, and PRs.

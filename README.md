@@ -134,6 +134,25 @@ atr gc --tasks --dry-run
 
 `atr tasks rm` only deletes finished or failed work, never a running task. Full flag list: `atr --help`. Service files and config edits: [docs/CONFIG.md](docs/CONFIG.md).
 
+## Where to run it and how to reach it
+
+**Hosts.** atr runs on:
+
+- a local Mac (Apple Silicon),
+- any Linux distro (the Linux build is a static musl binary),
+- a cloud VM or headless server. Run `loginctl enable-linger "$USER"` so the service keeps running after you log out.
+
+The coding CLIs atr drives (Claude, Codex, Cursor, Grok, OpenCode and others) must be installed and signed in on that same host.
+
+**Control.** AI agent apps such as Claude Code, Codex, Cursor, Grok Build, Grok Bot and OpenCode control atr through its MCP server:
+
+- on the same machine, with local stdio: `atr mcp`
+- from another machine, with HTTP `/mcp` over Tailscale and a bearer token
+
+Other ways in are the GitHub `for:atr` label, the `atr` CLI over SSH, the HTTP API, and the dashboard on port 7420. MCP can add, steer and cancel tasks, but it cannot change config. Details: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#mcp-tool-reference) and [docs/CONFIG.md](docs/CONFIG.md#mcp).
+
+**GitHub access.** atr gets its API token from `gh auth` or `GH_TOKEN`. To clone and push, git uses whatever the host already has: an SSH key, or `gh auth setup-git`. atr stores no credentials itself. Details: [docs/GITHUB.md](docs/GITHUB.md).
+
 ## Install with your coding agent
 
 Paste **one** of the prompts below into Claude Code, Codex, Cursor, or Grok on the machine that will run atr. The agent installs the binary and the user service. **You** still sign in to each vendor CLI. The prompts never ask for or handle API keys.
