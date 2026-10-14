@@ -151,7 +151,16 @@ The coding CLIs atr drives (Claude, Codex, Cursor, Grok, OpenCode and others) mu
 
 Other ways in are the GitHub `for:atr` label, the `atr` CLI over SSH, the HTTP API, and the dashboard on port 7420. MCP can add, steer and cancel tasks, but it cannot change config. Details: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#mcp-tool-reference) and [docs/CONFIG.md](docs/CONFIG.md#mcp).
 
-**GitHub access.** One token is enough. Either your `gh auth login`, or a fine-grained PAT in `GH_TOKEN` (Issues, Contents and Pull requests read/write, plus Workflows if the repo has CI files to push), covers both watching labels and pushing branches once you run `gh auth setup-git`. An SSH key is optional: it is only another way for git to clone and push. atr stores no credentials itself. Details: [docs/GITHUB.md](docs/GITHUB.md).
+**GitHub access.** A GitHub token is **required**. Watching labels, reading issues and posting comments all go through the GitHub API, which needs a token. An SSH key cannot do that. One token is enough: your `gh auth login`, or a fine-grained PAT in `GH_TOKEN` (Issues, Contents and Pull requests read/write, plus Workflows if the repo has CI files to push). Run `gh auth setup-git` and git uses that same token for clone and push. An SSH key is **optional** and only covers git clone and push, as an alternative to the token. atr stores no credentials itself.
+
+| What atr does | What it needs |
+|---|---|
+| Watch `for:atr` labels, read issues | GitHub token (required) |
+| Post comments | GitHub token (required) |
+| Open pull requests | GitHub token (required) |
+| `git clone` / `git push` | The same token via `gh auth setup-git`, **or** an SSH key (optional) |
+
+Details: [docs/GITHUB.md](docs/GITHUB.md).
 
 ## Install with your coding agent
 

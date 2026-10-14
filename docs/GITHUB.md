@@ -13,6 +13,20 @@ therefore need:
 prints a guide. `atr doctor` checks each. **Nothing in this page, in doctor,
 or in init ever prints a token or a key.**
 
+## Token required, SSH key optional
+
+A GitHub token is **required**. Watching labels, reading issues and posting
+comments all use the GitHub API, which needs a token; an SSH key cannot do
+that. An SSH key is **optional** and covers only `git clone` / `git push`, as
+an alternative to using the token for git.
+
+| What atr does | What it needs |
+|---|---|
+| Watch `for:atr` labels, read issues | GitHub token (required) |
+| Post comments | GitHub token (required) |
+| Open pull requests | GitHub token (required) |
+| `git clone` / `git push` | The same token via `gh auth setup-git`, **or** an SSH key (optional) |
+
 ## What to pick
 
 | Setup | Use when | API (`gh`) | `git push` |
