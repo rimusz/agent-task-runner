@@ -1,0 +1,1 @@
+{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"claude-sess-1","total_cost_usd":0.0123,"usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":800,"output_tokens":50}}

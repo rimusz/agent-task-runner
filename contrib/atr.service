@@ -1,0 +1,14 @@
+[Unit]
+Description=atr agent task runner
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.config/atr/atr-serve.sh
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

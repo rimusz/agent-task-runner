@@ -1,0 +1,13 @@
+title = "atr"
+
+[extend]
+# Keep the default rule set; only the documented fake test tokens are ignored.
+useDefault = true
+
+# gitleaks 8.24 (CI pin) uses a single [allowlist] table.
+[allowlist]
+description = "Fake test secrets used to assert redaction"
+paths = [
+    '''src/github_auth.rs''',
+    '''tests/e2e.rs''',
+]

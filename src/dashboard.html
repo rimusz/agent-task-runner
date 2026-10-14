@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>atr</title>
+<style>
+:root { color-scheme: dark light; }
+body { font: 15px/1.4 system-ui, sans-serif; margin: 1rem; max-width: 72rem; }
+h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+h2 { font-size: 1rem; margin: 1.25rem 0 .4rem; }
+.meta { color: #666; font-size: .85rem; }
+table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+th, td { text-align: left; padding: .3rem .4rem; border-bottom: 1px solid #ccc3; vertical-align: top; word-break: break-word; }
+th { color: #666; font-weight: 600; }
+.ok { color: #2a7; }
+.warn { color: #c80; }
+.fail { color: #c44; }
+pre { white-space: pre-wrap; font: 12px/1.35 ui-monospace, monospace; background: #1111; padding: .5rem; overflow: auto; max-height: 18rem; }
+.empty { color: #888; }
+</style>
+</head>
+<body>
+<h1>atr</h1>
+<p class="meta" id="meta">loading…</p>
+<p class="meta">
+  <label>repo
+    <select id="repoFilter">
+      <option value="">all</option>
+    </select>
+  </label>
+</p>
+<h2>Repos</h2>
+<div id="repos"></div>
+
+<h2>Running</h2>
+<div id="running"></div>
+<h2>Queued</h2>
+<div id="queued"></div>
+<h2>Finished</h2>
+<div id="finished"></div>
+<h2>Providers</h2>
+<div id="providers"></div>
+<h2>Today</h2>
+<div id="today"></div>
+<h2>Token savings</h2>
+<p class="meta">
+  <label>period
+    <select id="period">
+      <option value="today">today</option>
+      <option value="7d">7d</option>
+      <option value="30d">30d</option>
+      <option value="month">this month</option>
+      <option value="custom">custom</option>
+    </select>
+  </label>
+  <span id="customDates" hidden>
+    <input type="date" id="from">
+    <input type="date" id="to">
+  </span>
+  <span id="savingsMeta"></span>
+</p>
+<div id="chart" class="empty"></div>
+<div id="savings"></div>
+<h2>Logs</h2>
+<pre id="logs" class="empty">(none)</pre>
+
+<script>
+const $ = id => document.getElementById(id);
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+function rows(headers, items, cells) {
+  if (!items || !items.length) return '<p class="empty">(none)</p>';
+  let h = "<table><thead><tr>" + headers.map(x => "<th>"+esc(x)+"</th>").join("") + "</tr></thead><tbody>";
+  for (const it of items) h += "<tr>" + cells(it).map(x => "<td>"+x+"</td>").join("") + "</tr>";
+  return h + "</tbody></table>";
+}
+function cls(state) {
+  const s = String(state || "").toLowerCase();
+  if (s === "success" || s === "waiting") return "ok";
+  if (s === "failed" || s === "cancelled" || s === "verify_failed") return "fail";
+  if (s) return "warn";
+  return "";
+}
+function taskCells(t) {
+  return [esc(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.parent || "-"),
+    esc(t.provider), esc(t.model), esc(t.elapsed),
+    '<span class="'+cls(t.state)+'">'+esc(t.state)+"</span>"];
+}
+function paint(d) {
+  $("meta").textContent = (d.timezone || "") + " · " + (d.now || "") +
+    " · " + (d.listen || "") + (d.intake_paused ? " · intake paused" : "") +
+    (d.driver ? " · driver " + d.driver : "") + " · refresh 5s";
+  const sel = $("repoFilter");
+  const cur = sel.value;
+  const names = (d.repos || []).map(r => r.name).filter(Boolean);
+  sel.innerHTML = '<option value="">all</option>' + names.map(n =>
+    '<option value="'+esc(n)+'"'+(n===cur?' selected':'')+'>'+esc(n)+'</option>').join('');
+  $("repos").innerHTML = rows(["name","enabled","github","label"], d.repos, r => [
+    esc(r.name), r.enabled ? "yes" : "no", esc(r.github || "-"), esc(r.label || "-")
+  ]);
+  $("running").innerHTML = rows(["key","repo","role","parent","provider","model","elapsed","state"], d.running, taskCells);
+  $("queued").innerHTML = rows(["key","repo","role","parent","provider","model","elapsed","state"], d.queued, taskCells);
+  $("finished").innerHTML = rows(["key","repo","role","parent","provider","model","elapsed","result","reason"], d.finished, t => [
+    esc(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.parent || "-"),
+    esc(t.provider), esc(t.model), esc(t.elapsed),
+    '<span class="'+cls(t.result)+'">'+esc(t.result)+"</span>", esc(t.reason)
+  ]);
+  $("providers").innerHTML = rows(["#","name","enabled","cooldown","usage"], d.providers, p => [
+    esc(p.order), esc(p.name), p.enabled ? "yes" : "no",
+    p.cooling ? '<span class="warn">cooldown</span>' : "—", esc(p.usage)
+  ]);
+  $("today").innerHTML = rows(["provider","day","input","output","hit%"], d.today, r => [
+    esc(r.provider), esc(r.day), esc(r.input), esc(r.output), esc(r.hit)
+  ]);
+  const sav = d.savings || {};
+  let meta = (sav.period || "") + " " + (sav.from || "") + ".." + (sav.to || "") +
+    (sav.timezone ? " (" + sav.timezone + ")" : "");
+  if (sav.headline) {
+    const min = sav.headline_min_input != null ? sav.headline_min_input : 40000;
+    const hit = r => (r && r.hit != null) ? r.hit : "-";
+    const runs = r => (r && r.runs != null) ? r.runs : 0;
+    meta += " · headline " + hit(sav.headline) + " (" + runs(sav.headline) + " runs ≥ " + min +
+      " tokens) · first-run " + hit(sav.first_run) + " · resume " + hit(sav.resume) +
+      " · short " + hit(sav.short) + " (" + runs(sav.short) + " excluded)";
+  }
+  $("savingsMeta").textContent = meta;
+  const items = (sav.by_provider || []).concat(sav.total ? [sav.total] : []);
+  $("savings").innerHTML = rows(
+    ["provider","input","cached","cache write","output","hit%","tokens saved","est. $ saved"],
+    items,
+    r => [
+      esc(r.provider), esc(r.input), esc(r.cached), esc(r.cache_write), esc(r.output),
+      esc(r.hit), esc(r.tokens_saved), r.saved_usd == null ? "—" : "$" + Number(r.saved_usd).toFixed(4)
+    ]
+  );
+  $("chart").innerHTML = bars(sav.by_day || []);
+  $("chart").className = (sav.by_day && sav.by_day.length) ? "" : "empty";
+  const logs = (d.logs || []).join("\n");
+  $("logs").textContent = logs || "(none)";
+  $("logs").className = logs ? "" : "empty";
+}
+function bars(days) {
+  if (!days.length) return '<p class="empty">(none)</p>';
+  const w = 640, h = 88, pad = 18;
+  const max = Math.max(1, ...days.map(d => Number(d.tokens_saved) || 0));
+  const bw = (w - pad * 2) / days.length;
+  let s = '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="' + h +
+    '" role="img" aria-label="tokens saved by caching per day">';
+  days.forEach((d, i) => {
+    const v = Number(d.tokens_saved) || 0;
+    const bh = (v / max) * (h - 28);
+    const x = pad + i * bw;
+    const y = h - 16 - bh;
+    s += '<rect x="' + (x + 1).toFixed(1) + '" y="' + y.toFixed(1) + '" width="' +
+      Math.max(1, bw - 2).toFixed(1) + '" height="' + Math.max(0, bh).toFixed(1) + '" fill="#3a8"/>';
+    if (days.length <= 14 || i % Math.ceil(days.length / 7) === 0) {
+      s += '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (h - 3) +
+        '" text-anchor="middle" font-size="8">' + esc(String(d.day || "").slice(5)) + "</text>";
+    }
+  });
+  return s + "</svg>";
+}
+function query() {
+  const period = $("period").value;
+  let q = "period=" + encodeURIComponent(period);
+  $("customDates").hidden = period !== "custom";
+  if (period === "custom") {
+    const from = $("from").value;
+    const to = $("to").value;
+    if (from && to) q += "&from=" + encodeURIComponent(from) + "&to=" + encodeURIComponent(to);
+  }
+  const repo = $("repoFilter").value;
+  if (repo) q += "&repo=" + encodeURIComponent(repo);
+  return q;
+}
+async function tick() {
+  try {
+    const r = await fetch("dashboard.json?" + query(), {cache: "no-store"});
+    if (!r.ok) throw new Error(r.status);
+    paint(await r.json());
+  } catch (e) {
+    $("meta").textContent = "dashboard unavailable: " + e;
+  }
+}
+$("period").addEventListener("change", tick);
+$("from").addEventListener("change", tick);
+$("to").addEventListener("change", tick);
+$("repoFilter").addEventListener("change", tick);
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>

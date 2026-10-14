@@ -1,0 +1,225 @@
+# atr config. `atr init` writes this file. Reload a running daemon with SIGHUP
+# (`atr providers` edits do that) or `atr service restart`.
+#
+# A provider block can be just name + kind. CLI path, flags, and reported_usage
+# are filled from the kind. Set any field to override.
+
+listen = "127.0.0.1:7420"
+state_db = "~/.local/share/atr/state.db"
+# Tasks land in {worktree_root}/{repo}/{task-key}.
+worktree_root = "~/atr-work"
+# One-repo shorthand. `atr serve` refuses to start if this is empty
+# and there is no [[repo]] block. See README Watching repos.
+repo_path = "~/src/my-repo"
+repo_default_branch = "main"
+worktree_branch_prefix = "atr"
+system_prompt_file = "~/.config/atr/system-prompt.md"
+cache_hit_warn_threshold = 0.70
+shell_command_timeout = "15m"
+task_timeout = "4h"
+kill_grace = "30s"
+dry_run = false
+task_key_prefix = "task"
+# IANA zone for status, usage, tasks, and the shadow report.
+# Empty or "local" uses the system local zone.
+display_timezone = ""
+# Planning/review provider. Empty = grok if enabled, else first enabled.
+driver = ""
+
+# Split large GitHub issues into linked child tasks. `auto` only splits when
+# the issue is long; set mode = "off" to disable.
+[planner]
+mode = "auto"
+auto_chars = 4000
+max_turns = 8
+max_subtasks = 8
+
+# After a worker finishes, the driver reviews the diff. Off by default.
+[review]
+enabled = false
+max_rounds = 2
+max_turns = 15
+
+# Optional Grok plugin Stop hook (only when a grok provider has plugin = true).
+[plugin]
+test_command = ""
+
+# MCP: `atr mcp` is stdio (no token). HTTP is POST /mcp on `listen`.
+# HTTP requires a bearer token from token_env or token_file. Never printed.
+[mcp]
+enabled = true
+token_env = "ATR_MCP_TOKEN"
+token_file = "~/.config/atr/mcp.token"
+
+# Prompt-cache behaviour. Worktree folders stay at a stable path so the
+# CLI system prompt (cwd/git) stays cacheable across tasks.
+[cache]
+worktree_pool = true
+# Headline hit% ignores runs below this prompt-token count.
+headline_min_input = 40000
+
+[update]
+# GitHub repo used by `atr upgrade`.
+github_repo = "rimusz/agent-task-runner"
+
+[handoff]
+max_bytes = 16384
+include_diff = true
+
+[github]
+enabled = false
+cli = "gh"
+repo = ""
+# Watch label. Default `for:atr`. Override here or via `/config set github.label`.
+# Existing configs keep their value; atr never rewrites it.
+# Unused for polling once [[repo]] entries exist (each has its own label).
+label = "for:atr"
+poll_interval = "60s"
+
+# Several repos (optional). `atr config migrate` or `atr repos add` writes these.
+# When present, they replace repo_path + [github].repo as the watch list.
+# [[repo]]
+# name = "my-repo"
+# path = "~/src/my-repo"
+# github = "owner/my-repo"
+# label = "for:atr"
+# enabled = true
+# branch_prefix = "atr"
+# base = "main"
+# system_prompt_file = ""
+# max_parallel = 0
+
+# Read-only mirror of labelled issues. Never pushes, comments, or notifies.
+[shadow]
+enabled = false
+repo = ""
+labels = []
+poll_interval = "60s"
+max_parallel = 1
+key_prefix = ""
+# Local clone for shadow worktrees. Empty = `{worktree_root}/_src/<repo-name>`.
+repo_path = ""
+gh_token_env = "ATR_SHADOW_GH_TOKEN"
+# record = store check results without a follow-up. retry = same-session fix turn.
+verify_mode = "record"
+
+# After a successful CLI run, execute these in the task worktree.
+# Empty `commands` optionally detects package.json scripts and Cargo.toml.
+[verify]
+enabled = false
+only_listed_repos = true
+timeout = "15m"
+max_retries = 1
+commands = []
+protect_tests = true
+protect_tests_skip_label = "atr:tests-ok"
+test_globs = ["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "tests/**"]
+# [[verify.repo]]
+# path = "~/src/my-repo"
+# enabled = true
+# commands = ["npm test"]
+
+[checklist]
+enabled = true
+max_bytes = 4096
+
+[telegram]
+enabled = false
+# Bot token is ATR_TELEGRAM_TOKEN in ~/.config/atr/shadow.env (mode 0600).
+# Never put the token here. Chat ids live only in allowed_chat_ids
+# (`atr init` / `atr telegram setup` write both).
+bot_token_env = "ATR_TELEGRAM_TOKEN"
+allowed_chat_ids = []
+token_file = ""
+chat_id_file = ""
+prefix = "atr:"
+notify_interval = "20s"
+daily_summary = ""
+
+# Free-text (not a /command) from an allowed chat. /help lists commands.
+[telegram.assistant]
+enabled = false
+# Empty = first available provider/model in order.
+provider = ""
+timeout = "10m"
+
+# Read-only web UI on the existing HTTP server (port from `listen`, default 7420).
+# Open http://<bind>:7420/ — no buttons, auto-refresh ~5s. Secrets are redacted.
+# Default bind is loopback. To view from a phone on Tailscale, set bind to that
+# IP (`tailscale ip -4`) and set listen = "<that-ip>:7420".
+[dashboard]
+enabled = true
+bind = "127.0.0.1"
+
+[log]
+# Rotated by size and count. `atr logs` reads this path.
+# macOS LaunchAgent: prefer ~/Library/Logs/atr/atr.log (atr init sets that).
+path = "~/.local/share/atr/atr.log"
+max_bytes = "5m"
+keep = 5
+
+[gc]
+# Local HH:MM in display_timezone. Empty disables automatic gc in serve.
+daily = ""
+worktree_retention = "14d"
+shadow_min_age = "7d"
+event_retention = "30d"
+run_retention = "30d"
+session_files = false
+
+# Tried top to bottom. Extra parallel work spills to the next provider.
+
+# Built-in OpenCode presets (no [[preset]] needed):
+#   kimi, qwen, glm, deepseek, minimax, mimo  → ask for the API key
+#   ollama, spark                             → local URL + model
+# `atr providers add kimi` writes the key to shadow.env (never config),
+# fills ~/.config/opencode/opencode.json (base URL + {env:VAR}), and a
+# minimal block: name / kind=opencode / preset / optional model.
+# Claude, Codex, Cursor, Grok stay on their own CLIs.
+# Custom names can still use a [[preset]] (kind + model only; no keys).
+
+[[provider]]
+name = "claude"
+kind = "claude"
+enabled = true
+# cli, args, permission_mode, reported_usage come from kind.
+# cache_window = "5m"            # Claude default; others default 60m
+# system_prompt_flag = "--append-system-prompt-file"
+# keep_alive = "24h"             # Ollama/OpenCode only
+
+[[provider]]
+name = "grok"
+kind = "grok"
+enabled = true
+# plugin = true  # grok agent --plugin-dir … stdio (never ~/.grok)
+
+[[provider]]
+name = "cursor"
+kind = "cursor"
+enabled = true
+
+[[provider]]
+name = "codex"
+kind = "codex"
+enabled = true
+# Optional model (CLI default if omitted). Override ChatGPT-plan routing if needed:
+# config_overrides = ["model_provider=\"openai\""]
+
+# OpenCode spark (atr providers add spark):
+# name = "spark"
+# kind = "opencode"
+# preset = "spark"
+# model = "spark/deepseek-v4-flash-0731"
+#
+# Older Spark-via-Codex path still works:
+# [[provider]]
+# name = "spark"
+# kind = "codex"
+# config_overrides = ["model_provider=\"openai\""]
+
+# Optional rolling windows. Skip *new* tasks when a window is at threshold.
+# [[provider.quota]]
+# window = "5h"
+# budget = 50
+# unit = "usd"
+# threshold = 0.85

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.atr.serve</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.config/atr/atr-serve.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__HOME__</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>LimitLoadToSessionType</key>
+    <array>
+        <string>Aqua</string>
+    </array>
+    <!-- When [log] path is set (recommended), atr rotates its own file.
+         Do not point these at ~/Library/Logs/atr.log or atr.err.log —
+         launchd does not rotate, so those files grow forever.
+         stdout is discarded; stderr is only crashes before init_tracing.
+         If [log] path is empty, set both to ~/Library/Logs/atr.log and
+         atr.err.log instead. -->
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/atr.boot.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>__ATR_BIN_DIR__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.local/bin:__HOME__/.cargo/bin</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>
