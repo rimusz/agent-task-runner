@@ -399,7 +399,7 @@ fn readme_headings_and_commands_match_help() {
         validate_invocation(tokens, &top, &global);
     }
 
-    const IGNORE_SLASH: &[&str] = &["/command", "/newbot", "/connect", "/review"];
+    const IGNORE_SLASH: &[&str] = &["/command", "/newbot", "/connect", "/review", "/mcp"];
     for cmd in extract_slash_commands(&readme) {
         if IGNORE_SLASH.contains(&cmd.as_str()) {
             continue;
