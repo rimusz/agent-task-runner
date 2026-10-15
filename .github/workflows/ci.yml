@@ -6,7 +6,71 @@ on:
   pull_request:
 
 jobs:
+  # Decide what changed. Docs-only changes skip the Rust jobs. A job skipped
+  # by `if:` reports "skipped", which counts as passing for required checks
+  # (unlike workflow-level paths-ignore, which leaves them pending).
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+      readme: ${{ steps.diff.outputs.readme }}
+      shell: ${{ steps.diff.outputs.shell }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+              || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            # New branch or unknown base: run everything.
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "readme=true" >> "$GITHUB_OUTPUT"
+            echo "shell=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$BASE" "$HEAD")
+          printf '%s\n' "$files"
+          # Same docs-only rule as contrib/release-decide.sh.
+          code=$(printf '%s\n' "$files" | grep -vE '(^docs/)|(\.md$)|(^LICENSE)|(^\.github/ISSUE_TEMPLATE/)|^$' || true)
+          echo "code=$([ -n "$code" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          # tests/readme.rs checks README.md and docs/*.md.
+          readme=$(printf '%s\n' "$files" | grep -E '^(README\.md|docs/)' || true)
+          echo "readme=$([ -n "$readme" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          shell=$(printf '%s\n' "$files" | grep -E '\.sh$' || true)
+          echo "shell=$([ -n "$shell" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  # Docs-only change touching README or docs/: run just the README test.
+  readme:
+    needs: changes
+    if: needs.changes.outputs.code != 'true' && needs.changes.outputs.readme == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: readme test
+        run: cargo test --test readme
+
+  shellcheck:
+    needs: changes
+    if: needs.changes.outputs.shell == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -s sh -S error install.sh contrib/*.sh
+
   linux:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -22,6 +86,8 @@ jobs:
         run: cargo test --all -- --test-threads=4
 
   macos:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
@@ -35,6 +101,8 @@ jobs:
         run: cargo test --all -- --test-threads=4
 
   deny:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -62,6 +130,8 @@ jobs:
         run: gitleaks detect --source . --verbose --redact --config .gitleaks.toml
 
   linux-cross:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

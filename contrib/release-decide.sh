@@ -35,7 +35,7 @@ is_docs_only() {
     fi
     files=$(git diff --name-only "$before" "$after")
     [ -n "$files" ] || return 1
-    leftover=$(printf '%s\n' "$files" | grep -vE '(^docs/)|(\.md$)|(^LICENSE)' || true)
+    leftover=$(printf '%s\n' "$files" | grep -vE '(^docs/)|(\.md$)|(^LICENSE)|(^\.github/ISSUE_TEMPLATE/)' || true)
     [ -z "$leftover" ]
 }
 
