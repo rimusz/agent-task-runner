@@ -799,7 +799,7 @@ token_file = "{token}"
         let t = s.db.get_task(&key).unwrap().unwrap();
         assert_eq!(t.source_kind, "mcp");
 
-        let status = tool_json(
+        let st = tool_json(
             rpc(
                 &url,
                 Some(&auth),
@@ -809,7 +809,7 @@ token_file = "{token}"
             )
             .unwrap(),
         );
-        assert_eq!(status["key"], key.as_str(), "{status}");
+        assert_eq!(st["key"], key.as_str(), "{st}");
 
         let cfg = rpc(
             &url,
