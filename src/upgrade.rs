@@ -1,7 +1,5 @@
 use crate::config::{load_config, Config};
-use crate::util::{
-    backup_dir, copy_file, current_bin, host_asset, host_target, parse_sha256_line, sha256_file,
-};
+use crate::util::{backup_dir, copy_file, current_bin, host_asset, parse_sha256_line, sha256_file};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::Read;
@@ -14,9 +12,8 @@ pub fn upgrade(version: Option<&str>, config_path: &Path) -> Result<String> {
         .map(|c| c.update.github_repo.clone())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "rimusz/agent-task-runner".into());
-    let target = host_target();
     let asset = host_asset();
-    if target == "unknown" || asset == "unknown" {
+    if asset == "unknown" {
         bail!("unsupported platform for atr upgrade");
     }
     let ver = match version {
@@ -25,26 +22,10 @@ pub fn upgrade(version: Option<&str>, config_path: &Path) -> Result<String> {
     };
     let tag = format!("v{ver}");
     let tmp = tempfile_dir()?;
-    // Friendly name first (atr-<ver>-linux-x86_64.tar.gz); fall back to the
-    // Rust-triple name used by releases published before the rename.
-    let mut fetched = None;
-    let mut last_err = None;
-    for plat in [asset, target] {
-        let name = format!("atr-{ver}-{plat}.tar.gz");
-        let url = format!("https://github.com/{repo}/releases/download/{tag}/{name}");
-        let tgz = tmp.join(&name);
-        match download(&url, &tgz) {
-            Ok(()) => {
-                fetched = Some((name, url, tgz));
-                break;
-            }
-            Err(e) => last_err = Some(e),
-        }
-    }
-    let (name, url, tgz) = match fetched {
-        Some(f) => f,
-        None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("download failed"))),
-    };
+    let name = format!("atr-{ver}-{asset}.tar.gz");
+    let url = format!("https://github.com/{repo}/releases/download/{tag}/{name}");
+    let tgz = tmp.join(&name);
+    download(&url, &tgz)?;
     let sha_url = format!("{url}.sha256");
     let sha_file = tmp.join(format!("{name}.sha256"));
     download(&sha_url, &sha_file)?;
