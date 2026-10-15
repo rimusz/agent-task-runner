@@ -3,7 +3,7 @@ use crate::config::{Config, TelegramConfig};
 use crate::providers::hit_ratio_from_sums;
 use anyhow::Result;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -13,10 +13,24 @@ use std::time::{Duration, Instant};
 const MAX_TEXT: usize = 3500;
 const COMMANDS: &str = "\
 atr Telegram
-Watch: /status /tasks /task <id> /usage [period]
-Work: /add <prompt> /cancel <id> /retry <id>
-Control: /pause /resume /providers /enable /disable /config /repos /shadow
-Plain text (not a /command) talks to the assistant; writes still need Confirm.";
+
+Watch
+• status — what's running
+• tasks / task <id> — queue
+• usage [period] — spend & cache
+
+Work
+• add <prompt> — queue a task
+• cancel / retry <id>
+
+Control
+• pause · resume · providers · repos
+• enable / disable · config · shadow
+  providers add|enable|disable|move|model
+  config get|set
+
+Prefix with / (e.g. /status).
+Plain text talks to the assistant; writes still need Confirm.";
 const ASSISTANT_PREFIX: &str = "tg";
 
 #[derive(Debug, Clone)]
@@ -1353,9 +1367,45 @@ fn format_status_body(v: &Value, tz: &str, paused: bool, repo: Option<&str>) -> 
 }
 
 fn json_nonempty_str(v: Option<&Value>) -> Option<&str> {
-    v.and_then(|x| x.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && *s != "-")
+    v.and_then(|x| x.as_str()).and_then(nonempty)
+}
+
+fn nonempty(s: &str) -> Option<&str> {
+    let t = s.trim();
+    if t.is_empty() || t == "-" {
+        None
+    } else {
+        Some(t)
+    }
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn join_dot(parts: &[&str]) -> String {
+    parts
+        .iter()
+        .copied()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn repo_bullet(name: &str, github: Option<&str>, label: Option<&str>, on: bool) -> String {
+    let gh = github.and_then(nonempty);
+    let label = label.and_then(nonempty);
+    let detail = match (gh, label) {
+        (Some(g), Some(l)) => format!(" ({g}, {l})"),
+        (Some(g), None) => format!(" ({g})"),
+        (None, Some(l)) => format!(" ({l})"),
+        (None, None) => String::new(),
+    };
+    format!("• {name}{detail} — {}\n", on_off(on))
 }
 
 fn format_status_repos(v: &Value, repo: Option<&str>) -> String {
@@ -1373,17 +1423,11 @@ fn format_status_repos(v: &Value, repo: Option<&str>) -> String {
         }
         let name = r.get("name").and_then(|x| x.as_str()).unwrap_or("-");
         let on = r.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
-        let gh = json_nonempty_str(r.get("github"));
-        let label = json_nonempty_str(r.get("label"));
-        let detail = match (gh, label) {
-            (Some(g), Some(l)) => format!(" ({g}, {l})"),
-            (Some(g), None) => format!(" ({g})"),
-            (None, Some(l)) => format!(" ({l})"),
-            (None, None) => String::new(),
-        };
-        out.push_str(&format!(
-            "• {name}{detail} — {}\n",
-            if on { "on" } else { "off" }
+        out.push_str(&repo_bullet(
+            name,
+            json_nonempty_str(r.get("github")),
+            json_nonempty_str(r.get("label")),
+            on,
         ));
     }
     out
@@ -1399,10 +1443,7 @@ fn format_status_providers(v: &Value) -> String {
         let on = p.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
         let inflight = p.get("inflight").and_then(|x| x.as_u64()).unwrap_or(0);
         let max = p.get("max_parallel").and_then(|x| x.as_u64()).unwrap_or(0);
-        let mut bits = vec![
-            if on { "on" } else { "off" }.to_string(),
-            format!("{inflight}/{max} busy"),
-        ];
+        let mut bits = vec![on_off(on).to_string(), format!("{inflight}/{max} busy")];
         if p.get("cooling").and_then(|x| x.as_bool()).unwrap_or(false) {
             bits.push("cooling".into());
         }
@@ -1526,24 +1567,29 @@ fn format_status_cache(cache: &Value) -> String {
 fn format_tasks(shared: &Shared, repo: Option<&str>) -> String {
     let cfg = shared.config.read().unwrap().clone();
     let tz = &cfg.display_timezone;
-    let mut out = format!("tasks ({})\n", tz.label);
+    let mut out = format!("Tasks · {}\n", tz.label);
+    let mut n = 0;
     for t in shared.db.list_tasks().unwrap_or_default() {
         if let Some(f) = repo {
             if !cfg.task_matches_repo(&t, f) {
                 continue;
             }
         }
-        out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\n",
-            t.key,
-            cfg.task_repo_name(&t),
-            t.status,
-            t.role,
-            t.provider.as_deref().unwrap_or("-"),
-            tz.format_str(&t.updated)
-        ));
+        n += 1;
+        out.push('\n');
+        out.push_str(&format!("• {} — {}\n", t.key, t.status));
+        let repo_name = cfg.task_repo_name(&t);
+        let bits = join_dot(&[
+            nonempty(&repo_name).unwrap_or(""),
+            nonempty(&t.role).unwrap_or(""),
+            t.provider.as_deref().and_then(nonempty).unwrap_or(""),
+        ]);
+        if !bits.is_empty() {
+            out.push_str(&format!("  {bits}\n"));
+        }
+        out.push_str(&format!("  {}\n", tz.format_str(&t.updated)));
     }
-    if out.lines().count() <= 1 {
+    if n == 0 {
         out.push_str("(none)\n");
     }
     sanitize(&out, &[])
@@ -1563,31 +1609,42 @@ fn format_task(shared: &Shared, key: &str) -> String {
         .list_runs(Some(key))
         .ok()
         .and_then(|r| r.into_iter().last());
+    let mut out = format!("{key} — {}\n", t.status);
     let repo = cfg.task_repo_name(&t);
-    let mut out =
-        format!(
-        "{key} repo={repo} status={} role={} parent={} title={} provider={} shadow={} updated={}\n",
-        t.status,
-        t.role,
-        t.parent_key.as_deref().unwrap_or("-"),
-        if t.title.is_empty() { "-" } else { t.title.as_str() },
-        t.provider.as_deref().unwrap_or("-"),
-        t.shadow,
-        tz.format_str(&t.updated)
-    );
+    let bits = join_dot(&[
+        nonempty(&repo).unwrap_or(""),
+        nonempty(&t.role).unwrap_or(""),
+        t.provider.as_deref().and_then(nonempty).unwrap_or(""),
+    ]);
+    if !bits.is_empty() {
+        out.push_str(&format!("{bits}\n"));
+    }
+    if let Some(title) = nonempty(&t.title) {
+        out.push_str(&format!("{title}\n"));
+    }
+    if let Some(parent) = t.parent_key.as_deref().and_then(nonempty) {
+        out.push_str(&format!("parent {parent}\n"));
+    }
+    if t.shadow {
+        out.push_str("shadow\n");
+    }
+    out.push_str(&format!("updated {}\n", tz.format_str(&t.updated)));
     if let Ok(kids) = shared.db.children_of(key) {
         if !kids.is_empty() {
-            out.push_str("children:\n");
+            out.push_str("\nChildren\n");
             for c in kids {
-                out.push_str(&format!("  {} {}\n", c.key, c.status));
+                out.push_str(&format!("• {} — {}\n", c.key, c.status));
             }
         }
     }
     if let Some(r) = last {
+        let ended = tz.format_opt(r.ended.as_deref());
         out.push_str(&format!(
-            "last run {} {}\n",
-            r.outcome.as_deref().unwrap_or("-"),
-            tz.format_opt(r.ended.as_deref())
+            "\nLast run {}\n",
+            join_dot(&[
+                r.outcome.as_deref().and_then(nonempty).unwrap_or("-"),
+                &ended,
+            ])
         ));
     }
     sanitize(&out, &[])
@@ -1599,35 +1656,189 @@ fn format_usage(shared: &Shared, spec: &str, repo: Option<&str>) -> String {
         Err(e) => return format!("usage: {e:#}"),
     };
     match crate::usage::report_filtered(shared, &period, repo) {
-        Ok(r) => sanitize(&crate::usage::format_compact(&r), &[]),
+        Ok(r) => sanitize(&format_usage_body(&r), &[]),
         Err(e) => format!("usage: {e:#}"),
     }
 }
 
+fn format_usage_body(report: &crate::usage::SavingsReport) -> String {
+    let mut out = format!(
+        "Usage · {}\n{} → {} · {}\n",
+        report.period, report.from, report.to, report.timezone
+    );
+    for r in &report.by_provider {
+        out.push_str(&format!("\n• {}\n  {}\n", r.provider, usage_row_lines(r)));
+        out.push_str(&format!("  {}\n", usage_saved_line(r)));
+    }
+    out.push_str(&format!(
+        "\nTotal\n{}\n{}\n",
+        usage_row_lines(&report.total),
+        usage_saved_line(&report.total)
+    ));
+    let min = report.headline_min_input;
+    out.push_str(&format!(
+        "\nCache\nheadline {} (≥ {min} tokens) · first-run {} · resume {}\nshort {} ({} runs)\n",
+        fmt_pct(report.headline.hit),
+        fmt_pct(report.first_run.hit),
+        fmt_pct(report.resume.hit),
+        fmt_pct(report.short.hit),
+        report.short.runs
+    ));
+    out
+}
+
+fn usage_row_lines(r: &crate::usage::SavingsRow) -> String {
+    let input = format!("in {}", r.input);
+    let cached = format!("cached {}", r.cache_read);
+    let write = format!("write {}", r.cache_write);
+    let output = format!("out {}", r.output);
+    join_dot(&[&input, &cached, &write, &output])
+}
+
+fn usage_saved_line(r: &crate::usage::SavingsRow) -> String {
+    let hit = format!("hit {}", fmt_pct(r.hit));
+    let saved = fmt_saved(r.saved_usd);
+    join_dot(&[&hit, &saved])
+}
+
+fn fmt_pct(h: Option<f64>) -> String {
+    h.map(|x| format!("{:.0}%", x * 100.0))
+        .unwrap_or_else(|| "-".into())
+}
+
+fn fmt_saved(v: Option<f64>) -> String {
+    v.map(|x| format!("saved ${x:.4}"))
+        .unwrap_or_else(|| "saved -".into())
+}
+
 fn format_repos(shared: &Shared) -> String {
     let cfg = shared.config.read().unwrap().clone();
-    sanitize(&crate::repos::list_text(&cfg), &[])
+    let repos = cfg.effective_repos();
+    let mut out = String::from("Repos\n");
+    if repos.is_empty() {
+        out.push_str("(none)\n");
+    } else {
+        for r in &repos {
+            out.push_str(&repo_bullet(
+                &r.name,
+                nonempty(&r.github),
+                nonempty(&r.label),
+                r.enabled,
+            ));
+        }
+    }
+    sanitize(&out, &[])
 }
 
 fn format_shadow(shared: &Shared) -> String {
     let cfg = shared.config.read().unwrap().clone();
+    let tz = &cfg.display_timezone;
     let names: Vec<&str> = cfg.providers.iter().map(|p| p.name.as_str()).collect();
-    match crate::shadow::report_text_tz_usage(&shared.db, None, &cfg.display_timezone, &names) {
-        Ok(s) => sanitize(&s, &[]),
-        Err(e) => format!("shadow report: {e:#}"),
+    let rows = match shared.db.list_shadow_results(None) {
+        Ok(r) => r,
+        Err(e) => return format!("shadow report: {e:#}"),
+    };
+    let mut out = format!("Shadow · {}\n", tz.label);
+    if !names.is_empty() {
+        out.push_str("\nUsage\n");
+        let now = crate::clock::Clock::system().now();
+        for name in &names {
+            let raw = crate::reported::format_provider_usage(
+                &crate::reported::provider_usage_view(&shared.db, name),
+                tz,
+                now,
+            );
+            let line = human_usage_line(&raw).unwrap_or_else(|| "not reported".into());
+            out.push_str(&format!("• {name} — {line}\n"));
+        }
     }
+    let mut latest = BTreeMap::new();
+    for r in &rows {
+        latest.insert(r.task_key.clone(), r.clone());
+    }
+    let latest: Vec<_> = latest.into_values().collect();
+    if latest.is_empty() {
+        out.push_str("\n(no runs)\n");
+        return sanitize(&out, &[]);
+    }
+    out.push_str("\nRuns\n");
+    let mut tot_ms = 0i64;
+    let mut tot_in = 0i64;
+    let mut tot_out = 0i64;
+    let mut tot_cr = 0i64;
+    let mut tot_cw = 0i64;
+    let mut tot_cost = 0.0;
+    for r in &rows {
+        tot_ms += r.duration_ms;
+        tot_in += r.input;
+        tot_out += r.output;
+        tot_cr += r.cache_read;
+        tot_cw += r.cache_write;
+        tot_cost += r.cost_usd;
+    }
+    for r in &latest {
+        let outcome = nonempty(&r.outcome).unwrap_or("-");
+        out.push_str(&format!("• {} · {} — {outcome}\n", r.task_key, r.provider));
+        let dur =
+            crate::duration::format_duration(Duration::from_millis(r.duration_ms.max(0) as u64));
+        out.push_str(&format!(
+            "  {dur} · in {} · out {} · cache {}\n",
+            r.input, r.output, r.cache_read
+        ));
+        let hit = r
+            .cache_hit
+            .map(|h| format!("hit {:.0}%", h * 100.0))
+            .unwrap_or_else(|| "hit -".into());
+        out.push_str(&format!("  {hit} · ${:.4}\n", r.cost_usd));
+        if let Some(d) = nonempty(&r.diffstat) {
+            out.push_str(&format!("  {d}\n"));
+        }
+        if let Some(v) = nonempty(&r.verify) {
+            out.push_str(&format!("  verify {v}\n"));
+        }
+        if let Some(t) = nonempty(&r.tests) {
+            let first = t.lines().next().unwrap_or(t);
+            out.push_str(&format!("  tests {first}\n"));
+        }
+    }
+    let tot_hit = hit_ratio_from_sums("claude", tot_in, tot_cr, tot_cw)
+        .map(|h| format!("hit {:.0}%", h * 100.0))
+        .unwrap_or_else(|| "hit -".into());
+    let tot_dur = crate::duration::format_duration(Duration::from_millis(tot_ms.max(0) as u64));
+    out.push_str(&format!(
+        "\nTotals · {} runs\n{tot_dur} · in {tot_in} · out {tot_out} · cache {tot_cr}\n{tot_hit} · ${tot_cost:.4}\n",
+        rows.len()
+    ));
+    for r in &latest {
+        if shared
+            .db
+            .session_prefix_changed(&r.task_key)
+            .unwrap_or(false)
+        {
+            out.push_str(&format!("cache prefix changed · {}\n", r.task_key));
+        }
+    }
+    sanitize(&out, &[])
 }
 
 fn format_providers(shared: &Shared) -> String {
     let cfg = shared.config.read().unwrap().clone();
-    let mut out = String::from("providers\n");
+    let mut out = String::from("Providers\n");
+    if cfg.providers.is_empty() {
+        out.push_str("(none)\n");
+        return sanitize(&out, &[]);
+    }
     for p in &cfg.providers {
         let over = shared.db.enabled_override(&p.name).ok().flatten();
         let en = over.unwrap_or(p.enabled);
-        out.push_str(&format!(
-            "{} kind={} enabled={} (config={})\n",
-            p.name, p.kind, en, p.enabled
-        ));
+        let mut line = format!("• {} · {} · {}", p.name, p.kind, on_off(en));
+        if let Some(o) = over {
+            if o != p.enabled {
+                line.push_str(&format!(" (config {})", on_off(p.enabled)));
+            }
+        }
+        out.push_str(&line);
+        out.push('\n');
     }
     sanitize(&out, &[])
 }
@@ -1776,20 +1987,165 @@ cli = "/bin/true"
     fn repos_lists_watch_targets() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
+        let repo = shared.config.read().unwrap().effective_repos()[0].clone();
+        let expected = repo_bullet(
+            &repo.name,
+            nonempty(&repo.github),
+            nonempty(&repo.label),
+            repo.enabled,
+        );
         let upd = json!({"message":{"chat":{"id":42},"text":"/repos"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert_eq!(out.len(), 1);
+        assert!(out[0].text.starts_with("Repos\n"), "{}", out[0].text);
+        assert!(out[0].text.contains(&expected), "{}", out[0].text);
         assert!(
-            out[0].text.contains("name")
-                || out[0].text.contains("shorthand")
-                || !out[0].text.is_empty(),
+            out[0].text.contains(" — on") || out[0].text.contains(" — off"),
             "{}",
             out[0].text
         );
+        assert!(!out[0].text.contains("enabled"), "{}", out[0].text);
+        assert!(!out[0].text.contains('\t'), "{}", out[0].text);
         assert!(
             is_driveable_command("/repos"),
             "/repos must be assistant-driveable"
         );
+    }
+
+    #[test]
+    fn providers_list_is_readable_on_phone() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let upd = json!({"message":{"chat":{"id":42},"text":"/providers"}});
+        let out = handle_update(&shared, &upd).unwrap();
+        assert!(out[0].text.starts_with("Providers\n"), "{}", out[0].text);
+        assert!(
+            out[0].text.contains("• claude · claude · on"),
+            "{}",
+            out[0].text
+        );
+        assert!(!out[0].text.contains("kind="), "{}", out[0].text);
+        assert!(!out[0].text.contains("enabled="), "{}", out[0].text);
+        assert!(!out[0].text.contains("en="), "{}", out[0].text);
+
+        shared.db.set_enabled_override("claude", false).unwrap();
+        let out = handle_update(&shared, &upd).unwrap();
+        assert!(
+            out[0].text.contains("• claude · claude · off (config on)"),
+            "{}",
+            out[0].text
+        );
+    }
+
+    #[test]
+    fn tasks_and_task_are_readable_on_phone() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let empty = json!({"message":{"chat":{"id":42},"text":"/tasks"}});
+        let out = handle_update(&shared, &empty).unwrap();
+        assert!(out[0].text.starts_with("Tasks · UTC"), "{}", out[0].text);
+        assert!(out[0].text.contains("(none)"), "{}", out[0].text);
+
+        shared.db.upsert_task("acme-1", "/repo", None).unwrap();
+        shared.db.set_status("acme-1", "waiting").unwrap();
+        shared
+            .db
+            .set_provider_session("acme-1", Some("claude"), None)
+            .unwrap();
+        shared.db.set_task_title("acme-1", "fix login").unwrap();
+        shared.db.upsert_task("acme-1-a", "/repo", None).unwrap();
+        shared.db.set_parent_key("acme-1-a", "acme-1").unwrap();
+        shared.db.set_status("acme-1-a", "queued").unwrap();
+        let run = shared.db.start_run("acme-1", "claude", "m").unwrap();
+        shared.db.finish_run(run, "success", Some(0)).unwrap();
+
+        let list = json!({"message":{"chat":{"id":42},"text":"/tasks"}});
+        let out = handle_update(&shared, &list).unwrap();
+        assert!(
+            out[0].text.contains("• acme-1 — waiting"),
+            "{}",
+            out[0].text
+        );
+        assert!(out[0].text.contains("claude"), "{}", out[0].text);
+        assert!(out[0].text.contains("worker"), "{}", out[0].text);
+        assert!(!out[0].text.contains('\t'), "{}", out[0].text);
+        assert!(!out[0].text.contains("repo="), "{}", out[0].text);
+
+        let missing = json!({"message":{"chat":{"id":42},"text":"/task"}});
+        let out = handle_update(&shared, &missing).unwrap();
+        assert_eq!(out[0].text, "usage: /task <key>");
+
+        let one = json!({"message":{"chat":{"id":42},"text":"/task acme-1"}});
+        let out = handle_update(&shared, &one).unwrap();
+        assert!(
+            out[0].text.starts_with("acme-1 — waiting"),
+            "{}",
+            out[0].text
+        );
+        assert!(out[0].text.contains("fix login"), "{}", out[0].text);
+        assert!(out[0].text.contains("Children"), "{}", out[0].text);
+        assert!(
+            out[0].text.contains("• acme-1-a — queued"),
+            "{}",
+            out[0].text
+        );
+        assert!(out[0].text.contains("Last run success"), "{}", out[0].text);
+        assert!(!out[0].text.contains("status="), "{}", out[0].text);
+        assert!(!out[0].text.contains("parent="), "{}", out[0].text);
+        assert!(!out[0].text.contains("shadow="), "{}", out[0].text);
+    }
+
+    #[test]
+    fn shadow_report_is_readable_on_phone() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let empty = json!({"message":{"chat":{"id":42},"text":"/shadow"}});
+        let out = handle_update(&shared, &empty).unwrap();
+        assert!(out[0].text.starts_with("Shadow · UTC"), "{}", out[0].text);
+        assert!(
+            out[0].text.contains("• claude — not reported"),
+            "{}",
+            out[0].text
+        );
+        assert!(out[0].text.contains("(no runs)"), "{}", out[0].text);
+        assert!(!out[0].text.contains("timezone "), "{}", out[0].text);
+
+        shared
+            .db
+            .insert_shadow_result(&crate::db::ShadowResult {
+                task_key: "acme-s".into(),
+                run_id: None,
+                provider: "claude".into(),
+                outcome: "success".into(),
+                duration_ms: 1200,
+                input: 100,
+                output: 50,
+                cache_read: 800,
+                cache_write: 20,
+                cost_usd: 0.0123,
+                cache_hit: Some(0.89),
+                tests: "ok\nextra".into(),
+                diff: String::new(),
+                diffstat: "2 files".into(),
+                verify: "pass".into(),
+                recorded: crate::db::now_rfc3339(),
+            })
+            .unwrap();
+        let out = handle_update(&shared, &empty).unwrap();
+        assert!(
+            out[0].text.contains("• acme-s · claude — success"),
+            "{}",
+            out[0].text
+        );
+        assert!(out[0].text.contains("in 100"), "{}", out[0].text);
+        assert!(out[0].text.contains("cache 800"), "{}", out[0].text);
+        assert!(out[0].text.contains("hit 89%"), "{}", out[0].text);
+        assert!(out[0].text.contains("$0.0123"), "{}", out[0].text);
+        assert!(out[0].text.contains("2 files"), "{}", out[0].text);
+        assert!(out[0].text.contains("verify pass"), "{}", out[0].text);
+        assert!(out[0].text.contains("tests ok"), "{}", out[0].text);
+        assert!(out[0].text.contains("Totals · 1 runs"), "{}", out[0].text);
+        assert!(!out[0].text.contains('\t'), "{}", out[0].text);
     }
 
     #[test]
@@ -1989,9 +2345,10 @@ cli = "/bin/true"
         let shared = harness_shared();
         let upd = json!({"message":{"chat":{"id":42},"text":"/usage today"}});
         let out = handle_update(&shared, &upd).unwrap();
-        assert!(out[0].text.contains("usage"));
+        assert!(out[0].text.contains("Usage"), "{}", out[0].text);
         assert!(out[0].text.contains("UTC"));
         assert!(out[0].text.contains("today"), "{}", out[0].text);
+        assert!(!out[0].text.contains("in="), "{}", out[0].text);
     }
 
     #[test]
@@ -2018,12 +2375,15 @@ cli = "/bin/true"
             .unwrap();
         let upd = json!({"message":{"chat":{"id":42},"text":"/usage month"}});
         let out = handle_update(&shared, &upd).unwrap();
-        assert!(out[0].text.contains("usage month"), "{}", out[0].text);
+        assert!(out[0].text.contains("Usage · month"), "{}", out[0].text);
         assert!(out[0].text.contains("UTC"), "{}", out[0].text);
-        assert!(out[0].text.contains("claude"), "{}", out[0].text);
-        assert!(out[0].text.contains("cached=800"), "{}", out[0].text);
+        assert!(out[0].text.contains("• claude"), "{}", out[0].text);
+        assert!(out[0].text.contains("cached 800"), "{}", out[0].text);
+        assert!(!out[0].text.contains("cached="), "{}", out[0].text);
         assert!(!out[0].text.contains("saved=800"), "{}", out[0].text);
-        assert!(out[0].text.contains("total"), "{}", out[0].text);
+        assert!(out[0].text.contains("Total"), "{}", out[0].text);
+        assert!(out[0].text.contains("Cache"), "{}", out[0].text);
+        assert!(out[0].text.contains("saved $"), "{}", out[0].text);
     }
 
     fn confirm_and_apply(shared: &Shared, text: &str) -> String {
@@ -2149,15 +2509,31 @@ cli = "/bin/true"
         let shared = harness_shared();
         let upd = json!({"message":{"chat":{"id":42},"text":"/help"}});
         let out = handle_update(&shared, &upd).unwrap();
-        assert!(out[0].text.contains("atr Telegram"), "{}", out[0].text);
-        assert!(out[0].text.contains("Watch:"), "{}", out[0].text);
-        assert!(out[0].text.contains("Work:"), "{}", out[0].text);
-        assert!(out[0].text.contains("Control:"), "{}", out[0].text);
-        assert!(out[0].text.contains("/providers"), "{}", out[0].text);
-        assert!(out[0].text.contains("/config"), "{}", out[0].text);
-        assert!(out[0].text.contains("/add"), "{}", out[0].text);
+        assert_eq!(out[0].text, COMMANDS);
+        assert!(out[0].text.contains("Watch\n"), "{}", out[0].text);
+        assert!(out[0].text.contains("Work\n"), "{}", out[0].text);
+        assert!(out[0].text.contains("Control\n"), "{}", out[0].text);
+        assert!(
+            out[0]
+                .text
+                .contains("providers add|enable|disable|move|model"),
+            "{}",
+            out[0].text
+        );
+        assert!(out[0].text.contains("config get|set"), "{}", out[0].text);
         assert!(out[0].text.contains("Plain text"), "{}", out[0].text);
         assert!(!out[0].text.contains("commands:"), "{}", out[0].text);
+        let slashed: Vec<&str> = out[0]
+            .text
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '/'))
+            .filter(|t| t.starts_with('/') && t.len() > 1)
+            .collect();
+        assert_eq!(slashed, ["/status"], "{}", out[0].text);
+        assert!(
+            out[0].text.lines().filter(|l| !l.trim().is_empty()).count() <= 16,
+            "help should stay short: {}",
+            out[0].text.lines().count()
+        );
     }
 
     #[test]
@@ -2181,7 +2557,7 @@ cli = "/bin/true"
         let upd = json!({"message":{"chat":{"id":42},"text":"how do I add kimi?"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert!(out[0].text.contains("atr Telegram"), "{}", out[0].text);
-        assert!(out[0].text.contains("/status"), "{}", out[0].text);
+        assert_eq!(out[0].text, COMMANDS);
         assert!(shared.db.get_task("tg42").unwrap().is_none());
     }
 
