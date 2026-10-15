@@ -45,7 +45,7 @@ gh issue edit 12 --add-label for:atr
 
 ### 4. Backend for AI agents (MCP)
 
-Let Claude Code, Codex, Cursor, Grok Build, Grok Bot or OpenCode hand work to atr and get the answer back. On the same machine they run `atr mcp`; from another machine they connect over Tailscale with a token. They add work with `add_task`, wait with `wait_task`, and fetch the answer, diff or PR link with `get_result`.
+Let Claude Code, Codex, Cursor, Grok Build, Grok Bot or OpenCode hand work to atr and get the answer back. Grok Bot can import the [atr Operator](https://x.ai/bot/oDG33vy41WVZKy-HFKVk0) template to queue work and watch atr. On the same machine they run `atr mcp`; from another machine they connect over Tailscale with a token. They add work with `add_task`, wait with `wait_task`, and fetch the answer, diff or PR link with `get_result`.
 
 ```json
 {
