@@ -11,7 +11,12 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const MAX_TEXT: usize = 3500;
-const COMMANDS: &str = "commands: /help /status /tasks /task /add /cancel /retry /usage /shadow /pause /resume /providers /enable /disable /config /repos";
+const COMMANDS: &str = "\
+atr Telegram
+Watch: /status /tasks /task <id> /usage [period]
+Work: /add <prompt> /cancel <id> /retry <id>
+Control: /pause /resume /providers /enable /disable /config /repos /shadow
+Plain text (not a /command) talks to the assistant; writes still need Confirm.";
 const ASSISTANT_PREFIX: &str = "tg";
 
 #[derive(Debug, Clone)]
@@ -1320,49 +1325,202 @@ fn format_status(shared: &Shared, repo: Option<&str>) -> String {
     let v = shared.status_json_filtered(repo);
     let tz = shared.config.read().unwrap().display_timezone.label.clone();
     let paused = shared.intake_paused.load(Ordering::Relaxed);
+    sanitize(&format_status_body(&v, &tz, paused, repo), &[])
+}
+
+/// Phone-readable `/status` body. Facts come from `status_json`; this only
+/// changes presentation (no `en=` / `in=` jargon, human dates, usage indented).
+fn format_status_body(v: &Value, tz: &str, paused: bool, repo: Option<&str>) -> String {
     let mut out = format!(
-        "status ({tz}) intake={}\n",
+        "atr · {tz} · intake {}\n",
         if paused { "paused" } else { "on" }
     );
-    if let Some(repos) = v.get("repos").and_then(|p| p.as_array()) {
-        for r in repos {
-            if let Some(f) = repo {
-                if r.get("name").and_then(|x| x.as_str()) != Some(f)
-                    && r.get("github").and_then(|x| x.as_str()) != Some(f)
-                {
-                    continue;
-                }
-            }
-            out.push_str(&format!(
-                "repo {} en={} {} {}\n",
-                r.get("name").and_then(|x| x.as_str()).unwrap_or("-"),
-                r.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false),
-                r.get("github").and_then(|x| x.as_str()).unwrap_or("-"),
-                r.get("label").and_then(|x| x.as_str()).unwrap_or("-"),
-            ));
-        }
+    let repos = format_status_repos(v, repo);
+    if !repos.is_empty() {
+        out.push_str("\nRepos\n");
+        out.push_str(&repos);
     }
-    if let Some(ps) = v.get("providers").and_then(|p| p.as_array()) {
-        for p in ps {
-            out.push_str(&format!(
-                "{} en={} in={}/{} cool={} skip={} reset={} {}\n",
-                p.get("name").and_then(|x| x.as_str()).unwrap_or("-"),
-                p.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false),
-                p.get("inflight").and_then(|x| x.as_u64()).unwrap_or(0),
-                p.get("max_parallel").and_then(|x| x.as_u64()).unwrap_or(0),
-                p.get("cooling").and_then(|x| x.as_bool()).unwrap_or(false),
-                p.get("skip_new").and_then(|x| x.as_bool()).unwrap_or(false),
-                p.get("quota_reset").and_then(|x| x.as_str()).unwrap_or("-"),
-                p.get("usage")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("usage: not reported"),
-            ));
-        }
+    let providers = format_status_providers(v);
+    if !providers.is_empty() {
+        out.push_str("\nProviders\n");
+        out.push_str(&providers);
     }
     if let Some(c) = v.get("cache") {
-        out.push_str(&crate::usage::format_status_cache_line(c));
+        out.push_str("\nCache\n");
+        out.push_str(&format_status_cache(c));
     }
-    sanitize(&out, &[])
+    out
+}
+
+fn json_nonempty_str(v: Option<&Value>) -> Option<&str> {
+    v.and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "-")
+}
+
+fn format_status_repos(v: &Value, repo: Option<&str>) -> String {
+    let mut out = String::new();
+    let Some(repos) = v.get("repos").and_then(|p| p.as_array()) else {
+        return out;
+    };
+    for r in repos {
+        if let Some(f) = repo {
+            if r.get("name").and_then(|x| x.as_str()) != Some(f)
+                && r.get("github").and_then(|x| x.as_str()) != Some(f)
+            {
+                continue;
+            }
+        }
+        let name = r.get("name").and_then(|x| x.as_str()).unwrap_or("-");
+        let on = r.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+        let gh = json_nonempty_str(r.get("github"));
+        let label = json_nonempty_str(r.get("label"));
+        let detail = match (gh, label) {
+            (Some(g), Some(l)) => format!(" ({g}, {l})"),
+            (Some(g), None) => format!(" ({g})"),
+            (None, Some(l)) => format!(" ({l})"),
+            (None, None) => String::new(),
+        };
+        out.push_str(&format!(
+            "• {name}{detail} — {}\n",
+            if on { "on" } else { "off" }
+        ));
+    }
+    out
+}
+
+fn format_status_providers(v: &Value) -> String {
+    let mut out = String::new();
+    let Some(ps) = v.get("providers").and_then(|p| p.as_array()) else {
+        return out;
+    };
+    for p in ps {
+        let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("-");
+        let on = p.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+        let inflight = p.get("inflight").and_then(|x| x.as_u64()).unwrap_or(0);
+        let max = p.get("max_parallel").and_then(|x| x.as_u64()).unwrap_or(0);
+        let mut bits = vec![
+            if on { "on" } else { "off" }.to_string(),
+            format!("{inflight}/{max} busy"),
+        ];
+        if p.get("cooling").and_then(|x| x.as_bool()).unwrap_or(false) {
+            bits.push("cooling".into());
+        }
+        if p.get("skip_new").and_then(|x| x.as_bool()).unwrap_or(false) {
+            bits.push("skipping new".into());
+        }
+        if p.get("degraded").and_then(|x| x.as_bool()).unwrap_or(false) {
+            bits.push("degraded".into());
+        }
+        if let Some(reset) = json_nonempty_str(p.get("quota_reset")).and_then(human_reset_date) {
+            bits.push(format!("resets {reset}"));
+        }
+        let usage = p.get("usage").and_then(|x| x.as_str()).unwrap_or("");
+        match human_usage_line(usage) {
+            None => {
+                bits.push("usage not reported".into());
+                out.push_str(&format!("• {name} — {}\n", bits.join(" · ")));
+            }
+            Some(line) => {
+                out.push_str(&format!("• {name} — {}\n  {line}\n", bits.join(" · ")));
+            }
+        }
+    }
+    out
+}
+
+/// Compact day+month from display-timezone stamps (`2026-10-15 07:00 Zone`)
+/// or leftover ISO timestamps. None when missing.
+fn human_reset_date(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() || s == "-" {
+        return None;
+    }
+    if let Some(date) = s.split_whitespace().next() {
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+            return Some(day_month(&d.format("%d %b").to_string()));
+        }
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(day_month(&dt.format("%d %b").to_string()));
+    }
+    if s.contains('T') && s.len() > 16 {
+        return Some(s.chars().take(10).collect());
+    }
+    Some(s.to_string())
+}
+
+fn day_month(padded: &str) -> String {
+    padded.trim_start_matches('0').to_string()
+}
+
+/// Shared `format_provider_usage` text, compacted for a phone. None means
+/// "not reported" (shown on the provider line, not indented).
+fn human_usage_line(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() || s == "-" {
+        return None;
+    }
+    let s = s.strip_prefix("usage:").map(str::trim).unwrap_or(s);
+    if s.eq_ignore_ascii_case("not reported") {
+        return None;
+    }
+    let parts: Vec<String> = s
+        .split(';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(humanize_usage_part)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+fn humanize_usage_part(part: &str) -> String {
+    let mut s = part.to_string();
+    if let Some(i) = s.find(", resets ") {
+        s.truncate(i);
+    }
+    s = s.replace(", window reset", "");
+    s = s.replace("extra credits $", "extra $");
+    s = s.replace(" used", "");
+    if let Some(rest) = s.strip_prefix("weekly") {
+        s = format!("week{rest}");
+    }
+    s = drop_whole_percent_decimals(&s);
+    s.trim().to_string()
+}
+
+fn drop_whole_percent_decimals(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(idx) = rest.find(".0%") {
+        out.push_str(&rest[..idx]);
+        out.push('%');
+        rest = &rest[idx + 3..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn format_status_cache(cache: &Value) -> String {
+    let pct = |k: &str| {
+        cache
+            .get(k)
+            .and_then(|v| v.as_f64())
+            .map(|x| format!("{:.0}%", x * 100.0))
+            .unwrap_or_else(|| "-".into())
+    };
+    format!(
+        "headline {} · first-run {} · resume {} · short {}\n",
+        pct("headline_hit"),
+        pct("first_run_hit"),
+        pct("resume_hit"),
+        pct("short_hit"),
+    )
 }
 
 fn format_tasks(shared: &Shared, repo: Option<&str>) -> String {
@@ -1641,13 +1799,121 @@ cli = "/bin/true"
         let upd = json!({"message":{"chat":{"id":42},"text":"/status"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert_eq!(out.len(), 1);
-        assert!(out[0].text.contains("status"));
+        assert!(out[0].text.contains("atr ·"), "{}", out[0].text);
+        assert!(out[0].text.contains("intake on"), "{}", out[0].text);
         assert!(
-            out[0].text.contains("usage: not reported"),
+            out[0].text.contains("usage not reported"),
             "{}",
             out[0].text
         );
+        assert!(!out[0].text.contains("en="), "{}", out[0].text);
         assert!(!out[0].text.contains("tok-secret"));
+    }
+
+    #[test]
+    fn format_status_is_readable_on_phone() {
+        let v = json!({
+            "repos": [
+                {"name": "scratch", "enabled": true, "github": "", "label": ""},
+                {
+                    "name": "nixer",
+                    "enabled": true,
+                    "github": "TaskrApps/nixer-app",
+                    "label": "for:annie"
+                },
+            ],
+            "providers": [
+                {
+                    "name": "claude",
+                    "enabled": true,
+                    "inflight": 0,
+                    "max_parallel": 2,
+                    "cooling": false,
+                    "skip_new": false,
+                    "quota_reset": "2026-10-15 07:00 Europe/Vilnius",
+                    "usage": "session 1.0% used; weekly 3.0% used"
+                },
+                {
+                    "name": "grok",
+                    "enabled": true,
+                    "inflight": 0,
+                    "max_parallel": 2,
+                    "cooling": false,
+                    "skip_new": false,
+                    "quota_reset": "2026-10-16 00:00 Europe/Vilnius",
+                    "usage": "weekly 0.0% used; extra credits $140.32"
+                },
+                {
+                    "name": "cursor",
+                    "enabled": true,
+                    "inflight": 0,
+                    "max_parallel": 2,
+                    "cooling": false,
+                    "skip_new": false,
+                    "quota_reset": "-",
+                    "usage": "usage: not reported"
+                },
+                {
+                    "name": "kimi",
+                    "enabled": false,
+                    "inflight": 1,
+                    "max_parallel": 2,
+                    "cooling": true,
+                    "skip_new": true,
+                    "quota_reset": "2026-10-15T12:34:56Z",
+                    "usage": "weekly 1.0% used, resets Oct 16 07:36 UTC; extra credits $1.00"
+                }
+            ],
+            "cache": {
+                "headline_hit": 0.83,
+                "first_run_hit": 0.85,
+                "resume_hit": 0.60,
+                "short_hit": 0.47
+            }
+        });
+        let text = format_status_body(&v, "Europe/Vilnius", false, None);
+        assert!(
+            text.starts_with("atr · Europe/Vilnius · intake on"),
+            "{text}"
+        );
+        assert!(text.contains("• scratch — on"), "{text}");
+        assert!(
+            text.contains("• nixer (TaskrApps/nixer-app, for:annie) — on"),
+            "{text}"
+        );
+        assert!(
+            text.contains("• claude — on · 0/2 busy · resets 15 Oct"),
+            "{text}"
+        );
+        assert!(text.contains("  session 1% · week 3%"), "{text}");
+        assert!(
+            text.contains("• grok — on · 0/2 busy · resets 16 Oct"),
+            "{text}"
+        );
+        assert!(text.contains("  week 0% · extra $140.32"), "{text}");
+        assert!(
+            text.contains("• cursor — on · 0/2 busy · usage not reported"),
+            "{text}"
+        );
+        assert!(
+            text.contains("• kimi — off · 1/2 busy · cooling · skipping new · resets 15 Oct"),
+            "{text}"
+        );
+        assert!(text.contains("  week 1% · extra $1.00"), "{text}");
+        assert!(
+            text.contains("headline 83% · first-run 85% · resume 60% · short 47%"),
+            "{text}"
+        );
+        assert!(!text.contains("en="), "{text}");
+        assert!(!text.contains("in="), "{text}");
+        assert!(!text.contains("cool="), "{text}");
+        assert!(!text.contains("skip="), "{text}");
+        assert!(!text.contains("usage:"), "{text}");
+        assert!(!text.contains("2026-10-15T"), "{text}");
+        assert!(text.len() < MAX_TEXT, "{}", text.len());
+        let claude = text.lines().find(|l| l.contains("claude")).unwrap();
+        assert!(!claude.contains("cooling"), "{claude}");
+        assert!(!claude.contains("skipping"), "{claude}");
     }
 
     #[test]
@@ -1883,10 +2149,15 @@ cli = "/bin/true"
         let shared = harness_shared();
         let upd = json!({"message":{"chat":{"id":42},"text":"/help"}});
         let out = handle_update(&shared, &upd).unwrap();
-        assert!(out[0].text.contains("/help"), "{}", out[0].text);
+        assert!(out[0].text.contains("atr Telegram"), "{}", out[0].text);
+        assert!(out[0].text.contains("Watch:"), "{}", out[0].text);
+        assert!(out[0].text.contains("Work:"), "{}", out[0].text);
+        assert!(out[0].text.contains("Control:"), "{}", out[0].text);
         assert!(out[0].text.contains("/providers"), "{}", out[0].text);
         assert!(out[0].text.contains("/config"), "{}", out[0].text);
         assert!(out[0].text.contains("/add"), "{}", out[0].text);
+        assert!(out[0].text.contains("Plain text"), "{}", out[0].text);
+        assert!(!out[0].text.contains("commands:"), "{}", out[0].text);
     }
 
     #[test]
@@ -1909,7 +2180,8 @@ cli = "/bin/true"
         let shared = harness_shared();
         let upd = json!({"message":{"chat":{"id":42},"text":"how do I add kimi?"}});
         let out = handle_update(&shared, &upd).unwrap();
-        assert!(out[0].text.contains("commands:"), "{}", out[0].text);
+        assert!(out[0].text.contains("atr Telegram"), "{}", out[0].text);
+        assert!(out[0].text.contains("/status"), "{}", out[0].text);
         assert!(shared.db.get_task("tg42").unwrap().is_none());
     }
 
