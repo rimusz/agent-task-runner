@@ -2297,4 +2297,36 @@ cli = "/bin/true"
             t.result_text
         );
     }
+    #[test]
+    fn provider_hint_wins_over_config_order() {
+        // Regression: `atr add --provider grok` must go to grok even though
+        // claude is first in the order and idle.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = two_provider_cfg(dir.path(), 10_000.0);
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        db.upsert_task("hint-1", "/repo", None).unwrap();
+        db.set_provider_hint("hint-1", "grok").unwrap();
+        let clock = crate::clock::Clock::system();
+        let inflight = HashMap::new();
+        let t = db.get_task("hint-1").unwrap().unwrap();
+        let picked = pick_provider(&cfg, &db, &inflight, &t, &clock)
+            .unwrap()
+            .expect("grok");
+        assert_eq!(picked.name, "grok");
+        // Already tried: falls back to the normal order.
+        db.set_tried("hint-1", Some("grok")).unwrap();
+        let t = db.get_task("hint-1").unwrap().unwrap();
+        let picked = pick_provider(&cfg, &db, &inflight, &t, &clock)
+            .unwrap()
+            .expect("claude");
+        assert_eq!(picked.name, "claude");
+        // Unknown hint is ignored rather than stalling the task.
+        db.upsert_task("hint-2", "/repo", None).unwrap();
+        db.set_provider_hint("hint-2", "nope").unwrap();
+        let t = db.get_task("hint-2").unwrap().unwrap();
+        let picked = pick_provider(&cfg, &db, &inflight, &t, &clock)
+            .unwrap()
+            .expect("claude");
+        assert_eq!(picked.name, "claude");
+    }
 }

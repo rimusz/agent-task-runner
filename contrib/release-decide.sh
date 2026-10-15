@@ -11,7 +11,8 @@
 #
 # Only changes that affect the shipped binary or release archives cause a
 # release (allowlist, see ships()). A commit message containing [release]
-# in the pushed range, or FORCE=true, forces one.
+# in the pushed range, or FORCE=true, forces one. A commit message containing
+# [no release] skips the release (reason=no-release); a force wins over it.
 set -euf
 
 here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
@@ -84,10 +85,21 @@ case ${FORCE:-} in true|yes|1) force=yes ;; esac
 if printf '%s\n' "$msgs" "${COMMIT_MSG:-}" | grep -qiF '[release]'; then
     force=yes
 fi
+norelease=no
+if printf '%s\n' "$msgs" "${COMMIT_MSG:-}" | grep -qiF '[no release]'; then
+    norelease=yes
+fi
 
 if [ -z "$latest" ]; then
     ver=0.1.1
     bump=patch
+elif [ "$force" = no ] && [ "$norelease" = yes ]; then
+    echo "skip=yes"
+    echo "reason=no-release"
+    echo "ver=${latest#v}"
+    echo "tag=$latest"
+    echo "bump="
+    exit 0
 elif [ "$force" = no ] && no_code_changes "${BEFORE:-}" "$head_sha"; then
     echo "skip=yes"
     echo "reason=no-code"

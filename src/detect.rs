@@ -1275,6 +1275,40 @@ cli = "/Users/me/.local/bin/grok"
         );
         assert!(cli_default_model_in("claude", &home).is_none());
     }
+    #[test]
+    fn cursor_auth_probe_runs_status_not_auth_status() {
+        // Regression: `cursor-agent auth status` is taken as a prompt and
+        // starts a paid agent run. The probe must call `cursor-agent status`.
+        let spec = SPECS.iter().find(|s| s.id == "cursor").unwrap();
+        assert_eq!(spec.auth_args, &["status"]);
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("argv.log");
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_cli(
+            &bin,
+            "cursor-agent",
+            &format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then echo 2026.10.01; exit 0; fi\nif [ \"$1\" = \"status\" ]; then echo 'Logged in as dev'; exit 0; fi\nexit 9\n",
+                log.display()
+            ),
+        );
+        let env = DetectEnv {
+            path: bin.display().to_string().into(),
+            home: tmp.path().join("home"),
+            search_system: false,
+        };
+        let d = discover(&env);
+        let c = d
+            .found
+            .iter()
+            .find(|f| f.spec_id == "cursor")
+            .expect("cursor");
+        assert_eq!(c.auth, Auth::Yes);
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(calls.lines().any(|l| l == "status"), "{calls}");
+        assert!(!calls.contains("auth"), "must never call auth: {calls}");
+    }
 }
 
 #[cfg(test)]
