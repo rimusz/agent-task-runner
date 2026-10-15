@@ -530,11 +530,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     source_kind: Some("cli".into()),
                     title: Some(title),
                     allow_empty_repo: allow_empty,
+                    provider_hint: provider.clone(),
                 },
             )?;
-            if let Some(hint) = provider {
-                let _ = shared.db.set_provider_hint(&key, &hint);
-            }
             println!("{key}");
             match outcome {
                 SubmitOutcome::Accepted => Ok(ExitCode::SUCCESS),

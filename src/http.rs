@@ -186,35 +186,31 @@ async fn create_task(
             ),
             title: Some(title.clone()),
             allow_empty_repo: allow_empty,
+            provider_hint: hint.clone(),
         },
     ) {
-        Ok(outcome) => {
-            if let Some(p) = hint.as_deref() {
-                let _ = shared.db.set_provider_hint(&key, p);
-            }
-            match outcome {
-                SubmitOutcome::Accepted => (
-                    StatusCode::OK,
-                    Json(json!({
-                        "ok": true,
-                        "status": "accepted",
-                        "key": key,
-                        "workspace": workspace_kind.as_str(),
-                        "output": output_kind.as_str(),
-                    })),
-                ),
-                SubmitOutcome::Queued => (
-                    StatusCode::ACCEPTED,
-                    Json(json!({
-                        "ok": true,
-                        "status": "queued",
-                        "key": key,
-                        "workspace": workspace_kind.as_str(),
-                        "output": output_kind.as_str(),
-                    })),
-                ),
-            }
-        }
+        Ok(outcome) => match outcome {
+            SubmitOutcome::Accepted => (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "status": "accepted",
+                    "key": key,
+                    "workspace": workspace_kind.as_str(),
+                    "output": output_kind.as_str(),
+                })),
+            ),
+            SubmitOutcome::Queued => (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "ok": true,
+                    "status": "queued",
+                    "key": key,
+                    "workspace": workspace_kind.as_str(),
+                    "output": output_kind.as_str(),
+                })),
+            ),
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"ok": false, "error": e.to_string()})),

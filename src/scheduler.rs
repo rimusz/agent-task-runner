@@ -105,9 +105,8 @@ pub async fn dispatch_available(shared: &Arc<Shared>) -> Result<()> {
             &provider,
             &Clock::system(),
         );
-        if !shared.db.claim_task(&key)? {
-            continue;
-        }
+        // Register in-flight before the DB claim so the periodic reconcile
+        // never sees a `running` row with no in-flight entry.
         {
             let mut map = shared.inflight.lock().unwrap();
             map.insert(
@@ -120,6 +119,17 @@ pub async fn dispatch_available(shared: &Arc<Shared>) -> Result<()> {
                     shadow: task.shadow,
                 },
             );
+        }
+        match shared.db.claim_task(&key) {
+            Ok(true) => {}
+            Ok(false) => {
+                shared.inflight.lock().unwrap().remove(&key);
+                continue;
+            }
+            Err(e) => {
+                shared.inflight.lock().unwrap().remove(&key);
+                return Err(e);
+            }
         }
         let shared = shared.clone();
         tokio::spawn(async move {
@@ -1524,10 +1534,82 @@ pub(crate) fn fail_claimed(shared: &Shared, key: &str, err: &anyhow::Error) {
     let _ = shared.db.set_status(key, "failed");
 }
 
+/// Startup only: a run left open by a previous `atr serve` whose CLI is still
+/// alive (serve was SIGKILLed; the CLI runs in its own process group) would
+/// keep the task `running` forever with nobody reading its output. Kill it
+/// when the PID still looks like that provider's CLI, so `reconcile` fails it.
+pub fn reap_orphans_at_start(shared: &Shared) -> Result<usize> {
+    let cfg = shared.config.read().unwrap().clone();
+    let mut n = 0;
+    for r in shared.db.open_runs()? {
+        if shared.inflight.lock().unwrap().contains_key(&r.task_key) {
+            continue;
+        }
+        let Some(pid) = r.pid.filter(|p| *p > 0) else {
+            continue;
+        };
+        if !pid_alive(pid) {
+            continue;
+        }
+        let Some(p) = cfg.provider(&r.provider) else {
+            continue;
+        };
+        if !pid_looks_like(pid, &p.cli) {
+            tracing::warn!(
+                run = r.id,
+                pid,
+                "open run PID alive but not the provider CLI; leaving it"
+            );
+            continue;
+        }
+        tracing::warn!(run = r.id, task = %r.task_key, pid, "killing orphaned CLI from a previous serve");
+        crate::runner::terminate_tree_now(pid as u32);
+        n += 1;
+    }
+    if n > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    Ok(n)
+}
+
+fn pid_looks_like(pid: i64, cli: &std::path::Path) -> bool {
+    let want = cli
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    if want.is_empty() {
+        return false;
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).contains(&want),
+        _ => false,
+    }
+}
+
+/// Runs `reconcile` every minute so a task whose CLI died outside the
+/// scheduler's view does not stay `running` until the next restart.
+pub async fn reconcile_loop(shared: std::sync::Arc<Shared>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        match reconcile(&shared) {
+            Ok(n) if n > 0 => tracing::warn!(n, "reconciled orphan runs"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("reconcile: {e:#}"),
+        }
+    }
+}
+
 pub fn reconcile(shared: &Shared) -> Result<usize> {
     let runs = shared.db.open_runs()?;
     let mut n = 0;
     for r in runs {
+        if shared.inflight.lock().unwrap().contains_key(&r.task_key) {
+            continue;
+        }
         let alive = r.pid.map(pid_alive).unwrap_or(false);
         if !alive {
             tracing::warn!(
