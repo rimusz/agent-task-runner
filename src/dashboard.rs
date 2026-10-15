@@ -91,12 +91,20 @@ pub fn snapshot_period(
         }
     }
 
+    // Hide a task's finished runs only while it has a run that is still open.
+    // The scheduler keeps its in-flight slot until after the status flips to
+    // waiting/queued, so `inflight` alone would briefly hide a just-finished run.
+    let open: std::collections::HashSet<&str> = runs
+        .iter()
+        .filter(|r| r.ended.is_none())
+        .map(|r| r.task_key.as_str())
+        .collect();
     let mut finished = Vec::new();
     for r in &runs {
         if r.ended.is_none() {
             continue;
         }
-        if inflight.contains_key(&r.task_key) {
+        if open.contains(r.task_key.as_str()) {
             continue;
         }
         let task = tasks.iter().find(|t| t.key == r.task_key);
@@ -442,6 +450,37 @@ cli = "/bin/true"
             Some("<tailscale-ip>:7420".into())
         );
         assert_eq!(extra_bind("<tailscale-ip>:7420", "<tailscale-ip>"), None);
+    }
+
+    #[test]
+    fn finished_run_visible_while_inflight_slot_is_still_held() {
+        let (shared, _dir) = harness();
+        shared
+            .db
+            .upsert_task("race-1", "/tmp/my-repo", None)
+            .unwrap();
+        let run = shared.db.start_run("race-1", "claude", "opus").unwrap();
+        shared.db.finish_run(run, "success", Some(0)).unwrap();
+        shared.db.set_status("race-1", "waiting").unwrap();
+        // Scheduler drops its in-flight slot only after the status flip.
+        shared.inflight.lock().unwrap().insert(
+            "race-1".into(),
+            crate::app::InFlight {
+                provider: "claude".into(),
+                pid: 0,
+                run_id: run,
+                kill: Default::default(),
+                shadow: false,
+            },
+        );
+        let v = snapshot(&shared);
+        let finished = v["finished"].as_array().unwrap();
+        assert!(
+            finished
+                .iter()
+                .any(|t| t["key"] == "race-1" && t["result"] == "success"),
+            "{v}"
+        );
     }
 
     #[test]
