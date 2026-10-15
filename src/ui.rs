@@ -84,4 +84,24 @@ mod tests {
         assert_eq!(dashboard_url("[::1]:7420"), "http://[::1]:7420/");
         assert_eq!(dashboard_url(""), "http://127.0.0.1:7420/");
     }
+    #[test]
+    fn print_only_never_probes() {
+        assert_eq!(super::run("127.0.0.1:7420", true), "http://127.0.0.1:7420/");
+    }
+
+    #[test]
+    fn not_running_prints_hint() {
+        // Grab a free port, then release it so nothing listens there.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let out = super::run(&format!("127.0.0.1:{port}"), false);
+        assert!(
+            out.starts_with(&format!("http://127.0.0.1:{port}/")),
+            "{out}"
+        );
+        assert!(out.contains("not running"), "{out}");
+    }
 }

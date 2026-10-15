@@ -1,5 +1,8 @@
 # Auto-tag the next v* release on push to main. Never force-push or delete main or tags.
 # First release is v0.1.1. Later pushes bump patch, or minor/major via
+# Only pushes that change shipped files (src/, Cargo.*, build.rs, config/,
+# contrib/) release; force with [release] in a commit message or workflow_dispatch.
+# [no release] in a commit message skips it (reason=no-release); force wins.
 # PR label release:minor|release:major or those markers in the commit message.
 # Version is injected at build time (ATR_RELEASE_VERSION); CI does not commit to main.
 name: release
@@ -7,6 +10,13 @@ name: release
 on:
   push:
     branches: [main]
+  # Manual release from main, even without code changes.
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Release even if no shipped files changed
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -33,6 +43,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BEFORE: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
         run: |
           set -euo pipefail
           labels=""
