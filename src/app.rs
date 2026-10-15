@@ -182,7 +182,12 @@ impl Shared {
         if tests_ok {
             self.db.set_protect_tests_skip(key, true)?;
         }
-        if let Some(h) = opts.provider_hint.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(h) = opts
+            .provider_hint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             self.db.set_provider_hint(key, h)?;
         }
         let running = self.inflight.lock().unwrap().contains_key(key)

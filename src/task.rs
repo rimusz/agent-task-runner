@@ -258,7 +258,10 @@ pub fn resolve_dir(raw: &str) -> Result<PathBuf> {
 pub fn check_dir_allowed(canon: &Path) -> Result<()> {
     let home = dirs_home();
     if canon.parent().is_none() {
-        bail!("refusing dir workspace {}: filesystem root", canon.display());
+        bail!(
+            "refusing dir workspace {}: filesystem root",
+            canon.display()
+        );
     }
     if let Some(home) = &home {
         if canon == home.as_path() || home.starts_with(canon) {
@@ -267,18 +270,50 @@ pub fn check_dir_allowed(canon: &Path) -> Result<()> {
                 canon.display()
             );
         }
-        for rel in [".ssh", ".gnupg", ".aws", ".config/atr", ".config/gh", ".kube", ".docker"] {
+        for rel in [
+            ".ssh",
+            ".gnupg",
+            ".aws",
+            ".config/atr",
+            ".config/gh",
+            ".kube",
+            ".docker",
+        ] {
             let s = home.join(rel);
             let s = s.canonicalize().unwrap_or(s);
             if canon.starts_with(&s) {
-                bail!("refusing dir workspace {}: secrets/config directory", canon.display());
+                bail!(
+                    "refusing dir workspace {}: secrets/config directory",
+                    canon.display()
+                );
             }
         }
     }
-    for sys in ["/etc", "/usr", "/bin", "/sbin", "/lib", "/boot", "/proc", "/sys", "/dev", "/var", "/System", "/Library", "/private/etc"] {
+    for sys in [
+        "/etc",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/boot",
+        "/proc",
+        "/sys",
+        "/dev",
+        "/var",
+        "/System",
+        "/Library",
+        "/private/etc",
+    ] {
         let sp = Path::new(sys);
-        if canon == sp || canon.starts_with(sp) && !canon.starts_with("/var/folders") && !canon.starts_with("/var/tmp") {
-            bail!("refusing dir workspace {}: system directory", canon.display());
+        if canon == sp
+            || canon.starts_with(sp)
+                && !canon.starts_with("/var/folders")
+                && !canon.starts_with("/var/tmp")
+        {
+            bail!(
+                "refusing dir workspace {}: system directory",
+                canon.display()
+            );
         }
     }
     Ok(())

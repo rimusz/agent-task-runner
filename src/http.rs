@@ -189,30 +189,28 @@ async fn create_task(
             provider_hint: hint.clone(),
         },
     ) {
-        Ok(outcome) => {
-            match outcome {
-                SubmitOutcome::Accepted => (
-                    StatusCode::OK,
-                    Json(json!({
-                        "ok": true,
-                        "status": "accepted",
-                        "key": key,
-                        "workspace": workspace_kind.as_str(),
-                        "output": output_kind.as_str(),
-                    })),
-                ),
-                SubmitOutcome::Queued => (
-                    StatusCode::ACCEPTED,
-                    Json(json!({
-                        "ok": true,
-                        "status": "queued",
-                        "key": key,
-                        "workspace": workspace_kind.as_str(),
-                        "output": output_kind.as_str(),
-                    })),
-                ),
-            }
-        }
+        Ok(outcome) => match outcome {
+            SubmitOutcome::Accepted => (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "status": "accepted",
+                    "key": key,
+                    "workspace": workspace_kind.as_str(),
+                    "output": output_kind.as_str(),
+                })),
+            ),
+            SubmitOutcome::Queued => (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "ok": true,
+                    "status": "queued",
+                    "key": key,
+                    "workspace": workspace_kind.as_str(),
+                    "output": output_kind.as_str(),
+                })),
+            ),
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"ok": false, "error": e.to_string()})),

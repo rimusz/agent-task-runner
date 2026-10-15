@@ -1555,7 +1555,11 @@ pub fn reap_orphans_at_start(shared: &Shared) -> Result<usize> {
             continue;
         };
         if !pid_looks_like(pid, &p.cli) {
-            tracing::warn!(run = r.id, pid, "open run PID alive but not the provider CLI; leaving it");
+            tracing::warn!(
+                run = r.id,
+                pid,
+                "open run PID alive but not the provider CLI; leaving it"
+            );
             continue;
         }
         tracing::warn!(run = r.id, task = %r.task_key, pid, "killing orphaned CLI from a previous serve");
