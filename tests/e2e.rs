@@ -1816,7 +1816,7 @@ cli = "/bin/true"
             m.get("chat_id") == Some(&json!(42))
                 && m.get("text")
                     .and_then(|t| t.as_str())
-                    .is_some_and(|t| t.contains("status"))
+                    .is_some_and(|t| t.contains("intake on") && t.contains("Providers"))
         }) {
             break;
         }
