@@ -22,7 +22,7 @@ check() {
     out=$(BEFORE=$base FORCE=$force sh "$script")
     got=$(printf '%s\n' "$out" | sed -n 's/^skip=//p')
     if [ "$got" = "$want" ]; then
-        echo "ok   $name (skip=$got)"
+        echo "ok   $name (skip=$got $(printf '%s\n' "$out" | sed -n 's/^reason=//p'))"
     else
         echo "FAIL $name: want skip=$want got skip=$got"
         printf '%s\n' "$out"
@@ -46,6 +46,14 @@ change README.md src/main.rs;        check mixed no
 change README.md; change docs/b.md;  check docs-two-commits yes
 change README.md;                    check force-env no true
 MSG='docs tweak [release]' change README.md; check force-commit-msg no
+MSG='test: x [no release]' change src/main.rs; check no-release-src yes
+MSG='chore [No Release]' change Cargo.toml; check no-release-case yes
+change README.md; MSG='body
+
+[no release]' change src/main.rs; check no-release-in-range yes
+MSG='x [no release]' change src/main.rs;   check no-release-vs-force-env no true
+MSG='x [no release] [release]' change src/main.rs; check no-release-vs-force-msg no
+MSG='x [no release]' change src/main.rs; MSG='y [release]' change docs/c.md; check no-release-vs-force-other-commit no
 
 if [ "$fails" -ne 0 ]; then
     echo "$fails case(s) failed"
