@@ -312,7 +312,7 @@ atr telegram test
 
 If you type a normal sentence (not a `/command`), the assistant answers. It can only propose the same commands; each write still needs Confirm.
 
-**Dashboard.** While atr is running, open `http://127.0.0.1:7420/`. It is read-only: what is running, what is queued, recent results, and usage. No buttons.
+**Dashboard.** While atr is running, run `atr ui` (or open `http://127.0.0.1:7420/`). Over SSH or with no desktop it just prints the URL; `atr ui --print` always does. It is read-only: what is running, what is queued, recent results, and usage. No buttons.
 
 **Terminal.**
 
@@ -371,6 +371,7 @@ More, including self-hosted vLLM: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#pr
 ### Maintenance
 
 ```bash
+atr ui            # open the dashboard (prints the URL over SSH)
 atr upgrade
 atr rollback
 atr providers detect

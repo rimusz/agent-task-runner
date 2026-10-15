@@ -60,6 +60,8 @@ token_file = "~/.config/atr/mcp.token"
 
 ### Dashboard
 
+`atr ui` opens the dashboard on this machine: it takes the port from `listen`, uses `127.0.0.1` when `listen` is a wildcard (`0.0.0.0`, `::`), checks `/health`, then runs `open` (macOS) or `xdg-open` (Linux desktop). Over SSH or without a display it only prints the URL; `--print` always only prints.
+
 ```toml
 [dashboard]
 enabled = true
