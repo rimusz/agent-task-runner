@@ -181,8 +181,10 @@ You need Grok Build 1.0.52 or newer; `atr doctor` checks it. Everything else in 
 ### Maintenance
 
 ```bash
-atr upgrade
+atr upgrade               # no-op if already on the latest release
+atr upgrade --force       # reinstall the latest release anyway
 atr rollback
+atr skills install
 atr providers detect
 atr providers add kimi
 atr providers add claude --kind claude
@@ -194,6 +196,8 @@ atr reset --dry-run
 atr tasks rm my-task --dry-run
 atr gc --tasks --dry-run
 ```
+
+`atr skills install` writes the atr agent skill (`skills/atr/SKILL.md`) for each coding CLI installed on this machine: `~/.claude` (claude), `~/.cursor` (cursor-agent), `~/.codex` (codex), `~/.grok` (grok) and `~/.config/opencode` (opencode). CLIs that aren't installed are skipped and their folders aren't created. Config files are never touched. `atr init` does the same. Run it again after installing a new CLI, or on each host that runs atr.
 
 `atr tasks rm` only deletes finished or failed work, never a running task.
 
