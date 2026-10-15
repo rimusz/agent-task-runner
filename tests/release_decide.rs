@@ -45,8 +45,9 @@ fn init_repo() -> tempfile::TempDir {
         tmp.path(),
         "git init -q && git config user.email t@t && git config user.name t",
     );
-    fs::write(tmp.path().join("app.rs"), "fn main() {}\n").unwrap();
-    sh(tmp.path(), "git add app.rs && git commit -qm first");
+    fs::create_dir_all(tmp.path().join("src")).unwrap();
+    fs::write(tmp.path().join("src/app.rs"), "fn main() {}\n").unwrap();
+    sh(tmp.path(), "git add src/app.rs && git commit -qm first");
     tmp
 }
 
@@ -97,8 +98,8 @@ fn later_push_is_patch() {
     )
     .unwrap();
     let before = before.trim().to_string();
-    fs::write(repo.path().join("app.rs"), "fn main() { /* 2 */ }\n").unwrap();
-    sh(repo.path(), "git add app.rs && git commit -qm code");
+    fs::write(repo.path().join("src/app.rs"), "fn main() { /* 2 */ }\n").unwrap();
+    sh(repo.path(), "git add src/app.rs && git commit -qm code");
     let out = decide(repo.path(), Some(&before), "");
     assert_eq!(field(&out, "skip"), "no");
     assert_eq!(field(&out, "tag"), "v0.1.2");
@@ -123,7 +124,7 @@ fn docs_only_after_first_release_skips() {
     sh(repo.path(), "git add README.md && git commit -qm docs");
     let out = decide(repo.path(), Some(&before), "");
     assert_eq!(field(&out, "skip"), "yes");
-    assert_eq!(field(&out, "reason"), "docs");
+    assert_eq!(field(&out, "reason"), "no-code");
 }
 
 #[test]
@@ -140,19 +141,19 @@ fn minor_label_and_major_commit() {
     )
     .unwrap();
     let before = before.trim().to_string();
-    fs::write(repo.path().join("app.rs"), "fn main() { /* 3 */ }\n").unwrap();
+    fs::write(repo.path().join("src/app.rs"), "fn main() { /* 3 */ }\n").unwrap();
     sh(
         repo.path(),
-        "git add app.rs && git commit -qm 'feat release:minor'",
+        "git add src/app.rs && git commit -qm 'feat release:minor'",
     );
     let out = decide(repo.path(), Some(&before), "");
     assert_eq!(field(&out, "tag"), "v0.2.0");
     assert_eq!(field(&out, "bump"), "minor");
 
-    fs::write(repo.path().join("app.rs"), "fn main() { /* 4 */ }\n").unwrap();
+    fs::write(repo.path().join("src/app.rs"), "fn main() { /* 4 */ }\n").unwrap();
     sh(
         repo.path(),
-        "git add app.rs && git commit -qm 'break release:major'",
+        "git add src/app.rs && git commit -qm 'break release:major'",
     );
     let before2 = String::from_utf8(
         Command::new("git")
