@@ -455,7 +455,10 @@ cli = "/bin/true"
     #[test]
     fn finished_run_visible_while_inflight_slot_is_still_held() {
         let (shared, _dir) = harness();
-        shared.db.upsert_task("race-1", "/tmp/my-repo", None).unwrap();
+        shared
+            .db
+            .upsert_task("race-1", "/tmp/my-repo", None)
+            .unwrap();
         let run = shared.db.start_run("race-1", "claude", "opus").unwrap();
         shared.db.finish_run(run, "success", Some(0)).unwrap();
         shared.db.set_status("race-1", "waiting").unwrap();
