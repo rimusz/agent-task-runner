@@ -1739,4 +1739,38 @@ mod tests {
             spec.args
         );
     }
+    #[test]
+    fn codex_always_skips_git_repo_check() {
+        // Regression: `dir`/`none` workspaces are not git repos; without the
+        // flag codex exits 1 before reading the prompt. Both new and resumed
+        // sessions must carry it.
+        let p = stub("codex");
+        for session in [None, Some("thr-9")] {
+            let spec = build_command(
+                &p,
+                Path::new("/tmp/not-a-repo"),
+                Path::new("/tmp/not-a-repo/.atr/prompt.md"),
+                "hi",
+                session,
+                false,
+            );
+            assert!(
+                spec.args.iter().any(|a| a == "--skip-git-repo-check"),
+                "session={session:?} args={:?}",
+                spec.args
+            );
+        }
+    }
+
+    #[test]
+    fn grok_usage_cost_is_ticks_not_dollars() {
+        // Regression: costUsdTicks is 1e-10 USD; reading it as dollars made
+        // ~19k tokens show as $126.
+        let v = serde_json::json!({"costUsdTicks": 1_268_336_000u64, "inputTokens": 19000});
+        let u = parse_grok_usage_cli(&v).expect("usage");
+        let cost = u.cost_usd.expect("cost");
+        assert!((cost - 0.1268336).abs() < 1e-9, "cost={cost}");
+        assert!(cost < 1.0);
+        assert_eq!(GROK_TICKS_PER_USD, 1e10);
+    }
 }
