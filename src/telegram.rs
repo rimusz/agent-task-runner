@@ -2537,11 +2537,7 @@ cli = "/bin/true"
             "{}",
             out[0].text
         );
-        assert!(
-            out[0].text.contains("config: get · set"),
-            "{}",
-            out[0].text
-        );
+        assert!(out[0].text.contains("config: get · set"), "{}", out[0].text);
         assert!(!out[0].text.contains("add|enable"), "{}", out[0].text);
         assert!(out[0].text.contains("Plain text"), "{}", out[0].text);
         assert!(!out[0].text.contains("commands:"), "{}", out[0].text);
