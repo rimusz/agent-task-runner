@@ -13,6 +13,29 @@ pub(crate) struct Env {
     pub bin: PathBuf,
     pub backup: PathBuf,
     pub tmp: PathBuf,
+    /// Version of the running binary (`CARGO_PKG_VERSION` in production).
+    pub current: String,
+}
+
+/// Result of an upgrade attempt.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// A new binary was installed; the service should be restarted.
+    Upgraded(String),
+    /// Already on the latest release; nothing was downloaded or replaced.
+    UpToDate(String),
+}
+
+/// True when `latest` is not newer than `current` (semver). Unparseable
+/// versions are treated as "not up to date" so the upgrade proceeds.
+fn is_up_to_date(current: &str, latest: &str) -> bool {
+    match (
+        semver::Version::parse(current.trim().trim_start_matches('v')),
+        semver::Version::parse(latest.trim().trim_start_matches('v')),
+    ) {
+        (Ok(c), Ok(l)) => l <= c,
+        _ => false,
+    }
 }
 
 impl Env {
@@ -22,13 +45,17 @@ impl Env {
             bin: current_bin(),
             backup: backup_dir(),
             tmp: tempfile_dir()?,
+            current: env!("CARGO_PKG_VERSION").to_string(),
         })
     }
 }
 
-pub fn upgrade(version: Option<&str>, config_path: &Path) -> Result<String> {
+pub fn upgrade(version: Option<&str>, force: bool, config_path: &Path) -> Result<String> {
     let env = Env::real()?;
-    let msg = upgrade_with(version, config_path, &env)?;
+    let msg = match upgrade_with(version, force, config_path, &env)? {
+        Outcome::UpToDate(msg) => return Ok(msg),
+        Outcome::Upgraded(msg) => msg,
+    };
     match crate::service::restart() {
         Ok(note) if note == crate::service::RESTART_SKIPPED_NOTE => eprintln!("{note}"),
         Ok(_) => {}
@@ -37,7 +64,15 @@ pub fn upgrade(version: Option<&str>, config_path: &Path) -> Result<String> {
     Ok(msg)
 }
 
-pub(crate) fn upgrade_with(version: Option<&str>, config_path: &Path, env: &Env) -> Result<String> {
+/// Downloads and installs a release. Without an explicit `version` and
+/// without `force`, it does nothing when the latest release is not newer
+/// than the running version. An explicit `version` always installs.
+pub(crate) fn upgrade_with(
+    version: Option<&str>,
+    force: bool,
+    config_path: &Path,
+    env: &Env,
+) -> Result<Outcome> {
     let cfg = load_config(config_path).ok();
     let repo = cfg
         .as_ref()
@@ -50,7 +85,16 @@ pub(crate) fn upgrade_with(version: Option<&str>, config_path: &Path, env: &Env)
     }
     let ver = match version {
         Some(v) => v.trim().trim_start_matches('v').to_string(),
-        None => latest_version(&env.base, &repo)?,
+        None => {
+            let latest = latest_version(&env.base, &repo)?;
+            if !force && is_up_to_date(&env.current, &latest) {
+                return Ok(Outcome::UpToDate(format!(
+                    "atr is already up to date (v{})",
+                    env.current
+                )));
+            }
+            latest
+        }
     };
     let tag = format!("v{ver}");
     let tmp = &env.tmp;
@@ -72,10 +116,10 @@ pub(crate) fn upgrade_with(version: Option<&str>, config_path: &Path, env: &Env)
     extract_atr(&tgz, &extracted)?;
     backup_current(cfg.as_ref(), config_path, &env.bin, &env.backup)?;
     replace_binary(&extracted, &env.bin)?;
-    Ok(format!(
+    Ok(Outcome::Upgraded(format!(
         "upgraded to {tag} ({asset}) -> {}",
         env.bin.display()
-    ))
+    )))
 }
 
 pub fn rollback(config_path: &Path) -> Result<String> {
@@ -379,6 +423,7 @@ mod tests {
             bin,
             backup: dir.join("backup"),
             tmp: dir.join("tmp"),
+            current: "0.1.13".into(),
         }
     }
 
@@ -406,7 +451,10 @@ mod tests {
         let base = serve(release(dir.path(), "9.9.9", b"NEW-BINARY", None));
         let env = env_in(dir.path(), base);
         let cfg = write_cfg(dir.path());
-        let msg = upgrade_with(None, &cfg, &env).unwrap();
+        let msg = match upgrade_with(None, false, &cfg, &env).unwrap() {
+            Outcome::Upgraded(m) => m,
+            o => panic!("{o:?}"),
+        };
         assert!(msg.contains("v9.9.9"), "{msg}");
         assert_eq!(fs::read(&env.bin).unwrap(), b"NEW-BINARY");
         assert_eq!(fs::read(env.backup.join("atr")).unwrap(), b"OLD-BINARY");
@@ -432,7 +480,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = serve(release(dir.path(), "1.2.3", b"V123", None));
         let env = env_in(dir.path(), base);
-        let msg = upgrade_with(Some("v1.2.3"), &dir.path().join("missing.toml"), &env).unwrap();
+        let msg = match upgrade_with(
+            Some("v1.2.3"),
+            false,
+            &dir.path().join("missing.toml"),
+            &env,
+        )
+        .unwrap()
+        {
+            Outcome::Upgraded(m) => m,
+            o => panic!("{o:?}"),
+        };
         assert!(msg.contains("v1.2.3"), "{msg}");
         assert_eq!(fs::read(&env.bin).unwrap(), b"V123");
     }
@@ -446,7 +504,7 @@ mod tests {
         let bad = "0".repeat(64);
         let base = serve(release(dir.path(), "9.9.9", b"EVIL", Some(&bad)));
         let env = env_in(dir.path(), base);
-        let err = upgrade_with(None, &dir.path().join("missing.toml"), &env).unwrap_err();
+        let err = upgrade_with(None, false, &dir.path().join("missing.toml"), &env).unwrap_err();
         assert!(format!("{err:#}").contains("sha256 mismatch"), "{err:#}");
         assert_eq!(fs::read(&env.bin).unwrap(), b"OLD-BINARY");
         assert!(!env.backup.join("atr").exists());
@@ -460,7 +518,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = serve(release(dir.path(), "9.9.9", b"X", Some("not-a-hash")));
         let env = env_in(dir.path(), base);
-        let err = upgrade_with(None, &dir.path().join("missing.toml"), &env).unwrap_err();
+        let err = upgrade_with(None, false, &dir.path().join("missing.toml"), &env).unwrap_err();
         assert!(format!("{err:#}").contains("sha256"), "{err:#}");
         assert_eq!(fs::read(&env.bin).unwrap(), b"OLD-BINARY");
     }
@@ -470,8 +528,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = serve(HashMap::new());
         let env = env_in(dir.path(), base);
-        assert!(upgrade_with(Some("7.7.7"), &dir.path().join("missing.toml"), &env).is_err());
-        assert!(upgrade_with(None, &dir.path().join("missing.toml"), &env).is_err());
+        assert!(
+            upgrade_with(Some("7.7.7"), false, &dir.path().join("missing.toml"), &env).is_err()
+        );
+        assert!(upgrade_with(None, false, &dir.path().join("missing.toml"), &env).is_err());
         assert_eq!(fs::read(&env.bin).unwrap(), b"OLD-BINARY");
     }
 
@@ -518,5 +578,83 @@ mod tests {
         fs::write(&dest, b"old").unwrap();
         replace_binary(&src, &dest).unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"new");
+    }
+
+    #[test]
+    fn semver_comparison() {
+        assert!(is_up_to_date("0.1.13", "0.1.13"));
+        assert!(is_up_to_date("0.1.13", "v0.1.9"));
+        assert!(!is_up_to_date("0.1.9", "0.1.13"));
+        assert!(!is_up_to_date("0.1.13", "0.2.0"));
+        assert!(!is_up_to_date("0.1.13-rc.1", "0.1.13"));
+        assert!(!is_up_to_date("0.1.13", "garbage"));
+    }
+
+    #[test]
+    fn upgrade_same_version_skips_download_and_replace() {
+        if host_asset() == "unknown" {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // Only the "latest" redirect exists for the up-to-date path to use;
+        // drop the asset routes so any download attempt would fail.
+        let mut routes = release(dir.path(), "0.1.13", b"SAME", None);
+        routes.retain(|k, _| !k.contains("/download/"));
+        let base = serve(routes);
+        let env = env_in(dir.path(), base);
+        let out = upgrade_with(None, false, &write_cfg(dir.path()), &env).unwrap();
+        assert_eq!(
+            out,
+            Outcome::UpToDate("atr is already up to date (v0.1.13)".into())
+        );
+        assert_eq!(fs::read(&env.bin).unwrap(), b"OLD-BINARY");
+        assert!(!env.backup.join("atr").exists());
+        assert!(!env.tmp.exists());
+    }
+
+    #[test]
+    fn upgrade_older_latest_is_up_to_date() {
+        if host_asset() == "unknown" {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let base = serve(release(dir.path(), "0.1.9", b"OLDER", None));
+        let env = env_in(dir.path(), base);
+        let out = upgrade_with(None, false, &write_cfg(dir.path()), &env).unwrap();
+        assert!(matches!(out, Outcome::UpToDate(_)), "{out:?}");
+        assert_eq!(fs::read(&env.bin).unwrap(), b"OLD-BINARY");
+    }
+
+    #[test]
+    fn upgrade_newer_version_installs() {
+        if host_asset() == "unknown" {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let base = serve(release(dir.path(), "0.1.14", b"V0114", None));
+        let env = env_in(dir.path(), base);
+        let out = upgrade_with(None, false, &write_cfg(dir.path()), &env).unwrap();
+        assert!(
+            matches!(&out, Outcome::Upgraded(m) if m.contains("v0.1.14")),
+            "{out:?}"
+        );
+        assert_eq!(fs::read(&env.bin).unwrap(), b"V0114");
+    }
+
+    #[test]
+    fn upgrade_force_reinstalls_same_version() {
+        if host_asset() == "unknown" {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let base = serve(release(dir.path(), "0.1.13", b"REINSTALLED", None));
+        let env = env_in(dir.path(), base);
+        let out = upgrade_with(None, true, &write_cfg(dir.path()), &env).unwrap();
+        assert!(
+            matches!(&out, Outcome::Upgraded(m) if m.contains("v0.1.13")),
+            "{out:?}"
+        );
+        assert_eq!(fs::read(&env.bin).unwrap(), b"REINSTALLED");
+        assert_eq!(fs::read(env.backup.join("atr")).unwrap(), b"OLD-BINARY");
     }
 }

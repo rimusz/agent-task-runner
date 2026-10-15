@@ -181,7 +181,8 @@ You need Grok Build 1.0.52 or newer; `atr doctor` checks it. Everything else in 
 ### Maintenance
 
 ```bash
-atr upgrade
+atr upgrade               # no-op if already on the latest release
+atr upgrade --force       # reinstall the latest release anyway
 atr rollback
 atr skills install
 atr providers detect

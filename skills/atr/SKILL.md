@@ -140,7 +140,7 @@ One `ok` / `warn` / `FAIL` line per check, then `N problems`. Checks CLIs, pins,
 ## Upgrade
 
 ```bash
-atr upgrade [version]   # download, sha256, backup, swap, restart
+atr upgrade [version] [--force]   # download, sha256, backup, swap, restart; no-op if already latest
 atr rollback            # previous binary / db / config
 ```
 
