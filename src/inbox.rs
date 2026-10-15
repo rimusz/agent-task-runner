@@ -200,11 +200,9 @@ fn ingest_file(shared: &Shared, inbox: &Path, path: &Path, max_bytes: u64) -> Re
             source_kind: Some(SourceKind::Inbox.as_str().into()),
             title: Some(title),
             allow_empty_repo: workspace_kind == WorkspaceKind::None,
+            provider_hint: Some(spec.provider.trim().to_string()).filter(|s| !s.is_empty()),
         },
     )?;
-    if !spec.provider.trim().is_empty() {
-        let _ = shared.db.set_provider_hint(&key, spec.provider.trim());
-    }
     let _ = outcome;
     Ok(key)
 }

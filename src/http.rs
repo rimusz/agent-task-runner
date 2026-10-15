@@ -186,12 +186,10 @@ async fn create_task(
             ),
             title: Some(title.clone()),
             allow_empty_repo: allow_empty,
+            provider_hint: hint.clone(),
         },
     ) {
         Ok(outcome) => {
-            if let Some(p) = hint.as_deref() {
-                let _ = shared.db.set_provider_hint(&key, p);
-            }
             match outcome {
                 SubmitOutcome::Accepted => (
                     StatusCode::OK,

@@ -139,6 +139,7 @@ async fn poll_repo(
                     source_kind: Some("github".into()),
                     title: Some(issue.title.clone()),
                     allow_empty_repo: false,
+                    provider_hint: None,
                 },
             )?;
         }

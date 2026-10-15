@@ -529,12 +529,10 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
                 source_kind: Some("mcp".into()),
                 title: Some(title.clone()),
                 allow_empty_repo: allow_empty,
+                provider_hint: arg_str(args, &["provider", "hint", "driver"]),
             },
         )
         .map_err(|e| e.to_string())?;
-    if let Some(hint) = arg_str(args, &["provider", "hint", "driver"]) {
-        let _ = shared.db.set_provider_hint(&key, &hint);
-    }
     Ok(json!({
         "ok": true,
         "key": key,

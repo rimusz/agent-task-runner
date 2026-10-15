@@ -48,6 +48,9 @@ pub struct SubmitOpts {
     /// When true, an empty repo stays empty (answer-only) instead of falling
     /// back to `repo_path`.
     pub allow_empty_repo: bool,
+    /// Preferred provider. Stored before the task is queued so a running
+    /// `serve` cannot dispatch it to the default provider first.
+    pub provider_hint: Option<String>,
 }
 
 impl Shared {
@@ -178,6 +181,9 @@ impl Shared {
         }
         if tests_ok {
             self.db.set_protect_tests_skip(key, true)?;
+        }
+        if let Some(h) = opts.provider_hint.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            self.db.set_provider_hint(key, h)?;
         }
         let running = self.inflight.lock().unwrap().contains_key(key)
             || self.db.task_is_running(key)?

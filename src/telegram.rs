@@ -580,6 +580,7 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
             source_kind: Some("telegram".into()),
             title: Some(title),
             allow_empty_repo: true,
+            provider_hint: None,
         },
     ) {
         Ok(SubmitOutcome::Accepted) => Outgoing {
