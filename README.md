@@ -31,7 +31,9 @@ Never print, log or paste any secret, token or API key. Never sign in to anythin
 2. Run: atr providers detect
    For each CLI that is installed but signed out, tell me its login command and wait for me.
 3. Check gh auth status. If not logged in, ask me to run gh auth login, then run gh auth setup-git.
-4. Ask whether I want to answer setup myself (atr init) or take defaults (atr init --yes).
+4. Ask whether I want to answer the setup questions myself or take defaults, then run one of:
+   atr init
+   atr init --yes
 5. Run atr service install. On headless Linux also: loginctl enable-linger "$USER".
 6. Ask which GitHub repos to watch and add each: atr repos add <owner/name> --path <clone>
 7. Run atr doctor and report every warn or FAIL line with a suggested fix.

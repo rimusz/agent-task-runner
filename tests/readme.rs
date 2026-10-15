@@ -292,7 +292,11 @@ fn readme_headings_and_commands_match_help() {
         doc("INSTALL.md").contains("## Full agent deploy prompt"),
         "docs/INSTALL.md must keep the full deploy prompt"
     );
-    let readme = format!("{readme}\n{usage}\n{}\n{}", doc("INSTALL.md"), doc("USE-CASES.md"));
+    let readme = format!(
+        "{readme}\n{usage}\n{}\n{}",
+        doc("INSTALL.md"),
+        doc("USE-CASES.md")
+    );
     assert!(
         readme.contains("docs/DESIGN.md"),
         "internals must point at DESIGN.md"
