@@ -109,6 +109,7 @@ gh issue edit 12 --add-label for:atr
 - **Always-on Linux box or VM**: runs around the clock. [More](docs/USE-CASES.md#2-always-on-linux-server-or-cloud-vm)
 - **GitHub issue worker**: label an issue, get a pull request. [More](docs/USE-CASES.md#3-github-issue-worker)
 - **Backend for other agents**: Claude, Codex, Cursor or Grok hand work to atr over MCP. [More](docs/USE-CASES.md#4-backend-for-ai-agents-mcp)
+- **Grok Bot operator**: import the [atr Operator](https://x.ai/bot/oDG33vy41WVZKy-HFKVk0) bot template to queue work and watch atr from Grok Bot.
 - **Inbox folder**: scripts drop a task file and atr runs it. [More](docs/USAGE.md#hand-work-to-atr)
 - **Telegram**: add tasks and check progress from your phone. [More](docs/USE-CASES.md#7-control-from-your-phone)
 
