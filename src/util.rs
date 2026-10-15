@@ -85,6 +85,22 @@ pub fn host_target() -> &'static str {
     "unknown"
 }
 
+/// Friendly release asset platform name (used in `atr-<ver>-<asset>.tar.gz`).
+/// Rust target triples are only used for building.
+pub fn asset_platform(target: &str) -> Option<&'static str> {
+    match target {
+        "aarch64-apple-darwin" => Some("macos-arm64"),
+        "x86_64-unknown-linux-gnu" => Some("linux-x86_64"),
+        "aarch64-unknown-linux-gnu" => Some("linux-arm64"),
+        "x86_64-unknown-linux-musl" => Some("linux-x86_64-musl"),
+        _ => None,
+    }
+}
+
+pub fn host_asset() -> &'static str {
+    asset_platform(host_target()).unwrap_or("unknown")
+}
+
 pub fn sha256_file(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     let data = fs::read(path).with_context(|| format!("read {}", path.display()))?;
@@ -106,6 +122,24 @@ pub fn parse_sha256_line(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asset_platform_maps_targets() {
+        assert_eq!(asset_platform("aarch64-apple-darwin"), Some("macos-arm64"));
+        assert_eq!(
+            asset_platform("x86_64-unknown-linux-gnu"),
+            Some("linux-x86_64")
+        );
+        assert_eq!(
+            asset_platform("aarch64-unknown-linux-gnu"),
+            Some("linux-arm64")
+        );
+        assert_eq!(
+            asset_platform("x86_64-unknown-linux-musl"),
+            Some("linux-x86_64-musl")
+        );
+        assert_eq!(asset_platform("x86_64-apple-darwin"), None);
+    }
 
     #[test]
     fn parse_sha256_line_takes_first_token() {

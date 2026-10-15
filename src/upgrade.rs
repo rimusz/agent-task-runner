@@ -1,6 +1,6 @@
 use crate::config::{load_config, Config};
 use crate::util::{
-    backup_dir, copy_file, current_bin, host_target, parse_sha256_line, sha256_file,
+    backup_dir, copy_file, current_bin, host_asset, host_target, parse_sha256_line, sha256_file,
 };
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -15,7 +15,8 @@ pub fn upgrade(version: Option<&str>, config_path: &Path) -> Result<String> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "rimusz/agent-task-runner".into());
     let target = host_target();
-    if target == "unknown" {
+    let asset = host_asset();
+    if target == "unknown" || asset == "unknown" {
         bail!("unsupported platform for atr upgrade");
     }
     let ver = match version {
@@ -23,13 +24,29 @@ pub fn upgrade(version: Option<&str>, config_path: &Path) -> Result<String> {
         None => latest_version(&repo)?,
     };
     let tag = format!("v{ver}");
-    let name = format!("atr-{ver}-{target}.tar.gz");
-    let url = format!("https://github.com/{repo}/releases/download/{tag}/{name}");
-    let sha_url = format!("{url}.sha256");
     let tmp = tempfile_dir()?;
-    let tgz = tmp.join(&name);
+    // Friendly name first (atr-<ver>-linux-x86_64.tar.gz); fall back to the
+    // Rust-triple name used by releases published before the rename.
+    let mut fetched = None;
+    let mut last_err = None;
+    for plat in [asset, target] {
+        let name = format!("atr-{ver}-{plat}.tar.gz");
+        let url = format!("https://github.com/{repo}/releases/download/{tag}/{name}");
+        let tgz = tmp.join(&name);
+        match download(&url, &tgz) {
+            Ok(()) => {
+                fetched = Some((name, url, tgz));
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let (name, url, tgz) = match fetched {
+        Some(f) => f,
+        None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("download failed"))),
+    };
+    let sha_url = format!("{url}.sha256");
     let sha_file = tmp.join(format!("{name}.sha256"));
-    download(&url, &tgz)?;
     download(&sha_url, &sha_file)?;
     let expected = parse_sha256_line(&fs::read_to_string(&sha_file)?)
         .ok_or_else(|| anyhow::anyhow!("could not parse sha256 file"))?;
@@ -45,10 +62,7 @@ pub fn upgrade(version: Option<&str>, config_path: &Path) -> Result<String> {
     if let Err(e) = crate::service::restart() {
         eprintln!("restart after upgrade: {e:#}");
     }
-    Ok(format!(
-        "upgraded to {tag} ({target}) -> {}",
-        dest.display()
-    ))
+    Ok(format!("upgraded to {tag} ({asset}) -> {}", dest.display()))
 }
 
 pub fn rollback(config_path: &Path) -> Result<String> {
