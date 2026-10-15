@@ -166,6 +166,18 @@ model = "ollama/llama3.2"
 
 More, including self-hosted vLLM: [HOW-IT-WORKS.md](HOW-IT-WORKS.md#providers).
 
+### Grok Build as the main provider
+
+Grok Build is the recommended main provider. When it's enabled and `driver` is left empty, atr uses Grok to plan big issues and to review diffs (review is off until you set `[review] enabled = true`). Grok also gives atr a few extras:
+
+- **Live progress.** With `plugin = true` on the grok provider, atr's plugin sends tool, subagent and stop events to the dashboard and Telegram as the run goes.
+- **Cost and tokens.** After each run, `grok usage` gives the session's token counts and cost for the dashboard.
+- **Resume and fork.** A retry after a failed check, stall or review forks the session, so the original is kept.
+- **Turn limits.** Every Grok run gets `--max-turns`.
+- **Built-in review.** Review uses Grok's bundled `/review` skill.
+
+You need Grok Build 1.0.52 or newer; `atr doctor` checks it. Everything else in atr works with any provider, and these extras just switch off when the driver isn't Grok. Details: [HOW-IT-WORKS.md](HOW-IT-WORKS.md#grok-extras-1052).
+
 ### Maintenance
 
 ```bash
