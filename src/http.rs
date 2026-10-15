@@ -734,6 +734,7 @@ token_file = "{token}"
         )
     }
 
+    #[allow(clippy::result_large_err)]
     fn rpc(url: &str, auth: Option<&str>, body: &str) -> Result<ureq::Response, ureq::Error> {
         let mut req = ureq::post(url)
             .set("Content-Type", "application/json")
