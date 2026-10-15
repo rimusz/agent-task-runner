@@ -281,10 +281,37 @@ pub fn uninstall() -> Result<String> {
     }
 }
 
+pub const RESTART_SKIPPED_NOTE: &str = "atr service not installed; skipping restart (run the new binary manually or `atr service install`)";
+
+/// Path of the user service definition for this platform.
+pub fn service_file_path() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        plist_path()
+    } else {
+        unit_path()
+    }
+}
+
+/// Restart only when the service definition exists at `service_file`;
+/// otherwise return a friendly note instead of a launchctl/systemctl error.
+pub fn restart_with<F>(service_file: &Path, run: F) -> Result<String>
+where
+    F: FnOnce() -> Result<String>,
+{
+    if !service_file.exists() {
+        return Ok(RESTART_SKIPPED_NOTE.to_string());
+    }
+    run()
+}
+
 pub fn restart() -> Result<String> {
     if skip_load() {
         return Ok("service load skipped (ATR_INIT_SKIP_LOAD)".into());
     }
+    restart_with(&service_file_path(), restart_installed)
+}
+
+fn restart_installed() -> Result<String> {
     if cfg!(target_os = "macos") {
         let uid = users_uid();
         let st = Command::new("launchctl")
@@ -356,6 +383,38 @@ pub fn stop_legacy_launchd(legacy_label: Option<&str>) -> Result<Option<String>>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restart_skips_when_service_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("atr.service");
+        let mut called = false;
+        let msg = super::restart_with(&missing, || {
+            called = true;
+            Ok("restarted".into())
+        })
+        .unwrap();
+        assert!(!called, "must not invoke systemctl/launchctl");
+        assert_eq!(msg, super::RESTART_SKIPPED_NOTE);
+    }
+
+    #[test]
+    fn restart_runs_when_service_file_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join("dev.atr.serve.plist");
+        std::fs::write(&unit, "x").unwrap();
+        let msg = super::restart_with(&unit, || Ok("restarted fake".into())).unwrap();
+        assert_eq!(msg, "restarted fake");
+    }
+
+    #[test]
+    fn restart_propagates_runner_error_when_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join("atr.service");
+        std::fs::write(&unit, "x").unwrap();
+        let err = super::restart_with(&unit, || anyhow::bail!("boom")).unwrap_err();
+        assert!(format!("{err:#}").contains("boom"));
+    }
+
     use super::*;
 
     #[test]

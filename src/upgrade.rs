@@ -29,8 +29,10 @@ impl Env {
 pub fn upgrade(version: Option<&str>, config_path: &Path) -> Result<String> {
     let env = Env::real()?;
     let msg = upgrade_with(version, config_path, &env)?;
-    if let Err(e) = crate::service::restart() {
-        eprintln!("restart after upgrade: {e:#}");
+    match crate::service::restart() {
+        Ok(note) if note == crate::service::RESTART_SKIPPED_NOTE => eprintln!("{note}"),
+        Ok(_) => {}
+        Err(e) => eprintln!("restart after upgrade: {e:#}"),
     }
     Ok(msg)
 }
@@ -78,8 +80,10 @@ pub(crate) fn upgrade_with(version: Option<&str>, config_path: &Path, env: &Env)
 
 pub fn rollback(config_path: &Path) -> Result<String> {
     let msg = rollback_with(config_path, &current_bin(), &backup_dir())?;
-    if let Err(e) = crate::service::restart() {
-        eprintln!("restart after rollback: {e:#}");
+    match crate::service::restart() {
+        Ok(note) if note == crate::service::RESTART_SKIPPED_NOTE => eprintln!("{note}"),
+        Ok(_) => {}
+        Err(e) => eprintln!("restart after rollback: {e:#}"),
     }
     Ok(msg)
 }
