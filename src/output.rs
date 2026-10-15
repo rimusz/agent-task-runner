@@ -143,8 +143,8 @@ fn post_webhook(url: &str, payload: &Value) -> Result<()> {
     if url.is_empty() {
         anyhow::bail!("webhook output needs a URL");
     }
-    match ureq::post(url)
-        .set("User-Agent", "atr")
+    match crate::util::ureq_agent(std::time::Duration::from_secs(10))
+        .post(url)
         .set("Content-Type", "application/json")
         .send_json(payload.clone())
     {
@@ -299,6 +299,16 @@ fn issue_comment(shared: &Shared, task: &Task, payload: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webhook_closed_port_does_not_hang() {
+        let start = std::time::Instant::now();
+        post_webhook("http://127.0.0.1:1/hook", &json!({"ok": true})).unwrap();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "webhook POST to a closed port must fail fast"
+        );
+    }
 
     #[test]
     fn patch_path_from_dir_or_file() {

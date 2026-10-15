@@ -2,6 +2,16 @@ use crate::config::Config;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// Bounded HTTP client for outbound calls (Telegram, webhooks, notify).
+/// ureq has no default timeout; without one a hung peer blocks the thread forever.
+pub(crate) fn ureq_agent(timeout: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(timeout)
+        .user_agent("atr")
+        .build()
+}
 
 pub fn current_bin() -> PathBuf {
     std::env::current_exe()

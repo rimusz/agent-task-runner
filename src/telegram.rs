@@ -247,7 +247,9 @@ fn send_message(
     if let Some(m) = markup {
         payload["reply_markup"] = m;
     }
-    let send = ureq::post(&url).set("User-Agent", "atr").send_json(payload);
+    let send = crate::util::ureq_agent(Duration::from_secs(10))
+        .post(&url)
+        .send_json(payload);
     if let Err(e) = send {
         tracing::warn!("telegram send failed: {}", redact(&e.to_string(), token));
     }
@@ -267,8 +269,12 @@ pub async fn bot_loop(shared: Arc<Shared>) {
         let cfg = shared.config.read().unwrap().telegram.clone();
         if !cfg.enabled {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            maybe_daily(&shared);
-            flush_due(&shared);
+            let shared2 = shared.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                maybe_daily(&shared2);
+                flush_due(&shared2);
+            })
+            .await;
             continue;
         }
         if bot_token(&cfg).is_none() || allowed_chats(&cfg).is_empty() {
@@ -277,9 +283,14 @@ pub async fn bot_loop(shared: Arc<Shared>) {
             continue;
         }
         let shared2 = shared.clone();
-        let _ = tokio::task::spawn_blocking(move || poll_once(&shared2)).await;
-        maybe_daily(&shared);
-        flush_due(&shared);
+        let _ = tokio::task::spawn_blocking(move || {
+            poll_once(&shared2);
+            maybe_daily(&shared2);
+            flush_due(&shared2);
+        })
+        .await;
+        // Yield so a fast getUpdates (tests / empty inbox) cannot busy-loop the runtime.
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -301,10 +312,8 @@ fn poll_once(shared: &Shared) {
         token,
         offset
     );
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(40))
-        .build();
-    let resp = match agent.get(&url).set("User-Agent", "atr").call() {
+    let agent = crate::util::ureq_agent(Duration::from_secs(40));
+    let resp = match agent.get(&url).call() {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("telegram getUpdates: {}", redact(&e.to_string(), &token));
@@ -1540,6 +1549,13 @@ fn maybe_daily(shared: &Shared) {
 fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
     let (a, b) = s.split_once(':')?;
     Some((a.parse().ok()?, b.parse().ok()?))
+}
+
+#[doc(hidden)]
+pub fn clear_notify_batch() {
+    let mut b = batch().lock().unwrap();
+    b.lines.clear();
+    b.last = Instant::now();
 }
 
 #[cfg(test)]

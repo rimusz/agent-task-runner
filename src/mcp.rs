@@ -627,7 +627,8 @@ async fn wait_task(shared: &Shared, args: &Value) -> Result<Value, String> {
         if terminal_status(&t.status) {
             return get_result(shared, args);
         }
-        if std::time::Instant::now() >= deadline {
+        let now = std::time::Instant::now();
+        if now >= deadline {
             return Ok(json!({
                 "ok": false,
                 "key": key,
@@ -635,7 +636,10 @@ async fn wait_task(shared: &Shared, args: &Value) -> Result<Value, String> {
                 "timed_out": true,
             }));
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let slice = deadline
+            .saturating_duration_since(now)
+            .min(std::time::Duration::from_millis(200));
+        tokio::time::sleep(slice).await;
     }
 }
 
@@ -1030,11 +1034,15 @@ cli = "/bin/true"
         assert_eq!(t.output_kind, "text");
         s.db.set_status("task-math", "waiting").unwrap();
         s.db.set_task_result("task-math", "4", "", None).unwrap();
-        let waited = handle_raw(
-            &s,
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"wait_task","arguments":{"key":"task-math","timeout_seconds":2}}}"#,
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            handle_raw(
+                &s,
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"wait_task","arguments":{"key":"task-math","timeout_seconds":2}}}"#,
+            ),
         )
-        .await;
+        .await
+        .expect("wait_task exceeded test budget");
         let body = waited[0]["result"]["content"][0]["text"].as_str().unwrap();
         assert!(body.contains("\"text\""), "{body}");
         assert!(body.contains("4"), "{body}");
@@ -1046,6 +1054,27 @@ cli = "/bin/true"
         let g = got[0]["result"]["content"][0]["text"].as_str().unwrap();
         assert!(g.contains("4"), "{g}");
         assert!(!g.to_ascii_lowercase().contains("secret"), "{g}");
+    }
+
+    #[tokio::test]
+    async fn wait_task_times_out_when_still_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path());
+        s.db.upsert_task("task-slow", dir.path().to_str().unwrap(), None)
+            .unwrap();
+        s.db.set_status("task-slow", "queued").unwrap();
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            handle_raw(
+                &s,
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"wait_task","arguments":{"key":"task-slow","timeout_seconds":1}}}"#,
+            ),
+        )
+        .await
+        .expect("wait_task timeout path exceeded test budget");
+        let body = waited[0]["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("timed_out"), "{body}");
+        assert!(body.contains("queued"), "{body}");
     }
 
     #[tokio::test]

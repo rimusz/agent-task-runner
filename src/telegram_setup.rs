@@ -157,8 +157,8 @@ pub fn send_test_message(token: &str, chat_id: i64, api_base: &str) -> Result<()
         "text": TEST_TEXT,
         "disable_web_page_preview": true,
     });
-    ureq::post(&url)
-        .set("User-Agent", "atr")
+    crate::util::ureq_agent(Duration::from_secs(10))
+        .post(&url)
         .send_json(payload)
         .map_err(|e| anyhow!("send test message: {}", redact(&e.to_string(), token)))?;
     Ok(())
@@ -168,15 +168,13 @@ pub fn discover_chat_id(token: &str, api_base: &str, wait: Duration) -> Result<i
     let host = api_host(api_base);
     let deadline = Instant::now() + wait;
     let mut offset: i64 = 0;
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(15))
-        .build();
+    let agent = crate::util::ureq_agent(Duration::from_secs(15));
     let mut last_err: Option<String> = None;
     while Instant::now() < deadline {
         let remain = deadline.saturating_duration_since(Instant::now());
         let long_poll = remain.as_secs().clamp(1, 8);
         let url = format!("{host}/bot{token}/getUpdates?timeout={long_poll}&offset={offset}");
-        match agent.get(&url).set("User-Agent", "atr").call() {
+        match agent.get(&url).call() {
             Ok(r) => {
                 let v: Value = r.into_json().unwrap_or_else(|_| serde_json::json!({}));
                 if v.get("ok") == Some(&Value::Bool(false)) {

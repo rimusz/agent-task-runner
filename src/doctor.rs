@@ -837,7 +837,7 @@ mod tests {
         std::fs::write(dir.path().join("system-prompt.md"), "p\n").unwrap();
         let text = format!(
             r#"
-listen = "127.0.0.1:17991"
+listen = "127.0.0.1:0"
 repo_path = "{repo}"
 system_prompt_file = "{prompt}"
 [mcp]
@@ -939,7 +939,7 @@ allowed_chat_ids = [42]
         crate::opencode_cfg::set_test_path(Some(dir.path().join("opencode.json")));
         let text = format!(
             r#"
-listen = "127.0.0.1:17992"
+listen = "127.0.0.1:0"
 repo_path = "{repo}"
 system_prompt_file = "{prompt}"
 [[provider]]

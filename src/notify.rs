@@ -49,7 +49,9 @@ pub fn notify_unless_shadow(cfg: &TelegramConfig, body: &str, shadow: bool) {
         "text": text,
         "disable_web_page_preview": true,
     });
-    let send = ureq::post(&url).set("User-Agent", "atr").send_json(payload);
+    let send = crate::util::ureq_agent(std::time::Duration::from_secs(10))
+        .post(&url)
+        .send_json(payload);
     if let Err(e) = send {
         tracing::warn!(
             "telegram notify failed: {}",

@@ -752,7 +752,7 @@ async fn http_submit_uses_exit_contract_codes() {
 async fn cancel_does_not_cool_down_provider() {
     let h = Harness::with_providers(
         &[
-            ("claude", true, "success 2.0"),
+            ("claude", true, "hold"),
             ("grok", false, "success"),
             ("cursor", false, "success"),
             ("codex", false, "success"),
@@ -1672,8 +1672,17 @@ async fn protect_tests_opt_out_label() {
     assert_eq!(runs[0].outcome.as_deref(), Some("success"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn telegram_fake_api_status_confirm_and_acl() {
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        telegram_fake_api_status_confirm_and_acl_inner(),
+    )
+    .await
+    .expect("telegram fake-api e2e exceeded 15s (likely a blocked wait)");
+}
+
+async fn telegram_fake_api_status_confirm_and_acl_inner() {
     use axum::body::Bytes;
     use axum::extract::State;
     use axum::http::Uri;
@@ -1681,6 +1690,8 @@ async fn telegram_fake_api_status_confirm_and_acl() {
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
+
+    atr::telegram::clear_notify_batch();
 
     #[derive(Clone)]
     struct FakeTg {
@@ -1798,7 +1809,7 @@ cli = "/bin/true"
         atr::telegram::bot_loop(bot).await;
     });
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
     loop {
         let sent = fake.sent.lock().unwrap().clone();
         if sent.iter().any(|m| {
@@ -1809,7 +1820,7 @@ cli = "/bin/true"
         }) {
             break;
         }
-        if tokio::time::Instant::now() > deadline {
+        if std::time::Instant::now() > deadline {
             let hits = fake.hits.lock().unwrap().clone();
             panic!("timed out waiting for /status reply: sent={sent:?} hits={hits:?}");
         }
@@ -1832,7 +1843,7 @@ cli = "/bin/true"
         "update_id": 12,
         "message": {"chat": {"id": 42}, "text": "/pause"}
     }));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
     let data = loop {
         let sent = fake.sent.lock().unwrap().clone();
         if let Some(m) = sent.iter().rev().find(|m| {
@@ -1846,7 +1857,7 @@ cli = "/bin/true"
                 .unwrap()
                 .to_string();
         }
-        if tokio::time::Instant::now() > deadline {
+        if std::time::Instant::now() > deadline {
             panic!("timed out waiting for pause confirm: {sent:?}");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1855,7 +1866,7 @@ cli = "/bin/true"
         "update_id": 13,
         "callback_query": {"data": data, "message": {"chat": {"id": 42}}}
     }));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
     loop {
         if shared
             .intake_paused
@@ -1871,7 +1882,7 @@ cli = "/bin/true"
         }) {
             break;
         }
-        if tokio::time::Instant::now() > deadline {
+        if std::time::Instant::now() > deadline {
             panic!("timed out waiting for pause to apply: {sent:?}");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
