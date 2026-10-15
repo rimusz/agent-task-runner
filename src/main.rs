@@ -194,7 +194,13 @@ enum Cmd {
         print: bool,
     },
     /// Download a GitHub release, verify sha256, swap the binary, restart.
-    Upgrade { version: Option<String> },
+    /// Without a version, does nothing if already on the latest release.
+    Upgrade {
+        version: Option<String>,
+        /// Reinstall even if already on the latest release.
+        #[arg(long)]
+        force: bool,
+    },
     /// Restore the previous binary, config, and database.
     Rollback,
     /// Install, uninstall, or restart the user service.
@@ -766,8 +772,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             println!("{}", atr::ui::run(&listen, print));
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Upgrade { version } => {
-            let msg = atr::upgrade::upgrade(version.as_deref(), &path)?;
+        Cmd::Upgrade { version, force } => {
+            let msg = atr::upgrade::upgrade(version.as_deref(), force, &path)?;
             println!("{msg}");
             Ok(ExitCode::SUCCESS)
         }
