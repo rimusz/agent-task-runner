@@ -5,7 +5,7 @@ atr is one program with many ways in. Pick the uses that fit you; they all run t
 | Use case | What you need to set up |
 |---|---|
 | [1. Background runner on your laptop](#1-background-runner-on-your-laptop) | atr + `atr init` (installs the user service), at least one signed-in coding CLI |
-| [2. Always-on Linux server or cloud VM](#2-always-on-linux-server-or-cloud-vm) | Same as 1, plus `loginctl enable-linger "$USER"` |
+| [2. Always-on Linux server or cloud VM](#2-always-on-linux-server-or-cloud-vm) | Same as 1, plus `sudo loginctl enable-linger "$USER"` |
 | [3. GitHub issue worker](#3-github-issue-worker) | GitHub token (`gh auth login` or `GH_TOKEN`), repos added with `atr repos add` |
 | [4. Backend for AI agents (MCP)](#4-backend-for-ai-agents-mcp) | `atr mcp` in your agent's MCP config; for remote use, Tailscale + an MCP token |
 | [5. Scripts and automations](#5-scripts-and-automations) | `curl` to `POST /tasks`, or the inbox folder turned on in config |
@@ -29,7 +29,7 @@ Put atr on a headless Linux box or cloud VM so it works around the clock, even w
 
 ```bash
 atr init --yes
-loginctl enable-linger "$USER"
+sudo loginctl enable-linger "$USER"
 atr doctor
 ```
 

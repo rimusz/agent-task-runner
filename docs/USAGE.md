@@ -181,8 +181,10 @@ You need Grok Build 1.0.52 or newer; `atr doctor` checks it. Everything else in 
 ### Maintenance
 
 ```bash
-atr upgrade
+atr upgrade               # no-op if already on the latest release
+atr upgrade --force       # reinstall the latest release anyway
 atr rollback
+atr skills install
 atr providers detect
 atr providers add kimi
 atr providers add claude --kind claude
@@ -190,11 +192,16 @@ atr providers move claude --to 1
 atr providers enable cursor
 atr providers disable grok
 atr service restart
+atr reset --dry-run
 atr tasks rm my-task --dry-run
 atr gc --tasks --dry-run
 ```
 
-`atr tasks rm` only deletes finished or failed work, never a running task. Full flag list: `atr --help`. Service files and config edits: [CONFIG.md](CONFIG.md).
+`atr skills install` writes the atr agent skill (`skills/atr/SKILL.md`) for each coding CLI installed on this machine: `~/.claude` (claude), `~/.cursor` (cursor-agent), `~/.codex` (codex), `~/.grok` (grok) and `~/.config/opencode` (opencode). CLIs that aren't installed are skipped and their folders aren't created. Config files are never touched. `atr init` does the same. Run it again after installing a new CLI, or on each host that runs atr.
+
+`atr tasks rm` only deletes finished or failed work, never a running task.
+
+`atr reset` is a full reset. It lists what it will remove and asks before doing it (`--yes`/`-y` skips the prompt; without a terminal it refuses unless you pass `--yes`; `--dry-run` only prints the list). It stops and uninstalls the service, then deletes only atr's own files: `~/.config/atr` (config, secrets, launcher), `~/.local/share/atr` (task database, logs, backups, inbox), `~/atr-work` (worktrees), `~/Library/Logs/atr` and `~/Library/Logs/atr.boot.err` on macOS, and the `skills/atr/` folders under `~/.claude`, `~/.cursor`, `~/.codex`, `~/.grok` and `~/.config/opencode`. It never touches provider configs, your repos, or the `atr` binary; configured paths outside those dirs, or a dir that holds a watched repo, are listed as kept. Run `atr init` afterwards to set up again. Full flag list: `atr --help`. Service files and config edits: [CONFIG.md](CONFIG.md).
 
 ## How other agents and tools reach atr
 

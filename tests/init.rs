@@ -6,6 +6,20 @@ use std::fs;
 fn init_yes_in_temp_home_writes_files() {
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("ATR_SKILL_HOME", dir.path());
+    // Skills are only written for installed CLIs: provide a fake claude.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.path().join("fakebin");
+        fs::create_dir_all(&bin).unwrap();
+        let p = bin.join("claude");
+        fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        let old = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&old));
+        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+    }
     let cfg_path = dir.path().join("config.toml");
     let text = run(InitOpts {
         yes: true,

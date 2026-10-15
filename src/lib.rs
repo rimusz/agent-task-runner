@@ -33,6 +33,7 @@ pub mod providers_edit;
 pub mod quota;
 pub mod reported;
 pub mod repos;
+pub mod reset;
 pub mod review;
 pub mod runner;
 pub mod scheduler;

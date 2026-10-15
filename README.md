@@ -34,7 +34,7 @@ Never print, log or paste any secret, token or API key. Never sign in to anythin
 4. Ask whether I want to answer the setup questions myself or take defaults, then run one of:
    atr init
    atr init --yes
-5. Run atr service install. On headless Linux also: loginctl enable-linger "$USER".
+5. Run atr service install. On headless Linux also: sudo loginctl enable-linger "$USER".
 6. Ask which GitHub repos to watch and add each: atr repos add <owner/name> --path <clone>
 7. Run atr doctor and report every warn or FAIL line with a suggested fix.
 ```
@@ -57,7 +57,7 @@ No Intel Mac build: use `cargo install --git https://github.com/rimusz/agent-tas
 Arch, Omarchy and Asahi notes: [docs/INSTALL.md](docs/INSTALL.md).
 </details>
 
-Later, `atr upgrade` updates it in place and restarts the service (`atr rollback` undoes it).
+Later, `atr upgrade` updates it in place and restarts the service (it does nothing if already on the latest release; `--force` reinstalls) (`atr rollback` undoes it). `atr reset` removes atr's service, config, data and skills to start fresh (see [USAGE.md](docs/USAGE.md#maintenance)).
 
 ## Setup
 
@@ -129,6 +129,7 @@ Claude Code, Grok Build, Cursor, Codex and OpenCode. OpenCode also opens the doo
 | [docs/CONFIG.md](docs/CONFIG.md) | Config file, paths, several repos, dashboard bind |
 | [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) | How providers, MCP and CI fit together |
 | [docs/DESIGN.md](docs/DESIGN.md) | Internals, for people changing atr |
+| [docs/RELEASING.md](docs/RELEASING.md) | How to cut a release (on demand only) |
 
 ## Trademarks and license
 
