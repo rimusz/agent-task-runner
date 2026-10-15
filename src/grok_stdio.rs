@@ -190,6 +190,117 @@ fn finish(
 
 #[cfg(test)]
 mod tests {
+    use super::run;
+    use crate::db::Db;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    fn setup(body: &str) -> (tempfile::TempDir, crate::config::Provider, Db, i64) {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = dir.path().join("grok");
+        std::fs::write(
+            &cli,
+            body.replace("@LOG@", &dir.path().join("argv").display().to_string()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.path().join("p.md"), "p\n").unwrap();
+        let text = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{root}/s.db"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+[[provider]]
+name = "grok"
+kind = "grok"
+cli = "{cli}"
+model = "grok-x"
+plugin = true
+"#,
+            root = dir.path().display(),
+            cli = cli.display()
+        );
+        let raw: crate::config::RawConfig = toml::from_str(&text).unwrap();
+        let cfg = crate::config::Config::from_raw(raw).unwrap();
+        let p = cfg.providers[0].clone();
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        db.upsert_task("g-1", "", None).unwrap();
+        let run_id = db.start_run("g-1", "grok", "grok-x").unwrap();
+        (dir, p, db, run_id)
+    }
+
+    async fn go(
+        dir: &tempfile::TempDir,
+        p: &crate::config::Provider,
+        db: &Db,
+        run_id: i64,
+    ) -> crate::runner::RunResult {
+        run(
+            db,
+            p,
+            dir.path(),
+            &dir.path().join("plugins"),
+            "do it",
+            None,
+            run_id,
+            "g-1",
+            "http://127.0.0.1:1/hook",
+            "true",
+            Arc::new(Mutex::new(None)),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap()
+    }
+
+    const OK: &str = r#"#!/bin/sh
+echo "$*" > '@LOG@'
+read a; read b; read c
+echo '{"jsonrpc":"2.0","id":1,"result":{}}'
+echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-42"}}'
+echo 'not json'
+echo '{"jsonrpc":"2.0","method":"session/update","params":{"text":"hi"}}'
+echo '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","_meta":{"totalTokens":42}}}'
+"#;
+
+    #[tokio::test]
+    async fn stdio_success_records_session_usage_and_args() {
+        let (dir, p, db, run_id) = setup(OK);
+        let r = go(&dir, &p, &db, run_id).await;
+        assert_eq!(r.outcome, "success");
+        assert_eq!(r.session_id.as_deref(), Some("sess-42"));
+        assert_eq!(r.usage.input, 42);
+        assert_eq!(r.snippet, "end_turn");
+        let argv = std::fs::read_to_string(dir.path().join("argv")).unwrap();
+        assert!(argv.starts_with("agent --plugin-dir "), "{argv}");
+        assert!(argv.contains("--model grok-x"), "{argv}");
+        assert!(argv.contains("--always-approve stdio"), "{argv}");
+        assert!(!argv.contains(" -p "), "{argv}");
+    }
+
+    #[tokio::test]
+    async fn stdio_prompt_error_is_not_success() {
+        let body = r#"#!/bin/sh
+read a; read b; read c
+echo '{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"boom"}}'
+"#;
+        let (dir, p, db, run_id) = setup(body);
+        let r = go(&dir, &p, &db, run_id).await;
+        assert_ne!(r.outcome, "success");
+        assert!(r.snippet.contains("boom"), "{}", r.snippet);
+    }
+
+    #[tokio::test]
+    async fn stdio_nonzero_exit_without_result_fails() {
+        let body = "#!/bin/sh\nread a\nexit 3\n";
+        let (dir, p, db, run_id) = setup(body);
+        let r = go(&dir, &p, &db, run_id).await;
+        assert_eq!(r.outcome, "failed");
+        assert_eq!(r.exit_code, Some(3));
+    }
     #[test]
     fn plugin_dir_flag_is_agent_not_p() {
         let args = [
