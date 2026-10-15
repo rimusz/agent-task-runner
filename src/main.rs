@@ -208,6 +208,15 @@ enum Cmd {
     },
     /// Restore the previous binary, config, and database.
     Rollback,
+    /// Full reset: stop and remove the service, delete atr's config, data, logs, and skills.
+    Reset {
+        /// Skip the confirmation prompt.
+        #[arg(short, long)]
+        yes: bool,
+        /// Show what would be removed and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Install, uninstall, or restart the user service.
     Service {
         #[command(subcommand)]
@@ -801,6 +810,37 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Rollback => {
             let msg = atr::upgrade::rollback(&path)?;
             println!("{msg}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Reset { yes, dry_run } => {
+            let cfg = load_config(&path).ok();
+            let home = atr::service::home_dir();
+            let skill_home = atr::skill::skill_home().unwrap_or_else(|| home.clone());
+            let plan = atr::reset::plan(
+                &home,
+                &skill_home,
+                &atr::service::service_file_path(),
+                &path,
+                cfg.as_ref(),
+            );
+            print!("{}", atr::reset::render(&plan));
+            if dry_run {
+                println!("dry run: nothing changed");
+                return Ok(ExitCode::SUCCESS);
+            }
+            let tty = std::io::stdin().is_terminal();
+            if atr::reset::confirm_mode(yes, dry_run, tty)? == atr::reset::Confirm::Ask {
+                use std::io::{BufRead, Write};
+                print!("Proceed with full reset? [y/N] ");
+                std::io::stdout().flush()?;
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                if !atr::reset::answer_is_yes(&line) {
+                    println!("aborted; nothing changed");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+            println!("{}", atr::reset::execute(&plan, atr::service::uninstall)?);
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Service { cmd } => {

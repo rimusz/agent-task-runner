@@ -57,7 +57,7 @@ No Intel Mac build: use `cargo install --git https://github.com/rimusz/agent-tas
 Arch, Omarchy and Asahi notes: [docs/INSTALL.md](docs/INSTALL.md).
 </details>
 
-Later, `atr upgrade` updates it in place and restarts the service (it does nothing if already on the latest release; `--force` reinstalls) (`atr rollback` undoes it).
+Later, `atr upgrade` updates it in place and restarts the service (it does nothing if already on the latest release; `--force` reinstalls) (`atr rollback` undoes it). `atr reset` removes atr's service, config, data and skills to start fresh (see [USAGE.md](docs/USAGE.md#maintenance)).
 
 ## Setup
 
