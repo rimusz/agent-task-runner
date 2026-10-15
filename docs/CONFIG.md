@@ -207,3 +207,9 @@ task rows only. Running tasks are refused.
 
 `atr gc --dry-run`, `atr shadow report --since 7d`, `atr tasks rm`,
 `atr usage --period month --by provider`.
+
+## Provider capabilities
+
+`capabilities = ["browser", "desktop"]` on a `[[provider]]` marks which
+providers may take tasks with matching `needs`. Top-level `desktop_check`
+overrides graphical-session detection. See [NEEDS.md](NEEDS.md).

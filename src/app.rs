@@ -51,6 +51,9 @@ pub struct SubmitOpts {
     /// Preferred provider. Stored before the task is queued so a running
     /// `serve` cannot dispatch it to the default provider first.
     pub provider_hint: Option<String>,
+    /// Required provider capabilities (`browser`, `desktop`). Stored before
+    /// queueing so the scheduler never hands the task to an incapable provider.
+    pub needs: Vec<String>,
 }
 
 impl Shared {
@@ -189,6 +192,10 @@ impl Shared {
             .filter(|s| !s.is_empty())
         {
             self.db.set_provider_hint(key, h)?;
+        }
+        if !opts.needs.is_empty() {
+            let needs = crate::task::parse_needs(&opts.needs)?;
+            self.db.set_task_needs(key, &needs.join(","))?;
         }
         let running = self.inflight.lock().unwrap().contains_key(key)
             || self.db.task_is_running(key)?

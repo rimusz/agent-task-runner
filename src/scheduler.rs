@@ -235,6 +235,13 @@ pub fn pick_provider(
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
 
+    let needs = crate::task::task_needs(&task.needs, &task.labels);
+    if waiting_for_desktop(cfg, &needs) {
+        tracing::debug!(task = %task.key, "desktop task waiting for an unlocked graphical session");
+        return Ok(None);
+    }
+    let capable = |p: &Provider| provider_has(p, &needs);
+
     let mut prefers = Vec::new();
     if crate::plan::is_driver_role(&task.role) {
         if let Some(d) = cfg.driver_name() {
@@ -254,7 +261,7 @@ pub fn pick_provider(
         if tried.contains(&pref.as_str()) {
             continue;
         }
-        if let Some(p) = cfg.provider(pref) {
+        if let Some(p) = cfg.provider(pref).filter(|p| capable(p)) {
             if let Some(reason) = unavailable(cfg, p, db, inflight, true, clock)? {
                 if reason == "full" {
                     return Ok(None);
@@ -269,7 +276,7 @@ pub fn pick_provider(
     }
 
     for p in &cfg.providers {
-        if tried.contains(&p.name.as_str()) {
+        if tried.contains(&p.name.as_str()) || !capable(p) {
             continue;
         }
         if unavailable(cfg, p, db, inflight, false, clock)?.is_some() {
@@ -278,6 +285,17 @@ pub fn pick_provider(
         return Ok(Some(p.clone()));
     }
     Ok(None)
+}
+
+/// Provider lists every capability the task needs.
+pub fn provider_has(p: &Provider, needs: &[String]) -> bool {
+    needs.iter().all(|n| p.capabilities.iter().any(|c| c == n))
+}
+
+/// A `desktop` task must wait while no logged-in, unlocked graphical session
+/// is available.
+fn waiting_for_desktop(cfg: &Config, needs: &[String]) -> bool {
+    needs.iter().any(|n| n == "desktop") && !crate::desktop::session_ready(&cfg.desktop_check)
 }
 
 fn log_skips(
@@ -1118,7 +1136,10 @@ async fn handle_failover(
     let inflight = shared.inflight.lock().unwrap().clone();
     let task = shared.db.get_task(key)?.unwrap();
     if pick_provider(cfg, &shared.db, &inflight, &task, &Clock::system())?.is_none() {
-        if settle_no_provider(cfg, &shared.db, key, &Clock::system())? == "queued" {
+        if waiting_for_desktop(cfg, &crate::task::task_needs(&task.needs, &task.labels)) {
+            // stays queued until the graphical session is back
+            shared.db.set_tried(key, None)?;
+        } else if settle_no_provider(cfg, &shared.db, key, &Clock::system())? == "queued" {
             // wait until a cooldown or quota window ends
         } else {
             notify_run(
@@ -1809,6 +1830,7 @@ mod tests {
             cache_window: std::time::Duration::from_secs(3600),
             system_prompt_flag: String::new(),
             keep_alive: String::new(),
+            capabilities: Vec::new(),
         }
     }
 
@@ -2447,5 +2469,116 @@ cli = "{cli}"
             .unwrap()
             .expect("claude");
         assert_eq!(picked.name, "claude");
+    }
+
+    fn fake_cli(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    fn needs_cfg(dir: &std::path::Path, desktop_check: &str) -> crate::config::Config {
+        let text = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+desktop_check = "{check}"
+[github]
+poll_interval = "60s"
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "{a}"
+[[provider]]
+name = "grok"
+kind = "grok"
+cli = "{b}"
+capabilities = "browser"
+[[provider]]
+name = "desk"
+kind = "codex"
+cli = "{c}"
+capabilities = ["browser", "desktop"]
+"#,
+            db = dir.join("s.db").display(),
+            root = dir.display(),
+            check = desktop_check,
+            a = fake_cli(dir, "fake-claude").display(),
+            b = fake_cli(dir, "fake-grok").display(),
+            c = fake_cli(dir, "fake-codex").display(),
+        );
+        std::fs::write(dir.join("p.md"), "p\n").unwrap();
+        let raw: crate::config::RawConfig = toml::from_str(&text).unwrap();
+        crate::config::Config::from_raw(raw).unwrap()
+    }
+
+    fn pick_name(cfg: &crate::config::Config, db: &Db, key: &str) -> Option<String> {
+        let t = db.get_task(key).unwrap().unwrap();
+        pick_provider(cfg, db, &HashMap::new(), &t, &crate::clock::Clock::system())
+            .unwrap()
+            .map(|p| p.name)
+    }
+
+    #[test]
+    fn needs_route_to_capable_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = needs_cfg(dir.path(), "true");
+        assert_eq!(cfg.provider("grok").unwrap().capabilities, vec!["browser"]);
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        db.upsert_task("plain", "/repo", None).unwrap();
+        assert_eq!(pick_name(&cfg, &db, "plain").as_deref(), Some("claude"));
+
+        db.upsert_task("web", "/repo", None).unwrap();
+        db.set_task_needs("web", "browser").unwrap();
+        assert_eq!(pick_name(&cfg, &db, "web").as_deref(), Some("grok"));
+
+        // A hint for an incapable provider is ignored.
+        db.set_provider_hint("web", "claude").unwrap();
+        assert_eq!(pick_name(&cfg, &db, "web").as_deref(), Some("grok"));
+
+        // GitHub `needs:browser` label works without stored needs.
+        db.upsert_task("gh", "/repo", None).unwrap();
+        db.set_task_labels("gh", "for:atr,needs:browser").unwrap();
+        assert_eq!(pick_name(&cfg, &db, "gh").as_deref(), Some("grok"));
+
+        db.upsert_task("gui", "/repo", None).unwrap();
+        db.set_task_needs("gui", "desktop").unwrap();
+        assert_eq!(pick_name(&cfg, &db, "gui").as_deref(), Some("desk"));
+
+        // No capable provider left: wait instead of using an incapable one.
+        db.set_tried("web", Some("grok,desk")).unwrap();
+        assert_eq!(pick_name(&cfg, &db, "web"), None);
+    }
+
+    #[test]
+    fn desktop_tasks_wait_for_unlocked_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let flag = dir.path().join("session-unlocked");
+        // Fake session probe: ready only while the flag file exists.
+        let probe = dir.path().join("fake-session");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&probe, format!("#!/bin/sh\ntest -e '{}'\n", flag.display())).unwrap();
+            std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let locked = needs_cfg(dir.path(), &probe.display().to_string());
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        db.upsert_task("gui", "/repo", None).unwrap();
+        db.set_task_needs("gui", "desktop").unwrap();
+        db.upsert_task("web", "/repo", None).unwrap();
+        db.set_task_needs("web", "browser").unwrap();
+        assert_eq!(pick_name(&locked, &db, "gui"), None, "locked: wait");
+        // Browser tasks don't need the graphical session.
+        assert_eq!(pick_name(&locked, &db, "web").as_deref(), Some("grok"));
+
+        std::fs::write(&flag, "").unwrap();
+        // Different command string so the short probe cache is bypassed.
+        let unlocked = needs_cfg(dir.path(), &format!("sh {}", probe.display()));
+        assert_eq!(pick_name(&unlocked, &db, "gui").as_deref(), Some("desk"));
     }
 }

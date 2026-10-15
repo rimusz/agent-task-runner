@@ -79,6 +79,9 @@ struct TaskIn {
     tests_ok: bool,
     #[serde(default)]
     provider: Option<String>,
+    /// Required capabilities: `"browser"`, `"desktop"`, or a list.
+    #[serde(default, deserialize_with = "crate::task::de_needs")]
+    needs: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -187,6 +190,7 @@ async fn create_task(
             title: Some(title.clone()),
             allow_empty_repo: allow_empty,
             provider_hint: hint.clone(),
+            needs: payload.needs.clone(),
         },
     ) {
         Ok(outcome) => match outcome {
@@ -778,6 +782,13 @@ token_file = "/tmp/atr-mcp-missing.token"
         assert_eq!(v["output"], "text");
         let t = s.db.get_task("http-life").unwrap().unwrap();
         assert_eq!(t.provider_hint, "claude");
+        assert_eq!(t.needs, "");
+        post_json(
+            &format!("{base}/tasks"),
+            r#"{"key":"http-web","body":"browse","workspace":"none","needs":"browser"}"#,
+        )
+        .unwrap();
+        assert_eq!(s.db.get_task("http-web").unwrap().unwrap().needs, "browser");
         assert_eq!(t.title, "Life");
 
         let got: serde_json::Value = serde_json::from_str(

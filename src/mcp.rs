@@ -315,6 +315,7 @@ fn tool_schema(name: &str) -> Value {
                 "patch": {"type": "string"},
                 "key": {"type": "string"},
                 "provider": {"type": "string", "description": "Provider or driver hint"},
+                "needs": {"type": "array", "items": {"type": "string", "enum": ["browser", "desktop"]}, "description": "Required provider capabilities; desktop tasks wait for a logged-in, unlocked graphical session"},
                 "hint": {"type": "string"}
             },
             "required": ["body"]
@@ -467,6 +468,24 @@ fn arg_str(args: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
+/// `needs` as a string (`"browser,desktop"`) or an array of strings.
+fn arg_needs(args: &Value) -> Result<Vec<String>, String> {
+    let items: Vec<String> = match args.get("needs") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or("needs must be strings")
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err("needs must be a string or array".into()),
+    };
+    crate::task::parse_needs(&items).map_err(|e| e.to_string())
+}
+
 fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
     let body = arg_str(args, &["body", "prompt", "text", "message"]).ok_or("missing body")?;
     let cfg = shared.config.read().unwrap().clone();
@@ -508,6 +527,7 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
         Some(k) => k,
         None => unique_key(shared, &cfg, entry.as_ref(), &title)?,
     };
+    let needs = arg_needs(args)?;
     let text = format!("# {title}\n\n{body}");
     let outcome = shared
         .submit_with(
@@ -530,6 +550,7 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
                 title: Some(title.clone()),
                 allow_empty_repo: allow_empty,
                 provider_hint: arg_str(args, &["provider", "hint", "driver"]),
+                needs,
             },
         )
         .map_err(|e| e.to_string())?;
@@ -907,6 +928,26 @@ cli = "/bin/true"
         let t = s.db.get_task("task-hinted").unwrap().unwrap();
         assert_eq!(t.provider_hint, "grok");
         assert_eq!(t.status, "queued");
+    }
+
+    #[tokio::test]
+    async fn add_task_saves_needs() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path());
+        let add = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_task","arguments":{"title":"Web","body":"x","needs":["Browser","desktop"]}}}"#,
+        )
+        .await;
+        assert_eq!(add[0]["result"]["isError"], false, "{}", add[0]);
+        let t = s.db.get_task("task-web").unwrap().unwrap();
+        assert_eq!(t.needs, "browser,desktop");
+        let bad = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add_task","arguments":{"title":"Gpu","body":"x","needs":"gpu"}}}"#,
+        )
+        .await;
+        assert_eq!(bad[0]["result"]["isError"], true, "{}", bad[0]);
     }
 
     #[tokio::test]

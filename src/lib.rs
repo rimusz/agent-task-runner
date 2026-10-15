@@ -7,6 +7,7 @@ pub mod config;
 pub mod config_edit;
 pub mod dashboard;
 pub mod db;
+pub mod desktop;
 pub mod detect;
 pub mod doctor;
 pub mod duration;

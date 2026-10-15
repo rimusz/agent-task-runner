@@ -85,6 +85,10 @@ pub struct RawConfig {
     /// Cap for CLI/HTTP/MCP prompts and the default inbox file size.
     #[serde(default = "default_max_prompt_bytes")]
     pub max_prompt_bytes: String,
+    /// Command whose exit 0 means a logged-in, unlocked graphical session is
+    /// available for `needs = ["desktop"]` tasks. Empty = built-in detection.
+    #[serde(default)]
+    pub desktop_check: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -552,6 +556,10 @@ pub struct RawProvider {
     /// OpenCode/Ollama `keep_alive`. Empty = kind default (`24h` for Ollama).
     #[serde(default)]
     pub keep_alive: String,
+    /// What this provider can do beyond text/code: `browser`, `desktop`.
+    /// Tasks with `needs` only run on providers listing every need.
+    #[serde(default, deserialize_with = "crate::task::de_needs")]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -620,6 +628,7 @@ pub struct Config {
     /// Explicit `[[source]]` entries. Empty means built-in defaults.
     pub sources: Vec<SourceEntry>,
     pub max_prompt_bytes: u64,
+    pub desktop_check: String,
 }
 
 #[derive(Debug, Clone)]
@@ -748,6 +757,7 @@ pub struct Provider {
     pub cache_window: Duration,
     pub system_prompt_flag: String,
     pub keep_alive: String,
+    pub capabilities: Vec<String>,
 }
 
 impl Provider {
@@ -816,6 +826,7 @@ impl Provider {
             cache_window: Duration::from_secs(3600),
             system_prompt_flag: String::new(),
             keep_alive: String::new(),
+            capabilities: Vec::new(),
         }
     }
 }
@@ -1761,6 +1772,7 @@ impl Config {
                 p.keep_alive.trim().to_string()
             };
             providers.push(Provider {
+                capabilities: p.capabilities.clone(),
                 name: p.name,
                 kind: p.kind.clone(),
                 preset: p.preset.clone(),
@@ -1902,6 +1914,7 @@ impl Config {
                     &raw.max_prompt_bytes
                 },
             )?,
+            desktop_check: raw.desktop_check.trim().to_string(),
             display_timezone: crate::tz::DisplayTz::parse(&raw.display_timezone)?,
             github_poll_interval: parse_duration(if raw.github.poll_interval.trim().is_empty() {
                 "60s"

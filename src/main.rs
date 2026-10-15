@@ -89,6 +89,9 @@ enum Cmd {
         provider: Option<String>,
         #[arg(long)]
         title: Option<String>,
+        /// Required provider capabilities: browser, desktop (comma-separated or repeated).
+        #[arg(long, value_delimiter = ',')]
+        needs: Vec<String>,
     },
     /// Show providers (with order numbers), inflight tasks, and usage.
     Status {
@@ -448,7 +451,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             key,
             provider,
             title,
+            needs,
         } => {
+            let needs = atr::task::parse_needs(&needs)?;
             let text = if let Some(p) = prompt.filter(|s| !s.trim().is_empty()) {
                 if body.is_some() || body_file.is_some() {
                     anyhow::bail!("pass the prompt as an argument or --body, not both");
@@ -512,6 +517,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 title.as_str(),
                 provider.as_deref(),
                 matches!(workspace_kind, atr::task::WorkspaceKind::Dir),
+                &needs,
             ) {
                 println!("{key}");
                 return Ok(match status {
@@ -537,6 +543,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     title: Some(title),
                     allow_empty_repo: allow_empty,
                     provider_hint: provider.clone(),
+                    needs: needs.clone(),
                 },
             )?;
             println!("{key}");
@@ -858,6 +865,7 @@ fn http_create(
     title: &str,
     provider: Option<&str>,
     as_dir: bool,
+    needs: &[String],
 ) -> Result<u16> {
     let url = format!("http://{listen}/tasks");
     let mut payload = serde_json::json!({
@@ -877,6 +885,9 @@ fn http_create(
     }
     if let Some(p) = provider {
         payload["provider"] = serde_json::Value::String(p.into());
+    }
+    if !needs.is_empty() {
+        payload["needs"] = serde_json::json!(needs);
     }
     if let Some(spec) = output_spec {
         if output == "webhook" {
