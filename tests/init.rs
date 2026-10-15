@@ -72,7 +72,8 @@ fn init_yes_in_temp_home_writes_files() {
 #[test]
 fn init_force_keeps_existing_mcp_token() {
     let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("ATR_SKILL_HOME", dir.path());
+    // No ATR_SKILL_HOME: it is process-global and races the other init test;
+    // a non-default config dir skips skill install anyway.
     let cfg_path = dir.path().join("config.toml");
     let opts = || InitOpts {
         yes: true,
