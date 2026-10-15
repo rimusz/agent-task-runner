@@ -54,6 +54,8 @@ pub struct Task {
     pub result_text: String,
     pub result_diff: String,
     pub result_pr_url: String,
+    /// Comma list of required provider capabilities (browser, desktop).
+    pub needs: String,
 }
 
 impl Default for Task {
@@ -88,6 +90,7 @@ impl Default for Task {
             result_text: String::new(),
             result_diff: String::new(),
             result_pr_url: String::new(),
+            needs: String::new(),
         }
     }
 }
@@ -97,7 +100,7 @@ const TASK_SELECT: &str = "key, repo, issue, status, provider, session_id, workt
                           verify_retries, protect_tests_skip, labels, parent_key, role,
                           deps, review_rounds, provider_hint, title,
                           workspace_kind, output_kind, output_spec, source_kind,
-                          result_text, result_diff, result_pr_url";
+                          result_text, result_diff, result_pr_url, needs";
 
 #[derive(Debug, Clone)]
 pub struct RunRow {
@@ -427,6 +430,10 @@ impl Db {
             [],
         );
         let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN needs TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
             "ALTER TABLE tasks ADD COLUMN workspace_kind TEXT NOT NULL DEFAULT ''",
             [],
         );
@@ -709,6 +716,15 @@ impl Db {
         conn.execute(
             "UPDATE tasks SET provider_hint = ?1, updated = ?2 WHERE key = ?3",
             params![hint, now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_task_needs(&self, key: &str, needs: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET needs = ?1, updated = ?2 WHERE key = ?3",
+            params![needs, now_rfc3339(), key],
         )?;
         Ok(())
     }
@@ -2267,6 +2283,7 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         result_text: r.get::<_, Option<String>>(26)?.unwrap_or_default(),
         result_diff: r.get::<_, Option<String>>(27)?.unwrap_or_default(),
         result_pr_url: r.get::<_, Option<String>>(28)?.unwrap_or_default(),
+        needs: r.get::<_, Option<String>>(29)?.unwrap_or_default(),
     })
 }
 

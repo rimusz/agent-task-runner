@@ -1055,6 +1055,7 @@ mod tests {
             cache_window: Duration::from_secs(3600),
             system_prompt_flag: crate::config::default_system_prompt_flag(kind).into(),
             keep_alive: String::new(),
+            capabilities: Vec::new(),
         }
     }
 

@@ -34,6 +34,9 @@ struct InboxFile {
     patch: String,
     #[serde(default)]
     provider: String,
+    /// `browser`, `desktop`, or a list of them.
+    #[serde(default, deserialize_with = "crate::task::de_needs")]
+    needs: Vec<String>,
     #[serde(default)]
     shadow: bool,
 }
@@ -201,6 +204,7 @@ fn ingest_file(shared: &Shared, inbox: &Path, path: &Path, max_bytes: u64) -> Re
             title: Some(title),
             allow_empty_repo: workspace_kind == WorkspaceKind::None,
             provider_hint: Some(spec.provider.trim().to_string()).filter(|s| !s.is_empty()),
+            needs: spec.needs.clone(),
         },
     )?;
     let _ = outcome;
@@ -330,6 +334,23 @@ cli = "/bin/true"
             hints.contains(&String::new()),
             "blank provider must not pin: {hints:?}"
         );
+    }
+
+    #[test]
+    fn inbox_needs_are_saved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = shared(tmp.path());
+        let inbox = tmp.path().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(
+            inbox.join("gui.toml"),
+            "prompt = \"click it\"\nneeds = [\"desktop\"]\n",
+        )
+        .unwrap();
+        poll_once(&s).unwrap();
+        let tasks = s.db.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 1, "{tasks:?}");
+        assert_eq!(tasks[0].needs, "desktop");
     }
 
     #[test]

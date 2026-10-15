@@ -140,6 +140,13 @@ async fn poll_repo(
                     title: Some(issue.title.clone()),
                     allow_empty_repo: false,
                     provider_hint: None,
+                    needs: crate::task::needs_from_labels(
+                        &issue
+                            .labels
+                            .iter()
+                            .map(|l| l.name.as_str())
+                            .collect::<Vec<_>>(),
+                    ),
                 },
             )?;
         }
@@ -276,7 +283,7 @@ cli = "/bin/true"
         std::fs::create_dir_all(&fake).unwrap();
         std::fs::write(
             fake.join("gh-issues.json"),
-            r#"[{"number":12,"title":"Fix login","body":"do the work","labels":[{"name":"for:atr"}]}]"#,
+            r#"[{"number":12,"title":"Fix login","body":"do the work","labels":[{"name":"for:atr"},{"name":"needs:browser"}]}]"#,
         )
         .unwrap();
         std::fs::write(
@@ -291,6 +298,7 @@ cli = "/bin/true"
         assert_eq!(t.source_kind, "github");
         assert_eq!(t.workspace_kind, "git");
         assert_eq!(t.output_kind, "reply");
+        assert_eq!(t.needs, "browser");
         let msgs = s.db.pending_messages("task-12").unwrap();
         assert!(msgs.iter().any(|m| m.source == "github"));
         assert!(

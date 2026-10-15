@@ -541,3 +541,101 @@ mod dir_guard_tests {
         assert!(check_dir_allowed(&c).is_ok(), "{}", c.display());
     }
 }
+
+/// Capabilities a task can require from its provider (`needs`).
+pub const KNOWN_NEEDS: &[&str] = &["browser", "desktop"];
+
+/// Parse a comma/space separated `needs` list. Lowercases, dedupes, and
+/// rejects unknown capabilities. Empty input yields an empty list.
+pub fn parse_needs<S: AsRef<str>>(items: &[S]) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for item in items {
+        for raw in item.as_ref().split(|c: char| c == ',' || c.is_whitespace()) {
+            let n = raw.trim().to_ascii_lowercase();
+            if n.is_empty() {
+                continue;
+            }
+            if !KNOWN_NEEDS.contains(&n.as_str()) {
+                bail!("need {n:?} must be one of: {}", KNOWN_NEEDS.join(", "));
+            }
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `needs:browser` / `needs:desktop` GitHub labels → needs. Unknown
+/// `needs:*` labels are ignored so other label schemes keep working.
+pub fn needs_from_labels<S: AsRef<str>>(labels: &[S]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in labels {
+        let l = l.as_ref().trim().to_ascii_lowercase();
+        if let Some(n) = l.strip_prefix("needs:").map(str::trim) {
+            if KNOWN_NEEDS.contains(&n) && !out.iter().any(|o| o == n) {
+                out.push(n.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Stored needs plus any `needs:*` labels, deduped.
+pub fn task_needs(stored: &str, labels: &str) -> Vec<String> {
+    let mut out = parse_needs(&[stored]).unwrap_or_default();
+    let ls: Vec<&str> = labels.split(',').collect();
+    for n in needs_from_labels(&ls) {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// Serde helper: accept `needs = "browser"`, `"browser,desktop"`, or a list.
+pub fn de_needs<'de, D>(d: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    let v: Option<OneOrMany> = serde::Deserialize::deserialize(d)?;
+    let items = match v {
+        None => Vec::new(),
+        Some(OneOrMany::One(s)) => vec![s],
+        Some(OneOrMany::Many(v)) => v,
+    };
+    parse_needs(&items).map_err(serde::de::Error::custom)
+}
+
+#[cfg(test)]
+mod needs_tests {
+    use super::*;
+
+    #[test]
+    fn parse_needs_normalises_and_rejects_unknown() {
+        assert_eq!(
+            parse_needs(&["Browser, desktop browser"]).unwrap(),
+            vec!["browser", "desktop"]
+        );
+        assert!(parse_needs(&[""]).unwrap().is_empty());
+        assert!(parse_needs(&["gpu"]).is_err());
+    }
+
+    #[test]
+    fn labels_map_to_needs() {
+        assert_eq!(
+            needs_from_labels(&["for:atr", "needs:browser", "needs:gpu", "Needs:Desktop"]),
+            vec!["browser", "desktop"]
+        );
+        assert_eq!(
+            task_needs("desktop", "needs:browser,needs:desktop"),
+            vec!["desktop", "browser"]
+        );
+    }
+}

@@ -269,3 +269,9 @@ While atr is running, open `http://127.0.0.1:7420/`. It is read-only and refresh
 | `git push` or opening a PR fails | GitHub login is missing in the running service. Never print the token. |
 
 More detail: [HOW-IT-WORKS.md](HOW-IT-WORKS.md) and [GITHUB.md](GITHUB.md).
+
+## Browser and desktop tasks
+
+Tasks that need a browser or a desktop session declare `--needs browser` or
+`--needs desktop` (also via MCP, HTTP, inbox files, or GitHub `needs:*`
+labels). See [NEEDS.md](NEEDS.md).
