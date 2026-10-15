@@ -26,11 +26,20 @@ Work
 Control
 • pause · resume · providers · repos
 • enable / disable · config · shadow
-  providers add|enable|disable|move|model
-  config get|set
+• providers: add · enable · disable · move · model
+• config: get · set
 
 Prefix with / (e.g. /status).
-Plain text talks to the assistant; writes still need Confirm.";
+Plain text talks to the assistant when it is on; writes still need Confirm.";
+
+/// Shown for free-text when `[telegram.assistant] enabled = false`.
+const ASSISTANT_OFF_TIP: &str = "\
+Assistant is off.
+
+Enable:
+/config set telegram.assistant.enabled true
+
+Or /help for commands.";
 const ASSISTANT_PREFIX: &str = "tg";
 
 #[derive(Debug, Clone)]
@@ -405,7 +414,7 @@ pub fn handle_update(shared: &Shared, update: &Value) -> Result<Vec<Outgoing>> {
     } else if cfg.assistant.enabled {
         Ok(vec![handle_assistant(shared, chat, text)])
     } else {
-        Ok(vec![help_outgoing(chat)])
+        Ok(vec![assistant_off_outgoing(chat)])
     }
 }
 
@@ -625,6 +634,14 @@ fn help_outgoing(chat: i64) -> Outgoing {
     Outgoing {
         chat_id: chat,
         text: COMMANDS.into(),
+        markup: None,
+    }
+}
+
+fn assistant_off_outgoing(chat: i64) -> Outgoing {
+    Outgoing {
+        chat_id: chat,
+        text: ASSISTANT_OFF_TIP.into(),
         markup: None,
     }
 }
@@ -2516,11 +2533,12 @@ cli = "/bin/true"
         assert!(
             out[0]
                 .text
-                .contains("providers add|enable|disable|move|model"),
+                .contains("providers: add · enable · disable · move · model"),
             "{}",
             out[0].text
         );
-        assert!(out[0].text.contains("config get|set"), "{}", out[0].text);
+        assert!(out[0].text.contains("config: get · set"), "{}", out[0].text);
+        assert!(!out[0].text.contains("add|enable"), "{}", out[0].text);
         assert!(out[0].text.contains("Plain text"), "{}", out[0].text);
         assert!(!out[0].text.contains("commands:"), "{}", out[0].text);
         let slashed: Vec<&str> = out[0]
@@ -2551,13 +2569,21 @@ cli = "/bin/true"
     }
 
     #[test]
-    fn free_text_without_assistant_lists_commands() {
+    fn free_text_without_assistant_tips_enable() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
         let upd = json!({"message":{"chat":{"id":42},"text":"how do I add kimi?"}});
         let out = handle_update(&shared, &upd).unwrap();
-        assert!(out[0].text.contains("atr Telegram"), "{}", out[0].text);
-        assert_eq!(out[0].text, COMMANDS);
+        assert_eq!(out[0].text, ASSISTANT_OFF_TIP);
+        assert!(out[0].text.contains("Assistant is off"), "{}", out[0].text);
+        assert!(
+            out[0]
+                .text
+                .contains("/config set telegram.assistant.enabled true"),
+            "{}",
+            out[0].text
+        );
+        assert!(!out[0].text.contains("atr Telegram"), "{}", out[0].text);
         assert!(shared.db.get_task("tg42").unwrap().is_none());
     }
 
