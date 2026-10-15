@@ -2,6 +2,7 @@
 # First release is v0.1.1. Later pushes bump patch, or minor/major via
 # Only pushes that change shipped files (src/, Cargo.*, build.rs, config/,
 # contrib/) release; force with [release] in a commit message or workflow_dispatch.
+# [no release] in a commit message skips it (reason=no-release); force wins.
 # PR label release:minor|release:major or those markers in the commit message.
 # Version is injected at build time (ATR_RELEASE_VERSION); CI does not commit to main.
 name: release
