@@ -6,7 +6,7 @@ use crate::providers::{
 };
 use anyhow::{Context, Result};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -479,6 +479,17 @@ pub async fn run_cli(
     if let Some(sid) = &session_id_found {
         let _ = db.set_run_session(run_id, sid);
         let _ = db.set_provider_session(task_key, Some(&provider.name), Some(sid));
+        if provider.kind == "codex" && provider.model.trim().is_empty() {
+            // `codex exec --json` never names the model; its rollout does.
+            let home = codex_home();
+            let sid_owned = sid.clone();
+            if let Ok(Some(model)) =
+                tokio::task::spawn_blocking(move || codex_model_from_rollout(&home?, &sid_owned))
+                    .await
+            {
+                let _ = db.set_run_model(run_id, &model);
+            }
+        }
         if provider.kind == "grok" {
             if let Some(u) = read_grok_usage(&provider.cli, sid).await {
                 usage = u.clone();
@@ -508,6 +519,63 @@ pub async fn run_cli(
         classified,
         stderr_text,
     ))
+}
+
+fn codex_home() -> Option<PathBuf> {
+    if let Some(h) = std::env::var_os("CODEX_HOME").filter(|h| !h.is_empty()) {
+        return Some(PathBuf::from(h));
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex"))
+}
+
+/// Model from the first `turn_context` in Codex's rollout file for `sid`
+/// (`<home>/sessions/YYYY/MM/DD/rollout-<ts>-<sid>.jsonl`). Newest dirs first.
+pub fn codex_model_from_rollout(home: &Path, sid: &str) -> Option<String> {
+    if sid.is_empty() || sid.contains('/') {
+        return None;
+    }
+    let suffix = format!("-{sid}.jsonl");
+    let file = find_newest(&home.join("sessions"), &suffix, 4)?;
+    let text = std::fs::read_to_string(file).ok()?;
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let model = match v.get("type").and_then(|t| t.as_str()) {
+            Some("turn_context") => v.pointer("/payload/model"),
+            Some("event_msg") => v.pointer("/payload/thread_settings/model"),
+            _ => None,
+        };
+        if let Some(m) = model.and_then(|m| m.as_str()).filter(|m| !m.is_empty()) {
+            return Some(m.to_string());
+        }
+    }
+    None
+}
+
+fn find_newest(dir: &Path, suffix: &str, depth: u32) -> Option<PathBuf> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    entries.sort();
+    entries.reverse();
+    for p in entries {
+        if p.is_dir() {
+            if depth > 0 {
+                if let Some(f) = find_newest(&p, suffix, depth - 1) {
+                    return Some(f);
+                }
+            }
+        } else if p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(suffix))
+        {
+            return Some(p);
+        }
+    }
+    None
 }
 
 async fn read_grok_usage(cli: &Path, sid: &str) -> Option<UsageNumbers> {
@@ -839,5 +907,35 @@ os._exit(0)
         assert_eq!(dir, Path::new("/var/lib/atr/prompts/task-notes"));
         let git = runtime_files_dir(state, "task-git", wt, false);
         assert_eq!(git, Path::new("/Users/me/notes/.atr"));
+    }
+}
+
+#[cfg(test)]
+mod codex_model_tests {
+    use super::*;
+
+    #[test]
+    fn codex_model_read_from_rollout_turn_context() {
+        let home = tempfile::tempdir().unwrap();
+        let day = home.path().join("sessions/2026/10/15");
+        std::fs::create_dir_all(&day).unwrap();
+        let sid = "01a13eb0-56b8-7781-8407-3b0cd30dfd82";
+        std::fs::write(
+            day.join(format!("rollout-2026-10-15T11-31-46-{sid}.jsonl")),
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"x"}}"#,
+                "\n",
+                r#"{"type":"turn_context","payload":{"turn_id":"t","model":"gpt-6.1-sol"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(day.join("rollout-other-zzz.jsonl"), "{}\n").unwrap();
+        assert_eq!(
+            codex_model_from_rollout(home.path(), sid).as_deref(),
+            Some("gpt-6.1-sol")
+        );
+        assert_eq!(codex_model_from_rollout(home.path(), "missing"), None);
+        assert_eq!(codex_model_from_rollout(home.path(), "../x"), None);
     }
 }

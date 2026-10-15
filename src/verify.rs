@@ -137,6 +137,15 @@ fn path_matches(configured: &Path, actual: &Path) -> bool {
     as_.ends_with(cs.as_ref()) || cs.ends_with(as_.as_ref())
 }
 
+/// The path `[[verify.repo]]` entries are matched against for this task.
+pub fn workspace_repo<'a>(task: &Task, repo: &'a Path, worktree: &'a Path) -> &'a Path {
+    if task.workspace_kind == "dir" {
+        worktree
+    } else {
+        repo
+    }
+}
+
 pub async fn run(
     cfg: &Config,
     db: &Db,
@@ -149,6 +158,14 @@ pub async fn run(
     if !cfg.verify.enabled || cfg.dry_run {
         return Ok(VerifyRun::default());
     }
+    // A task with no workspace has nothing to verify: its scratch folder is
+    // not the configured repo, so repo checks (e.g. `./verify.sh`) would fail.
+    if task.workspace_kind == "none" {
+        return Ok(VerifyRun::default());
+    }
+    // A plain-folder task only matches `[[verify.repo]]` by its own folder,
+    // never by the fallback repo it was filed under.
+    let repo = workspace_repo(task, repo, worktree);
     let cmds = commands_for(cfg, repo, worktree);
     if cmds.is_empty() {
         return Ok(VerifyRun::default());
@@ -697,6 +714,87 @@ cli = "/bin/true"
         std::fs::write(dir.path().join("p.md"), "p\n").unwrap();
         let cfg = crate::config::load_config(&cfg_path).unwrap();
         assert!(commands_for(&cfg, &repo, &repo).is_empty());
+    }
+
+    fn scratch_cfg(dir: &Path, repo: &Path) -> crate::config::Config {
+        let cfg_path = dir.join("cfg.toml");
+        std::fs::write(
+            &cfg_path,
+            format!(
+                r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{repo}"
+system_prompt_file = "{root}/p.md"
+[github]
+poll_interval = "60s"
+[verify]
+enabled = true
+[[verify.repo]]
+path = "{repo}"
+commands = ["./verify.sh"]
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "/bin/true"
+"#,
+                db = dir.join("s.db").display(),
+                root = dir.display(),
+                repo = repo.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("p.md"), "p\n").unwrap();
+        crate::config::load_config(&cfg_path).unwrap()
+    }
+
+    fn ws_task(kind: &str) -> crate::db::Task {
+        crate::db::Task {
+            key: "scratch-x".into(),
+            status: "running".into(),
+            workspace_kind: kind.into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn no_workspace_task_skips_repo_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("atr-scratch");
+        let wt = dir.path().join("_none").join("scratch-x");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        let cfg = scratch_cfg(dir.path(), &repo);
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        let v = run(&cfg, &db, "scratch-x", &repo, &wt, 1, &ws_task("none"))
+            .await
+            .unwrap();
+        assert!(v.skipped && v.passed && v.checks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dir_task_matches_verify_repo_by_its_own_folder_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("atr-scratch");
+        let folder = dir.path().join("plain");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&folder).unwrap();
+        let cfg = scratch_cfg(dir.path(), &repo);
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        let v = run(&cfg, &db, "scratch-x", &repo, &folder, 1, &ws_task("dir"))
+            .await
+            .unwrap();
+        assert!(v.skipped && v.checks.is_empty());
+        // A git task in the scratch repo still gets its checks.
+        assert_eq!(
+            commands_for(
+                &cfg,
+                workspace_repo(&ws_task("git"), &repo, &folder),
+                &folder
+            ),
+            vec!["./verify.sh".to_string()]
+        );
     }
 
     fn dummy_task(skip: bool, labels: &str) -> crate::db::Task {

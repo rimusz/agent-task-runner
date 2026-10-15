@@ -516,6 +516,28 @@ impl Db {
                  AND cost_kind = 'plan'"#,
             [],
         )?;
+        // `grok usage` reports `costUsdTicks` (1 USD = 1e10 ticks). Older atr
+        // divided by 1e6, so those rows are 10,000x too high. Fix them once.
+        let grok_ticks_done: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params!["usage_grok_ticks_1e10"],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if grok_ticks_done.as_deref() != Some("1") {
+            conn.execute(
+                r#"UPDATE usage SET cost_usd = cost_usd / 10000.0
+                   WHERE cost_usd IS NOT NULL
+                     AND raw_json LIKE '%"source":"grok usage"%'"#,
+                [],
+            )?;
+            conn.execute(
+                r#"INSERT INTO meta (key, value) VALUES ('usage_grok_ticks_1e10', '1')
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value"#,
+                [],
+            )?;
+        }
         // Codex-kind rows used to store inclusive input (cached ⊂ input).
         // Subtract once so totals and hit% match the live extractor.
         let codex_done: Option<String> = conn
@@ -1107,6 +1129,15 @@ impl Db {
         conn.execute(
             "UPDATE runs SET session_id = ?1 WHERE id = ?2",
             params![session, run_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_run_model(&self, run_id: i64, model: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE runs SET model = ?1 WHERE id = ?2 AND (model IS NULL OR model = '')",
+            params![model, run_id],
         )?;
         Ok(())
     }
@@ -2765,6 +2796,58 @@ mod tests {
         let grok = db.list_provider_usage("grok").unwrap();
         assert!((grok[0].utilization.unwrap() - 0.01).abs() < 1e-9);
         assert!((grok[0].balance.unwrap() - 140.32).abs() < 1e-9);
+    }
+
+    #[test]
+    fn migrate_grok_ticks_divides_old_cost_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let raw = r#"{"source":"grok usage","sessionId":"g","usage":{"inputTokens":19090,"cost_usd":126.8336}}"#;
+        {
+            let db = Db::open(&path).unwrap();
+            db.upsert_task("acme-gt", "/repo", None).unwrap();
+            let run = db.start_run("acme-gt", "grok", "m").unwrap();
+            db.finish_run(run, "success", Some(0)).unwrap();
+            db.insert_usage(
+                run,
+                None,
+                "grok",
+                1,
+                1,
+                0,
+                0,
+                Some(126.8336),
+                Some("est"),
+                raw,
+            )
+            .unwrap();
+            let other = db.start_run("acme-gt", "claude", "m").unwrap();
+            db.finish_run(other, "success", Some(0)).unwrap();
+            db.insert_usage(
+                other,
+                None,
+                "claude",
+                1,
+                1,
+                0,
+                0,
+                Some(0.5),
+                Some("est"),
+                "{}",
+            )
+            .unwrap();
+            db.meta_set("usage_grok_ticks_1e10", "0").unwrap();
+        }
+        for _ in 0..2 {
+            let db = Db::open(&path).unwrap();
+            let runs = db.list_runs(Some("acme-gt")).unwrap();
+            let g = runs.iter().find(|r| r.provider == "grok").unwrap();
+            let row = db.list_usage_for_run(g.id).unwrap().remove(0);
+            assert!((row.cost_usd.unwrap() - 0.01268336).abs() < 1e-9);
+            let c = runs.iter().find(|r| r.provider == "claude").unwrap();
+            let row = db.list_usage_for_run(c.id).unwrap().remove(0);
+            assert_eq!(row.cost_usd, Some(0.5));
+        }
     }
 
     #[test]

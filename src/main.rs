@@ -187,6 +187,12 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Open the dashboard in a browser (prints the URL when headless/SSH).
+    Ui {
+        /// Only print the URL.
+        #[arg(long)]
+        print: bool,
+    },
     /// Download a GitHub release, verify sha256, swap the binary, restart.
     Upgrade { version: Option<String> },
     /// Restore the previous binary, config, and database.
@@ -751,6 +757,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let shared = Shared::open(path)?;
             shared.cancel(&key, force)?;
             println!("{}", atr::app::Shared::cancel_ok_line(&key, force));
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Ui { print } => {
+            let listen = load_config(&path)
+                .map(|c| c.listen)
+                .unwrap_or_else(|_| "127.0.0.1:7420".into());
+            println!("{}", atr::ui::run(&listen, print));
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Upgrade { version } => {
