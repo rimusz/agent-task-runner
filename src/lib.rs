@@ -42,6 +42,7 @@ pub mod task;
 pub mod telegram;
 pub mod telegram_setup;
 pub mod tz;
+pub mod ui;
 pub mod upgrade;
 pub mod usage;
 pub mod util;

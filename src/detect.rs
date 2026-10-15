@@ -856,7 +856,10 @@ pub fn format_report(d: &Discovery, cfg: Option<&Config>) -> String {
         .filter(|m| presets::builtin(m).is_none())
         .collect();
     if !missing.is_empty() {
-        out.push_str(&format!("  not installed (optional): {}\n", missing.join(", ")));
+        out.push_str(&format!(
+            "  not installed (optional): {}\n",
+            missing.join(", ")
+        ));
     }
     out
 }
