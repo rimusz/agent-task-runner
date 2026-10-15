@@ -8,16 +8,16 @@ atr is a small program that lives on your computer and runs coding agents for yo
 
 Paste the prompt below into Claude Code, Codex, Cursor, or Grok on the machine that will run atr. The agent installs and configures atr end to end. **You** still sign in to each vendor CLI yourself; the prompt never asks for, handles, or prints API keys or tokens.
 
-Release binaries: `aarch64-apple-darwin` (macOS Apple Silicon only), `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`. There is no Intel Mac (`x86_64-apple-darwin`) build — on Intel macOS use `cargo install --git`.
+Release binaries: `macos-arm64` (macOS Apple Silicon only), `linux-x86_64` (glibc), `linux-arm64` (glibc), `linux-x86_64-musl` (static, Alpine). Files are named `atr-<ver>-<platform>.tar.gz`. There is no Intel Mac build — on Intel macOS use `cargo install --git`.
 
 ```
 Deploy atr (https://github.com/rimusz/agent-task-runner) on this machine. Follow these steps in order. Never print, echo, log, or paste any secret, token, password, or API key. Never sign in to anything on my behalf.
 
 1. Detect the platform with uname -s and uname -m, and whether this is a desktop session or a headless server/VM (no display, reached over SSH).
-   - macOS arm64 -> target aarch64-apple-darwin. Intel Mac has no build: use cargo install --git instead.
-   - Linux x86_64 glibc -> x86_64-unknown-linux-gnu; Linux x86_64 musl (Alpine) -> x86_64-unknown-linux-musl; Linux aarch64 -> aarch64-unknown-linux-gnu.
+   - macOS arm64 -> platform macos-arm64. Intel Mac has no build: use cargo install --git instead.
+   - Linux x86_64 glibc -> linux-x86_64; Linux x86_64 musl (Alpine) -> linux-x86_64-musl; Linux aarch64 -> linux-arm64.
 
-2. Install the binary. Download atr-<ver>-<target>.tar.gz from the latest GitHub release (verify the .sha256 if present), unpack it, and install it to ~/.local/bin/atr with mode 755. Create ~/.local/bin if needed and make sure it is on PATH (zsh: ~/.zprofile; bash: ~/.profile). If the download fails, fall back to: cargo install --git https://github.com/rimusz/agent-task-runner
+2. Install the binary. Download atr-<ver>-<platform>.tar.gz from the latest GitHub release (verify the .sha256 if present), unpack it, and install it to ~/.local/bin/atr with mode 755. Create ~/.local/bin if needed and make sure it is on PATH (zsh: ~/.zprofile; bash: ~/.profile). If the download fails, fall back to: cargo install --git https://github.com/rimusz/agent-task-runner
    Confirm with: atr --version
 
 3. Check the coding CLIs: atr providers detect
@@ -48,9 +48,9 @@ Deploy atr (https://github.com/rimusz/agent-task-runner) on this machine. Follow
    Report: OS and target, binary path, version, which CLIs are enabled and signed in, GitHub status (logged in yes/no, setup-git done), service status, repos added, MCP setup (if any), and every doctor line marked warn or FAIL with a suggested fix.
 ```
 
-**Arch / Omarchy.** The `x86_64-unknown-linux-gnu` or `x86_64-unknown-linux-musl` binary works. Or `pacman -S rust` and `cargo install --git https://github.com/rimusz/agent-task-runner`.
+**Arch / Omarchy.** The `linux-x86_64` or `linux-x86_64-musl` binary works. Or `pacman -S rust` and `cargo install --git https://github.com/rimusz/agent-task-runner`.
 
-**Asahi** (Apple Silicon Mac running Linux). Use `aarch64-unknown-linux-gnu`. Asahi uses 16K pages — if that binary does not run, build from source (`cargo install --git` or `cargo install --path .`).
+**Asahi** (Apple Silicon Mac running Linux). Use `linux-arm64`. Asahi uses 16K pages — if that binary does not run, build from source (`cargo install --git` or `cargo install --path .`).
 
 ## Use cases
 
@@ -174,9 +174,9 @@ Install the binary (pick the tarball for this machine), sign in to each CLI **yo
 
 ```bash
 ver=0.1.1
-target=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu / aarch64-unknown-linux-gnu / x86_64-unknown-linux-musl
+platform=macos-arm64   # or linux-x86_64 / linux-arm64 / linux-x86_64-musl
 curl -fsSL -o /tmp/atr.tgz \
-  "https://github.com/rimusz/agent-task-runner/releases/download/v${ver}/atr-${ver}-${target}.tar.gz"
+  "https://github.com/rimusz/agent-task-runner/releases/download/v${ver}/atr-${ver}-${platform}.tar.gz"
 tar -xzf /tmp/atr.tgz -C /tmp
 install -m 755 /tmp/atr ~/.local/bin/atr
 ```

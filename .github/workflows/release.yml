@@ -58,20 +58,25 @@ jobs:
   build:
     needs: meta
     if: needs.meta.outputs.skip == 'no'
+    # Rust target triples are for building only; assets use friendly names.
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
+            asset: macos-arm64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            asset: linux-x86_64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            asset: linux-arm64
             packages: gcc-aarch64-linux-gnu
             linker: aarch64-linux-gnu-gcc
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            asset: linux-x86_64-musl
             packages: musl-tools
             linker: musl-gcc
     runs-on: ${{ matrix.os }}
@@ -88,6 +93,7 @@ jobs:
       - name: Build and pack
         env:
           TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
           VER: ${{ needs.meta.outputs.ver }}
           LINKER: ${{ matrix.linker }}
           ATR_RELEASE_VERSION: ${{ needs.meta.outputs.ver }}
@@ -99,16 +105,16 @@ jobs:
           fi
           cargo build --release --target "$TARGET"
           cp "target/${TARGET}/release/atr" atr
-          tar -czf "atr-${VER}-${TARGET}.tar.gz" atr config contrib \
+          tar -czf "atr-${VER}-${ASSET}.tar.gz" atr config contrib \
             LICENSE-MIT LICENSE-APACHE THIRD_PARTY_LICENSES
           if command -v sha256sum >/dev/null; then
-            sha256sum "atr-${VER}-${TARGET}.tar.gz" > "atr-${VER}-${TARGET}.tar.gz.sha256"
+            sha256sum "atr-${VER}-${ASSET}.tar.gz" > "atr-${VER}-${ASSET}.tar.gz.sha256"
           else
-            shasum -a 256 "atr-${VER}-${TARGET}.tar.gz" > "atr-${VER}-${TARGET}.tar.gz.sha256"
+            shasum -a 256 "atr-${VER}-${ASSET}.tar.gz" > "atr-${VER}-${ASSET}.tar.gz.sha256"
           fi
       - uses: actions/upload-artifact@v4
         with:
-          name: atr-${{ matrix.target }}
+          name: atr-${{ matrix.asset }}
           path: |
             atr-*.tar.gz
             atr-*.tar.gz.sha256
