@@ -248,28 +248,55 @@ fn validate_invocation(tokens: &[String], top: &BTreeSet<String>, global_flags: 
 fn readme_headings_and_commands_match_help() {
     let readme = std::fs::read_to_string(format!("{}/README.md", env!("CARGO_MANIFEST_DIR")))
         .expect("README.md");
+    // The short README links out; the long-form usage lives in docs/.
+    let doc = |name: &str| {
+        std::fs::read_to_string(format!("{}/docs/{name}", env!("CARGO_MANIFEST_DIR")))
+            .unwrap_or_else(|_| panic!("docs/{name}"))
+    };
     for heading in [
-        "## What atr is",
-        "## How you use it",
-        "### Setup once",
-        "### Giving it work",
-        "### Watching repos",
-        "### Watching and steering",
-        "### Using atr from other agents",
-        "### Maintenance",
-        "## Install with your coding agent",
-        "## Writing a good task issue",
-        "## Telegram",
-        "## Dashboard",
-        "## Troubleshooting",
-        "## More documentation",
-        "## Trademarks and terms",
+        "## Install",
+        "## Setup",
+        "## Your first task",
+        "## What you can use it for",
+        "## Providers",
+        "## More docs",
+        "## Trademarks and license",
     ] {
         assert!(
             readme.contains(heading),
             "README must contain heading {heading}"
         );
     }
+    for link in ["docs/INSTALL.md", "docs/USE-CASES.md", "docs/USAGE.md"] {
+        assert!(readme.contains(link), "README must link {link}");
+    }
+    let usage = doc("USAGE.md");
+    for heading in [
+        "### Giving it work",
+        "### Hand work to atr",
+        "### Watching repos",
+        "### Watching and steering",
+        "### Using atr from other agents",
+        "### Maintenance",
+        "## Writing a good task issue",
+        "## Telegram",
+        "## Dashboard",
+        "## Troubleshooting",
+    ] {
+        assert!(
+            usage.contains(heading),
+            "docs/USAGE.md must contain heading {heading}"
+        );
+    }
+    assert!(
+        doc("INSTALL.md").contains("## Full agent deploy prompt"),
+        "docs/INSTALL.md must keep the full deploy prompt"
+    );
+    let readme = format!(
+        "{readme}\n{usage}\n{}\n{}",
+        doc("INSTALL.md"),
+        doc("USE-CASES.md")
+    );
     assert!(
         readme.contains("docs/DESIGN.md"),
         "internals must point at DESIGN.md"
