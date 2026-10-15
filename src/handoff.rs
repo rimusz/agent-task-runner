@@ -55,7 +55,47 @@ pub fn event_kind(value: &Value) -> String {
     "event".into()
 }
 
+/// Grok `streaming-json` sends the answer as `{"type":"text","data":"…"}`
+/// deltas. Join the last run of deltas (thoughts/usage/end in between are
+/// skipped; a tool call ends the run).
+fn grok_stream_text(events: &[EventRow]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for ev in events.iter().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(&ev.raw) else {
+            continue;
+        };
+        let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match ty {
+            "text" => match v.get("data").and_then(|d| d.as_str()) {
+                Some(d) => parts.push(d.to_string()),
+                None => break,
+            },
+            "thought" | "usage" | "end" => continue,
+            _ => {
+                if !parts.is_empty() {
+                    break;
+                }
+                // Nothing after the last tool call yet: no grok answer.
+                return None;
+            }
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.reverse();
+    let joined = parts.concat();
+    if joined.trim().is_empty() {
+        None
+    } else {
+        Some(joined.trim().to_string())
+    }
+}
+
 pub fn last_assistant_text(events: &[EventRow]) -> Option<String> {
+    if let Some(t) = grok_stream_text(events) {
+        return Some(t);
+    }
     for ev in events.iter().rev() {
         if let Ok(v) = serde_json::from_str::<Value>(&ev.raw) {
             if let Some(t) = assistant_text(&v) {
@@ -838,5 +878,40 @@ cli = "/bin/true"
         );
         assert!(brief.contains("also check the tests"), "{brief}");
         assert!(brief.contains("Original:"), "{brief}");
+    }
+}
+
+#[cfg(test)]
+mod grok_stream_tests {
+    use super::*;
+
+    fn ev(raw: &str) -> EventRow {
+        EventRow {
+            run_id: 1,
+            kind: String::new(),
+            raw: raw.to_string(),
+        }
+    }
+
+    #[test]
+    fn joins_grok_text_deltas() {
+        let events = vec![
+            ev(r#"{"type":"thought","data":"thinking"}"#),
+            ev(r#"{"type":"tool_call","name":"bash"}"#),
+            ev(r#"{"type":"text","data":"O"}"#),
+            ev(r#"{"type":"thought","data":"x"}"#),
+            ev(r#"{"type":"text","data":"K"}"#),
+            ev(r#"{"type":"usage","usage":{"input_tokens":1}}"#),
+            ev(r#"{"type":"end","usage":{"input_tokens":1}}"#),
+        ];
+        assert_eq!(last_assistant_text(&events).as_deref(), Some("OK"));
+    }
+
+    #[test]
+    fn non_grok_events_fall_through() {
+        let events = vec![ev(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+        )];
+        assert_eq!(last_assistant_text(&events).as_deref(), Some("hi"));
     }
 }

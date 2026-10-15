@@ -208,9 +208,13 @@ fn build_codex(
         args.push("resume".into());
         args.push(sid.to_string());
         args.push("--json".into());
+        args.push("--skip-git-repo-check".into());
     } else {
         args.push("exec".into());
         args.push("--json".into());
+        // `dir` and `none` workspaces are not git repos (or not trusted);
+        // without this codex exits 1 before reading the prompt.
+        args.push("--skip-git-repo-check".into());
         args.push("-C".into());
         args.push(worktree.display().to_string());
         if !p.sandbox.is_empty() {

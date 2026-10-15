@@ -247,7 +247,47 @@ pub fn resolve_dir(raw: &str) -> Result<PathBuf> {
     if !p.is_dir() {
         bail!("{} is not a directory", p.display());
     }
-    Ok(p.canonicalize().unwrap_or(p))
+    let canon = p.canonicalize().unwrap_or(p);
+    check_dir_allowed(&canon)?;
+    Ok(canon)
+}
+
+/// Refuse dir workspaces that would hand an always-approve agent the whole
+/// machine or a secret store. `canon` must already be canonical (symlinks
+/// resolved), so a link to ~/.ssh is caught too.
+pub fn check_dir_allowed(canon: &Path) -> Result<()> {
+    let home = dirs_home();
+    if canon.parent().is_none() {
+        bail!("refusing dir workspace {}: filesystem root", canon.display());
+    }
+    if let Some(home) = &home {
+        if canon == home.as_path() || home.starts_with(canon) {
+            bail!(
+                "refusing dir workspace {}: home directory or its parent; pick a project folder",
+                canon.display()
+            );
+        }
+        for rel in [".ssh", ".gnupg", ".aws", ".config/atr", ".config/gh", ".kube", ".docker"] {
+            let s = home.join(rel);
+            let s = s.canonicalize().unwrap_or(s);
+            if canon.starts_with(&s) {
+                bail!("refusing dir workspace {}: secrets/config directory", canon.display());
+            }
+        }
+    }
+    for sys in ["/etc", "/usr", "/bin", "/sbin", "/lib", "/boot", "/proc", "/sys", "/dev", "/var", "/System", "/Library", "/private/etc"] {
+        let sp = Path::new(sys);
+        if canon == sp || canon.starts_with(sp) && !canon.starts_with("/var/folders") && !canon.starts_with("/var/tmp") {
+            bail!("refusing dir workspace {}: system directory", canon.display());
+        }
+    }
+    Ok(())
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    let h = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+    let h = PathBuf::from(h);
+    Some(h.canonicalize().unwrap_or(h))
 }
 
 pub fn resolve_git_repo(raw: &str) -> Result<PathBuf> {
@@ -443,5 +483,26 @@ mod tests {
             resolve_intake_workspace(None, Some("/src/repo"), Some("none"), |_| None).unwrap();
         assert_eq!(k, WorkspaceKind::None);
         assert!(empty);
+    }
+}
+
+#[cfg(test)]
+mod dir_guard_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_root_home_and_secrets() {
+        assert!(check_dir_allowed(Path::new("/")).is_err());
+        assert!(check_dir_allowed(Path::new("/etc")).is_err());
+        if let Some(h) = dirs_home() {
+            assert!(check_dir_allowed(&h).is_err());
+            assert!(check_dir_allowed(&h.join(".ssh")).is_err());
+            if let Some(parent) = h.parent() {
+                assert!(check_dir_allowed(parent).is_err());
+            }
+        }
+        let t = tempfile::tempdir().unwrap();
+        let c = t.path().canonicalize().unwrap();
+        assert!(check_dir_allowed(&c).is_ok(), "{}", c.display());
     }
 }

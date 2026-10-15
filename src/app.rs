@@ -410,6 +410,10 @@ impl Shared {
 }
 
 pub async fn serve(shared: Arc<Shared>) -> Result<()> {
+    let k = scheduler::reap_orphans_at_start(&shared)?;
+    if k > 0 {
+        tracing::warn!(k, "killed orphaned CLI runs from a previous serve");
+    }
     let n = reconcile(&shared)?;
     if n > 0 {
         tracing::warn!(n, "reconciled orphan runs");
@@ -469,9 +473,11 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
     let inbox = shared.clone();
     let gc = shared.clone();
     let hup = shared.clone();
+    let rec = shared.clone();
 
     tokio::select! {
         r = axum::serve(listener, http::router(http)) => r?,
+        _ = scheduler::reconcile_loop(rec) => {}
         _ = scheduler::scheduler_loop(sched) => {}
         _ = crate::github::poll_loop(gh) => {}
         _ = crate::shadow::poll_loop(shadow) => {}

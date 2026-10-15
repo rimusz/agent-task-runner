@@ -126,6 +126,19 @@ pub fn run(opts: InitOpts) -> Result<String> {
         detected_github.as_deref(),
         &driver,
     );
+    // A non-default config dir keeps its own system prompt (init writes it
+    // next to config.toml), so point the config at that copy. Otherwise
+    // doctor fails right after `atr init --config <dir>/config.toml`.
+    let custom_dir = !same_dir(&dir, &crate::config::default_atr_dir());
+    let toml = if custom_dir {
+        replace_assign(
+            &toml,
+            "system_prompt_file",
+            &quote(&compact_home(&dir.join("system-prompt.md"))),
+        )
+    } else {
+        toml
+    };
     write_file(&opts.config_path, &toml, opts.force, true)?;
     write_file(
         &dir.join("system-prompt.md"),
@@ -155,10 +168,16 @@ pub fn run(opts: InitOpts) -> Result<String> {
     }
     out.push_str(&report);
     out.push_str(&gh_guide);
-    match crate::skill::install_default() {
-        Ok(Some(msg)) => out.push_str(&msg),
-        Ok(None) => {}
-        Err(e) => out.push_str(&format!("skill install: {e:#}\n")),
+    // Skills go into the user's real CLI dirs (~/.claude, ~/.codex, ...).
+    // A test/side config must not touch those.
+    if custom_dir {
+        out.push_str("skill install skipped (non-default config dir)\n");
+    } else {
+        match crate::skill::install_default() {
+            Ok(Some(msg)) => out.push_str(&msg),
+            Ok(None) => {}
+            Err(e) => out.push_str(&format!("skill install: {e:#}\n")),
+        }
     }
     match store_opencode_creds(&opts.config_path, &picks, opts.yes) {
         Ok(Some(msg)) => out.push_str(&msg),
@@ -226,6 +245,12 @@ fn ensure_mcp_token(config_path: &Path, yes: bool) -> Result<Option<String>> {
         "mcp token written to {} (mode 0600; atr never prints it). HTTP clients send Authorization: Bearer $ATR_MCP_TOKEN. `atr mcp` stdio needs no token.\n",
         dest.display()
     )))
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let ca = fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
+    let cb = fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
+    ca == cb
 }
 
 fn point_config_at_token_file(config_path: &Path, dest: &Path) -> Result<()> {

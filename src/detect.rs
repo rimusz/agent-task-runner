@@ -78,7 +78,10 @@ pub const SPECS: &[CliSpec] = &[
         kind: Some("cursor"),
         binaries: &["cursor-agent"],
         version_args: &["--version"],
-        auth_args: &["auth", "status"],
+        // `cursor-agent status` (alias whoami). There is no `auth status`
+        // subcommand: those words are taken as a prompt and start a paid
+        // agent run (~40 s) during init/doctor.
+        auth_args: &["status"],
         login: "sign in to the Cursor app",
         vendor_note: None,
     },
