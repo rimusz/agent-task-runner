@@ -11,6 +11,7 @@ fn init_yes_in_temp_home_writes_files() {
         yes: true,
         force: true,
         no_service: true,
+        force_service: false,
         config_path: cfg_path.clone(),
     })
     .unwrap();

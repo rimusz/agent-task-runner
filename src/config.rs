@@ -82,6 +82,9 @@ pub struct RawConfig {
     /// enabled`, MCP/CLI/HTTP always, Telegram if enabled, inbox off).
     #[serde(rename = "source", default)]
     pub sources: Vec<RawSource>,
+    /// Cap for CLI/HTTP/MCP prompts and the default inbox file size.
+    #[serde(default = "default_max_prompt_bytes")]
+    pub max_prompt_bytes: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -203,6 +206,9 @@ pub struct RawSource {
     pub dir: String,
     #[serde(default)]
     pub poll_interval: String,
+    /// Inbox file size cap. Empty = `max_prompt_bytes` (default 256k).
+    #[serde(default)]
+    pub max_bytes: String,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +217,7 @@ pub struct SourceEntry {
     pub enabled: bool,
     pub dir: PathBuf,
     pub poll_interval: Duration,
+    pub max_bytes: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -612,6 +619,7 @@ pub struct Config {
     pub cache: CacheConfig,
     /// Explicit `[[source]]` entries. Empty means built-in defaults.
     pub sources: Vec<SourceEntry>,
+    pub max_prompt_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -882,6 +890,9 @@ fn default_kill_grace() -> String {
 }
 fn default_task_prefix() -> String {
     "task".into()
+}
+fn default_max_prompt_bytes() -> String {
+    "256k".into()
 }
 fn default_gh() -> String {
     "gh".into()
@@ -1884,6 +1895,13 @@ impl Config {
             kill_grace: parse_duration(&raw.kill_grace)?,
             dry_run: raw.dry_run,
             task_key_prefix: raw.task_key_prefix,
+            max_prompt_bytes: crate::duration::parse_bytes(
+                if raw.max_prompt_bytes.trim().is_empty() {
+                    "256k"
+                } else {
+                    &raw.max_prompt_bytes
+                },
+            )?,
             display_timezone: crate::tz::DisplayTz::parse(&raw.display_timezone)?,
             github_poll_interval: parse_duration(if raw.github.poll_interval.trim().is_empty() {
                 "60s"
@@ -2127,6 +2145,11 @@ impl Config {
                     {
                         bail!("[[source]] kind = \"inbox\" needs dir");
                     }
+                    let src_max = if s.max_bytes.trim().is_empty() {
+                        0
+                    } else {
+                        crate::duration::parse_bytes(&s.max_bytes)?
+                    };
                     out.push(SourceEntry {
                         kind,
                         enabled: s.enabled,
@@ -2140,6 +2163,7 @@ impl Config {
                         } else {
                             &s.poll_interval
                         })?,
+                        max_bytes: src_max,
                     });
                 }
                 out

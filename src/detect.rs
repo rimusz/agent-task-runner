@@ -545,6 +545,43 @@ fn probe_opencode(cli: &Path) -> OpencodeInfo {
     OpencodeInfo { providers, models }
 }
 
+const AUTH_PROVIDER_STOP: &[&str] = &[
+    "logged",
+    "in",
+    "no",
+    "providers",
+    "provider",
+    "list",
+    "auth",
+    "login",
+    "unknown",
+    "command",
+    "error",
+    "usage",
+    "help",
+    "use",
+    "at",
+    "to",
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "for",
+    "with",
+    "from",
+    "again",
+    "add",
+    "run",
+    "please",
+    "need",
+    "credentials",
+    "configured",
+    "none",
+    "signed",
+    "log",
+];
+
 pub fn parse_auth_providers(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -552,32 +589,48 @@ pub fn parse_auth_providers(text: &str) -> Vec<String> {
             .trim()
             .trim_start_matches(['✓', '✔', '•', '-', '*'])
             .trim();
-        if t.is_empty() || t.contains(' ') && !t.contains('/') {
+        if t.is_empty() {
+            continue;
+        }
+        let low = t.to_ascii_lowercase();
+        if low.contains("unknown command")
+            || low.contains("unrecognized")
+            || low.contains("log in again")
+            || low.contains("usage:")
+            || t.contains('`')
+        {
+            continue;
+        }
+        if t.contains(' ') && !t.contains('/') {
             // "Logged in to moonshotai" — take last token if it looks like an id
             if let Some(last) = t.split_whitespace().last() {
                 if is_provider_id(last) {
-                    push_unique(&mut out, last);
+                    push_unique_provider(&mut out, last);
                 }
             }
             continue;
         }
         let id = t.split_whitespace().next().unwrap_or(t);
         if is_provider_id(id) {
-            push_unique(&mut out, id);
+            push_unique_provider(&mut out, id);
         }
     }
     out
 }
 
+fn push_unique_provider(out: &mut Vec<String>, s: &str) {
+    let s = s.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+    push_unique(out, s);
+}
+
 fn is_provider_id(s: &str) -> bool {
     let s = s.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-        && s != "logged"
-        && s != "in"
-        && s != "no"
-        && s != "providers"
+    if s.len() < 2 || s.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        && !AUTH_PROVIDER_STOP.contains(&s)
 }
 
 pub fn parse_models(text: &str) -> Vec<String> {
@@ -1034,6 +1087,13 @@ exit 0
         assert_eq!(
             parse_auth_providers("✓ moonshotai\n  ollama\nLogged in to zai\n"),
             vec!["moonshotai", "ollama", "zai"]
+        );
+        let garbled = parse_auth_providers(
+            "1 provider\nLog in again.\nat https://opencode.ai\nUse `opencode auth login` to add\nunknown command\n",
+        );
+        assert!(
+            garbled.is_empty(),
+            "help/TUI noise must not become providers: {garbled:?}"
         );
         assert_eq!(
             parse_models("moonshotai/kimi-k2.6\nollama/llama3.2 (local)\n# skip\n"),

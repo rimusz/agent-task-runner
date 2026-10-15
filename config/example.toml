@@ -21,6 +21,8 @@ task_timeout = "4h"
 kill_grace = "30s"
 dry_run = false
 task_key_prefix = "task"
+# Cap for CLI/HTTP/MCP prompts and the default inbox file size (256 KiB).
+max_prompt_bytes = "256k"
 # IANA zone for status, usage, tasks, and the shadow report.
 # Empty or "local" uses the system local zone.
 display_timezone = ""

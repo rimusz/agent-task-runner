@@ -40,7 +40,7 @@ atr telegram setup
 atr doctor
 ```
 
-`atr init` writes `~/.config/atr` (config, `system-prompt.md`, `atr-serve.sh`), detects CLIs, installs this skill into each CLI’s skill dir, installs the user service (LaunchAgent `dev.atr.serve` on macOS, systemd user unit on Linux), and runs doctor. It never overwrites existing files without `--force` (it merges missing keys). On macOS the service must run in the desktop session so Cursor can use the login keychain.
+`atr init` writes `~/.config/atr` (config, `system-prompt.md`, `atr-serve.sh`), detects CLIs, installs this skill into each CLI’s skill dir, installs the user service (LaunchAgent `dev.atr.serve` on macOS, systemd user unit on Linux), and runs doctor. It never overwrites existing files without `--force` (it merges missing keys). It will not replace a loaded `dev.atr.serve` job or install a service for a non-default config unless you pass `--force-service`. On macOS the service must run in the desktop session so Cursor can use the login keychain.
 
 Override config with `--config` or `ATR_CONFIG`. SQLite defaults to `~/.local/share/atr/state.db`.
 
@@ -123,7 +123,7 @@ Every change or destructive action still needs inline **Confirm** (old → new).
 
 ## Other agents (MCP)
 
-`atr mcp` is stdio. HTTP is `POST /mcp` on `listen` with `Authorization: Bearer $ATR_MCP_TOKEN` (or the 0600 token file). atr never prints the token. Tools: `add_task` (workspace git/dir/none, output), `wait_task`, `get_result` (text, diff, PR URL), list/steer/cancel, status, repos, providers, usage, doctor, read-only config. GitHub-label method still works without MCP (`for:atr`). `atr add "prompt"` / `--dir` / `--repo` enqueue a task without an issue.
+`atr mcp` is stdio. HTTP is `POST /mcp` on `listen` with `Authorization: Bearer $ATR_MCP_TOKEN` (or the 0600 token file). atr never prints the token. Tools: `add_task` (`body` required; `title` optional from the first prompt line; workspace `none` when neither `dir` nor `repo`; output), `wait_task`, `get_result` (text, diff, PR URL), list/steer/cancel, status, repos, providers, usage, doctor, read-only config. GitHub-label method still works without MCP (`for:atr`). `atr add "prompt"` / `--dir` / `--repo` enqueue a task without an issue. Prompts and inbox files are capped at 256 KiB by default.
 
 ```bash
 atr mcp

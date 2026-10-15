@@ -176,6 +176,66 @@ pub fn allocate_key(db: &crate::db::Db, prefix: &str, title: &str) -> Result<Str
     bail!("could not allocate a unique task key")
 }
 
+/// Default cap for prompts and inbox task files (256 KiB).
+pub const DEFAULT_MAX_PROMPT_BYTES: u64 = 256 * 1024;
+
+pub fn title_from_prompt(prompt: &str) -> String {
+    prompt
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("task")
+        .chars()
+        .take(80)
+        .collect()
+}
+
+pub fn check_prompt_bytes(text: &str, max: u64) -> Result<()> {
+    let n = text.len() as u64;
+    if max > 0 && n > max {
+        anyhow::bail!("prompt is {n} bytes; max is {max}");
+    }
+    Ok(())
+}
+
+/// Resolve workspace from intake fields. `dir` wins; otherwise `workspace`
+/// is honored even when the path was sent as `repo` (CLI HTTP client).
+pub fn resolve_intake_workspace(
+    dir: Option<&str>,
+    repo: Option<&str>,
+    workspace: Option<&str>,
+    resolve_git: impl Fn(&str) -> Option<String>,
+) -> Result<(WorkspaceKind, Option<String>, bool)> {
+    let dir = dir.map(str::trim).filter(|s| !s.is_empty());
+    let repo = repo.map(str::trim).filter(|s| !s.is_empty());
+    let kind = match workspace.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(w) => Some(WorkspaceKind::parse(w)?),
+        None => None,
+    };
+    if let Some(d) = dir {
+        let p = resolve_dir(d)?;
+        return Ok((WorkspaceKind::Dir, Some(p.display().to_string()), false));
+    }
+    if let Some(r) = repo {
+        let kind = kind.unwrap_or(WorkspaceKind::Git);
+        return match kind {
+            WorkspaceKind::Dir => {
+                let p = resolve_dir(r)?;
+                Ok((WorkspaceKind::Dir, Some(p.display().to_string()), false))
+            }
+            WorkspaceKind::Git => {
+                let path = resolve_git(r).unwrap_or_else(|| r.to_string());
+                Ok((WorkspaceKind::Git, Some(path), false))
+            }
+            WorkspaceKind::None => Ok((WorkspaceKind::None, None, true)),
+        };
+    }
+    match kind {
+        None | Some(WorkspaceKind::None) => Ok((WorkspaceKind::None, None, true)),
+        Some(WorkspaceKind::Dir) => anyhow::bail!("workspace dir requires dir"),
+        Some(WorkspaceKind::Git) => Ok((WorkspaceKind::Git, None, false)),
+    }
+}
+
 pub fn resolve_dir(raw: &str) -> Result<PathBuf> {
     let p = crate::config::expand_path(raw);
     if p.as_os_str().is_empty() {
@@ -216,7 +276,11 @@ pub fn workspace_note(kind: WorkspaceKind, path: &str, output: OutputKind) -> Op
         WorkspaceKind::Dir => {
             parts.push(format!(
                 "## Workspace\nThis is a local directory, not a git worktree. You may edit files. \
-Stay inside {path}. Do not read or write files outside that directory. Do not `cd` elsewhere.\n"
+Stay inside {path}. Do not read or write files outside that directory. Do not `cd` elsewhere. \
+Do not create a `.atr/` folder here.\n\
+atr asks the CLI to confine you where it can (Claude `--add-dir`, Codex `-s workspace-write`, \
+Grok `--cwd`, OpenCode `--dir`). That is best-effort: some CLIs can still write outside, \
+and atr does not snapshot-detect outside writes.\n"
             ));
         }
         WorkspaceKind::None => {
@@ -316,9 +380,68 @@ mod tests {
         assert_eq!(slugify("..."), "task");
         let n = workspace_note(WorkspaceKind::None, "", OutputKind::Text).unwrap();
         assert!(n.contains("no workspace"));
+        let d = workspace_note(WorkspaceKind::Dir, "/notes", OutputKind::Reply).unwrap();
+        assert!(d.contains("Stay inside /notes"));
+        assert!(d.contains("best-effort"));
+        assert!(d.contains("`.atr/`"));
         let rendered = "head\n## Messages\nbody\n";
         let out = insert_before_messages(rendered, "## Workspace\nstay in /tmp\n");
         assert!(out.contains("stay in /tmp"));
         assert!(out.find("Workspace").unwrap() < out.find("Messages").unwrap());
+    }
+
+    #[test]
+    fn title_and_prompt_size() {
+        assert_eq!(title_from_prompt("hello\nworld"), "hello");
+        assert_eq!(title_from_prompt("\n  \nFix typo"), "Fix typo");
+        check_prompt_bytes("ok", 2).unwrap();
+        let err = check_prompt_bytes("abcd", 3).unwrap_err().to_string();
+        assert!(err.contains("4 bytes"), "{err}");
+        assert!(err.contains("max is 3"), "{err}");
+    }
+
+    #[test]
+    fn intake_honors_workspace_when_path_is_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let notes_s = notes.display().to_string();
+
+        let (k, p, empty) =
+            resolve_intake_workspace(None, Some(&notes_s), Some("dir"), |_| None).unwrap();
+        assert_eq!(k, WorkspaceKind::Dir);
+        assert!(!empty);
+        assert_eq!(
+            p.as_deref(),
+            Some(notes.canonicalize().unwrap().display().to_string()).as_deref()
+        );
+
+        let (k, p, empty) =
+            resolve_intake_workspace(Some(&notes_s), Some("/etc"), Some("git"), |_| None).unwrap();
+        assert_eq!(k, WorkspaceKind::Dir);
+        assert!(!empty);
+        assert!(p.unwrap().contains("notes"));
+
+        let (k, p, empty) = resolve_intake_workspace(None, Some("my-repo"), Some("git"), |r| {
+            if r == "my-repo" {
+                Some("/src/my-repo".into())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(k, WorkspaceKind::Git);
+        assert_eq!(p.as_deref(), Some("/src/my-repo"));
+        assert!(!empty);
+
+        let (k, p, empty) = resolve_intake_workspace(None, None, None, |_| None).unwrap();
+        assert_eq!(k, WorkspaceKind::None);
+        assert!(p.is_none());
+        assert!(empty);
+
+        let (k, _, empty) =
+            resolve_intake_workspace(None, Some("/src/repo"), Some("none"), |_| None).unwrap();
+        assert_eq!(k, WorkspaceKind::None);
+        assert!(empty);
     }
 }

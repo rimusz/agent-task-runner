@@ -207,6 +207,14 @@ impl Shared {
             .meta_set("intake_paused", if paused { "1" } else { "0" });
     }
 
+    pub fn cancel_ok_line(key: &str, force: bool) -> String {
+        if force {
+            format!("cancelled {key} (force)")
+        } else {
+            format!("cancelled {key}")
+        }
+    }
+
     pub fn cancel(&self, key: &str, force: bool) -> Result<()> {
         let running = self.inflight.lock().unwrap().get(key).cloned();
         if let Some(info) = running {
@@ -279,6 +287,17 @@ impl Shared {
                         Some(cur) => cur.min(t),
                         None => t,
                     });
+                }
+                if cooling {
+                    if let Some(until) = self.db.cooldown_until(&p.name).ok().flatten() {
+                        if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&until) {
+                            let t = t.with_timezone(&chrono::Utc);
+                            reset_at = Some(match reset_at {
+                                Some(cur) => cur.min(t),
+                                None => t,
+                            });
+                        }
+                    }
                 }
                 if let Some(t) = reset_at {
                     top_reset = Some(match top_reset {
@@ -1221,6 +1240,38 @@ cli = "/bin/true"
             shared.db.get_task("acme-run").unwrap().unwrap().status,
             "failed"
         );
+        assert_eq!(
+            Shared::cancel_ok_line("acme-run", true),
+            "cancelled acme-run (force)"
+        );
+        assert_eq!(
+            Shared::cancel_ok_line("acme-run", false),
+            "cancelled acme-run"
+        );
+        std::mem::forget(dir);
+    }
+
+    #[test]
+    fn status_reset_shows_cooldown_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = test_shared(&dir);
+        let until = crate::db::cooldown_rfc3339(std::time::Duration::from_secs(600));
+        shared.db.set_cooldown("claude", &until).unwrap();
+        let text = format_status_table(&shared, None);
+        assert!(text.contains("cool"), "{text}");
+        let reset_cell = text
+            .lines()
+            .find(|l| l.contains("claude"))
+            .expect("claude row");
+        assert!(
+            !reset_cell.split_whitespace().any(|w| w == "-")
+                || reset_cell.contains("UTC")
+                || reset_cell.contains(':'),
+            "cooldown end must appear in reset column:\n{reset_cell}\n{text}"
+        );
+        let json = shared.status_json();
+        let reset = json["providers"][0]["quota_reset"].as_str().unwrap_or("");
+        assert!(!reset.is_empty(), "{json}");
         std::mem::forget(dir);
     }
 

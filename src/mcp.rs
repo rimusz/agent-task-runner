@@ -317,7 +317,7 @@ fn tool_schema(name: &str) -> Value {
                 "provider": {"type": "string", "description": "Provider or driver hint"},
                 "hint": {"type": "string"}
             },
-            "required": ["title", "body"]
+            "required": ["body"]
         }),
         "wait_task" => json!({
             "type": "object",
@@ -468,9 +468,10 @@ fn arg_str(args: &Value, keys: &[&str]) -> Option<String> {
 }
 
 fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
-    let title = arg_str(args, &["title"]).ok_or("missing title")?;
-    let body = arg_str(args, &["body"]).ok_or("missing body")?;
+    let body = arg_str(args, &["body", "prompt", "text", "message"]).ok_or("missing body")?;
     let cfg = shared.config.read().unwrap().clone();
+    crate::task::check_prompt_bytes(&body, cfg.max_prompt_bytes).map_err(|e| e.to_string())?;
+    let title = arg_str(args, &["title"]).unwrap_or_else(|| crate::task::title_from_prompt(&body));
     let repo_filter = arg_str(args, &["repo"]);
     let dir = arg_str(args, &["dir", "path"]);
     let workspace_in = arg_str(args, &["workspace"]);
@@ -480,12 +481,14 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
     let entry = repo_filter
         .as_deref()
         .and_then(|f| cfg.resolve_repo_filter(f));
-    let (workspace_kind, repo_path, allow_empty) = mcp_workspace(
-        &cfg,
-        workspace_in.as_deref(),
+    let (workspace_kind, repo_path, allow_empty) = crate::task::resolve_intake_workspace(
         dir.as_deref(),
-        entry.as_ref(),
-        repo_filter.clone(),
+        repo_filter.as_deref(),
+        workspace_in.as_deref(),
+        |r| {
+            cfg.resolve_repo_filter(r)
+                .map(|e| e.path.display().to_string())
+        },
     )
     .map_err(|e| e.to_string())?;
     let output_kind = output_in
@@ -543,42 +546,6 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
         "workspace": workspace_kind.as_str(),
         "output": output_kind.as_str(),
     }))
-}
-
-fn mcp_workspace(
-    cfg: &Config,
-    workspace: Option<&str>,
-    dir: Option<&str>,
-    entry: Option<&crate::config::RepoEntry>,
-    repo_filter: Option<String>,
-) -> anyhow::Result<(crate::task::WorkspaceKind, Option<String>, bool)> {
-    if let Some(d) = dir {
-        let p = crate::task::resolve_dir(d)?;
-        return Ok((
-            crate::task::WorkspaceKind::Dir,
-            Some(p.display().to_string()),
-            false,
-        ));
-    }
-    let kind = match workspace {
-        Some(w) => crate::task::WorkspaceKind::parse(w)?,
-        None if entry.is_some() || repo_filter.is_some() => crate::task::WorkspaceKind::Git,
-        None => {
-            if cfg.repo_path.as_os_str().is_empty() {
-                crate::task::WorkspaceKind::None
-            } else {
-                crate::task::WorkspaceKind::Git
-            }
-        }
-    };
-    match kind {
-        crate::task::WorkspaceKind::None => Ok((kind, None, true)),
-        crate::task::WorkspaceKind::Dir => anyhow::bail!("workspace dir requires dir"),
-        crate::task::WorkspaceKind::Git => {
-            let path = entry.map(|e| e.path.display().to_string()).or(repo_filter);
-            Ok((kind, path, false))
-        }
-    }
 }
 
 fn unique_key(
@@ -974,6 +941,7 @@ cli = "/bin/true"
         .await;
         let text = add[0]["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("task-fix-login"), "{text}");
+        assert!(text.contains("\"workspace\": \"none\""), "{text}");
         assert!(!text.to_ascii_lowercase().contains("secret"), "{text}");
         let list = handle_raw(
             &s,
@@ -1014,6 +982,78 @@ cli = "/bin/true"
         )
         .await;
         assert_eq!(cancel[0]["result"]["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn add_task_defaults_none_and_title_from_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path());
+        let add = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_task","arguments":{"body":"Derive a title from this prompt"}}}"#,
+        )
+        .await;
+        let text = add[0]["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("task-derive-a-title"), "{text}");
+        assert!(text.contains("\"workspace\": \"none\""), "{text}");
+        let t =
+            s.db.get_task("task-derive-a-title-from-this-prompt")
+                .unwrap()
+                .or_else(|| {
+                    s.db.list_tasks()
+                        .unwrap()
+                        .into_iter()
+                        .find(|t| t.title.contains("Derive a title"))
+                })
+                .unwrap();
+        assert_eq!(t.workspace_kind, "none");
+        assert_eq!(t.title, "Derive a title from this prompt");
+        assert_eq!(t.issue, None);
+    }
+
+    #[tokio::test]
+    async fn add_task_rejects_oversized_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.toml");
+        let prompt = dir.path().join("p.md");
+        std::fs::write(&prompt, "p\n").unwrap();
+        std::fs::write(
+            &cfg_path,
+            format!(
+                r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{prompt}"
+display_timezone = "UTC"
+max_prompt_bytes = "32"
+[mcp]
+enabled = true
+token_env = "ATR_MCP_TOKEN_TEST_UNSET"
+token_file = "{token}"
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "/bin/true"
+"#,
+                db = dir.path().join("s.db").display(),
+                root = dir.path().display(),
+                prompt = prompt.display(),
+                token = dir.path().join("mcp.token").display(),
+            ),
+        )
+        .unwrap();
+        let cfg = load_config(&cfg_path).unwrap();
+        let s = Shared::from_config(cfg_path, cfg).unwrap();
+        let add = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_task","arguments":{"body":"this prompt is definitely over thirty two bytes"}}}"#,
+        )
+        .await;
+        assert_eq!(add[0]["result"]["isError"], true);
+        let text = add[0]["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("bytes"), "{text}");
     }
 
     #[tokio::test]
