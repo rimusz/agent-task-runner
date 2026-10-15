@@ -1,5 +1,5 @@
 #!/bin/sh
-# Checks contrib/release-decide.sh: only shipped-file changes release.
+# Checks contrib/release-decide.sh (on-demand releases only).
 # Run: sh tests/release-decide.sh
 set -eu
 
@@ -10,50 +10,47 @@ cd "$tmp"
 git init -q
 git config user.email t@t
 git config user.name t
-mkdir -p src docs tests .github/workflows config contrib
+mkdir -p src
 echo 'fn main() {}' > src/main.rs
-git add -A && git commit -qm init && git tag v0.1.1
+git add -A && git commit -qm init
 
 fails=0
-# check NAME EXPECTED_SKIP [FORCE] -- commits made since the tag are judged
+# check NAME WANT_SKIP WANT_TAG [VAR=VALUE...]
 check() {
-    name=$1 want=$2 force=${3:-}
-    base=$(git rev-parse v0.1.1)
-    out=$(BEFORE=$base FORCE=$force sh "$script")
+    name=$1 want=$2 wtag=$3
+    shift 3
+    if ! out=$(env -u TAG -u VERSION -u BUMP "$@" sh "$script" 2>&1); then
+        out="skip=error"
+    fi
     got=$(printf '%s\n' "$out" | sed -n 's/^skip=//p')
-    if [ "$got" = "$want" ]; then
-        echo "ok   $name (skip=$got $(printf '%s\n' "$out" | sed -n 's/^reason=//p'))"
+    gtag=$(printf '%s\n' "$out" | sed -n 's/^tag=//p')
+    if [ "$got" = "$want" ] && { [ "$want" = error ] || [ "$gtag" = "$wtag" ]; }; then
+        echo "ok   $name (skip=$got tag=$gtag)"
     else
-        echo "FAIL $name: want skip=$want got skip=$got"
+        echo "FAIL $name: want skip=$want tag=$wtag got skip=$got tag=$gtag"
         printf '%s\n' "$out"
         fails=$((fails + 1))
     fi
-    git reset -q --hard v0.1.1
 }
-change() { for f in "$@"; do mkdir -p "$(dirname "$f")"; echo x >> "$f"; done; git add -A; git commit -qm "${MSG:-change}"; }
+change() { echo x >> "$1"; git add -A; git commit -qm "${MSG:-change}"; }
 
-change README.md docs/a.md;          check docs-only yes
-change tests/t.rs;                   check tests-only yes
-change .github/workflows/ci.yml;     check workflow-only yes
-change install.sh LICENSE-MIT;       check install-and-license yes
-change contrib/release-decide.sh;    check release-helper-only yes
-change src/main.rs;                  check src no
-change Cargo.lock;                   check cargo-lock no
-change Cargo.toml;                   check cargo-toml no
-change config/example.toml;          check config no
-change contrib/atr.service;          check contrib-packed no
-change README.md src/main.rs;        check mixed no
-change README.md; change docs/b.md;  check docs-two-commits yes
-change README.md;                    check force-env no true
-MSG='docs tweak [release]' change README.md; check force-commit-msg no
-MSG='test: x [no release]' change src/main.rs; check no-release-src yes
-MSG='chore [No Release]' change Cargo.toml; check no-release-case yes
-change README.md; MSG='body
-
-[no release]' change src/main.rs; check no-release-in-range yes
-MSG='x [no release]' change src/main.rs;   check no-release-vs-force-env no true
-MSG='x [no release] [release]' change src/main.rs; check no-release-vs-force-msg no
-MSG='x [no release]' change src/main.rs; MSG='y [release]' change docs/c.md; check no-release-vs-force-other-commit no
+check first-release no v0.1.1
+git tag v0.1.1
+check head-already-tagged yes v0.1.1
+change README.md
+check docs-only-still-releases no v0.1.2
+MSG='x [no release]' change src/main.rs
+check marker-ignored no v0.1.2
+check bump-minor no v0.2.0 BUMP=minor
+check bump-major no v1.0.0 BUMP=major
+check bump-invalid error "" BUMP=huge
+check version-input no v0.3.0 VERSION=0.3.0
+check version-input-v no v0.3.0 VERSION=v0.3.0
+check version-exists yes v0.1.1 VERSION=0.1.1
+check version-invalid error "" VERSION=1.2
+check tag-push no v0.4.0 TAG=v0.4.0
+check tag-push-ref no v0.4.0 TAG=refs/tags/v0.4.0
+check tag-invalid error "" TAG=vfoo
 
 if [ "$fails" -ne 0 ]; then
     echo "$fails case(s) failed"

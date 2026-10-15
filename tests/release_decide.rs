@@ -12,14 +12,16 @@ fn sh(dir: &Path, script: &str) {
     assert!(st.success(), "{script}");
 }
 
-fn decide(dir: &Path, before: Option<&str>, labels: &str) -> String {
+fn decide(dir: &Path, vars: &[(&str, &str)]) -> String {
     let script = format!("{}/contrib/release-decide.sh", env!("CARGO_MANIFEST_DIR"));
     let mut cmd = Command::new("sh");
     cmd.arg(&script).current_dir(dir);
-    if let Some(b) = before {
-        cmd.env("BEFORE", b);
+    for k in ["TAG", "VERSION", "BUMP"] {
+        cmd.env_remove(k);
     }
-    cmd.env("LABELS", labels);
+    for (k, v) in vars {
+        cmd.env(k, v);
+    }
     let out = cmd.output().expect("release-decide");
     assert!(
         out.status.success(),
@@ -66,11 +68,9 @@ fn next_version_script() {
 }
 
 #[test]
-fn first_release_is_v0_1_1_even_for_docs() {
+fn first_release_is_v0_1_1() {
     let repo = init_repo();
-    fs::write(repo.path().join("README.md"), "docs\n").unwrap();
-    sh(repo.path(), "git add README.md && git commit -qm docs");
-    let out = decide(repo.path(), None, "");
+    let out = decide(repo.path(), &[]);
     assert_eq!(field(&out, "skip"), "no");
     assert_eq!(field(&out, "tag"), "v0.1.1");
 }
@@ -79,92 +79,37 @@ fn first_release_is_v0_1_1_even_for_docs() {
 fn already_tagged_commit_skips() {
     let repo = init_repo();
     sh(repo.path(), "git tag v0.1.1");
-    let out = decide(repo.path(), None, "");
+    let out = decide(repo.path(), &[]);
     assert_eq!(field(&out, "skip"), "yes");
     assert_eq!(field(&out, "reason"), "tagged");
 }
 
 #[test]
-fn later_push_is_patch() {
+fn manual_run_bumps_patch_even_for_docs() {
     let repo = init_repo();
     sh(repo.path(), "git tag v0.1.1");
-    let before = String::from_utf8(
-        Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    let before = before.trim().to_string();
-    fs::write(repo.path().join("src/app.rs"), "fn main() { /* 2 */ }\n").unwrap();
-    sh(repo.path(), "git add src/app.rs && git commit -qm code");
-    let out = decide(repo.path(), Some(&before), "");
+    fs::write(repo.path().join("README.md"), "docs\n").unwrap();
+    sh(repo.path(), "git add README.md && git commit -qm docs");
+    let out = decide(repo.path(), &[]);
     assert_eq!(field(&out, "skip"), "no");
     assert_eq!(field(&out, "tag"), "v0.1.2");
     assert_eq!(field(&out, "bump"), "patch");
-}
-
-#[test]
-fn docs_only_after_first_release_skips() {
-    let repo = init_repo();
-    sh(repo.path(), "git tag v0.1.1");
-    let before = String::from_utf8(
-        Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    let before = before.trim().to_string();
-    fs::write(repo.path().join("README.md"), "only docs\n").unwrap();
-    sh(repo.path(), "git add README.md && git commit -qm docs");
-    let out = decide(repo.path(), Some(&before), "");
-    assert_eq!(field(&out, "skip"), "yes");
-    assert_eq!(field(&out, "reason"), "no-code");
-}
-
-#[test]
-fn minor_label_and_major_commit() {
-    let repo = init_repo();
-    sh(repo.path(), "git tag v0.1.1");
-    let before = String::from_utf8(
-        Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    let before = before.trim().to_string();
-    fs::write(repo.path().join("src/app.rs"), "fn main() { /* 3 */ }\n").unwrap();
-    sh(
-        repo.path(),
-        "git add src/app.rs && git commit -qm 'feat release:minor'",
-    );
-    let out = decide(repo.path(), Some(&before), "");
+    let out = decide(repo.path(), &[("BUMP", "minor")]);
     assert_eq!(field(&out, "tag"), "v0.2.0");
-    assert_eq!(field(&out, "bump"), "minor");
+}
 
-    fs::write(repo.path().join("src/app.rs"), "fn main() { /* 4 */ }\n").unwrap();
-    sh(
-        repo.path(),
-        "git add src/app.rs && git commit -qm 'break release:major'",
-    );
-    let before2 = String::from_utf8(
-        Command::new("git")
-            .args(["rev-parse", "HEAD~1"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    let out = decide(repo.path(), Some(before2.trim()), "release:minor");
-    assert_eq!(field(&out, "tag"), "v1.0.0");
-    assert_eq!(field(&out, "bump"), "major");
+#[test]
+fn explicit_version_and_tag_push() {
+    let repo = init_repo();
+    sh(repo.path(), "git tag v0.1.1");
+    let out = decide(repo.path(), &[("VERSION", "v1.2.3")]);
+    assert_eq!(field(&out, "skip"), "no");
+    assert_eq!(field(&out, "ver"), "1.2.3");
+    let out = decide(repo.path(), &[("VERSION", "0.1.1")]);
+    assert_eq!(field(&out, "skip"), "yes");
+    assert_eq!(field(&out, "reason"), "exists");
+    let out = decide(repo.path(), &[("TAG", "v0.1.1")]);
+    assert_eq!(field(&out, "skip"), "no");
+    assert_eq!(field(&out, "reason"), "tag");
+    assert_eq!(field(&out, "ver"), "0.1.1");
 }

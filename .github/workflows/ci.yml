@@ -37,7 +37,7 @@ jobs:
           fi
           files=$(git diff --name-only "$BASE" "$HEAD")
           printf '%s\n' "$files"
-          # Same docs-only rule as contrib/release-decide.sh.
+          # Docs-only: docs/, *.md, LICENSE*, issue templates.
           code=$(printf '%s\n' "$files" | grep -vE '(^docs/)|(\.md$)|(^LICENSE)|(^\.github/ISSUE_TEMPLATE/)|^$' || true)
           echo "code=$([ -n "$code" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           # tests/readme.rs checks README.md and docs/*.md.
