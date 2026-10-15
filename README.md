@@ -65,9 +65,58 @@ atr submit my-task --body "also fix the footer"
 
 `--dir` edits in place. `--repo` uses a git worktree. Neither flag means answer-only. `--output` is `reply` (default: answer the source), `pr`, `issue-comment`, `branch`, `patch`, `text`, or `webhook`.
 
-Other agents can `atr mcp` (`add_task` / `wait_task` / `get_result`), `POST /tasks`, send Telegram `/add`, or drop a TOML/JSON file into an inbox directory.
+Other agents and scripts can also hand it work through MCP, the HTTP API, Telegram, or an inbox folder. See [Hand work to atr](#hand-work-to-atr).
 
 `atr serve` (or the user service) must be running for queued work to start.
+
+### Hand work to atr
+
+Every way in creates the same kind of task. Pick whichever suits the caller. Full field list: [docs/CONFIG.md](docs/CONFIG.md#sources).
+
+**CLI.** `atr add` queues a task on this machine.
+
+```bash
+atr add "what is 2+2?"                                  # answer only, no workspace
+atr add "fix the typo in notes.txt" --dir ~/notes       # edit a plain folder in place
+atr add "fix the README typo" --repo ~/src/my-repo --output pr   # git worktree, opens a PR
+```
+
+**MCP.** Run `atr mcp` as an MCP server in your agent. `add_task` (needs `title` and `body`; optional `dir`, `repo`, `workspace`, `output`, `provider`) returns a task key. `wait_task` waits for that key to finish (`timeout_seconds`, default 120, max 3600). `get_result` returns the answer text, diff, and PR URL.
+
+**HTTP.** While atr is running, POST JSON to the local API (default `127.0.0.1:7420`). It returns the new task `key`; read the result from `GET /tasks/{key}/result`.
+
+```bash
+curl -s -X POST http://127.0.0.1:7420/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Sum","body":"what is 2+2?","workspace":"none","output":"text"}'
+```
+
+**Telegram.** Send `/add` followed by a prompt, for example `/add what is 2+2?`. Telegram tasks are answer-only and the reply comes back to the chat.
+
+**Inbox folder.** A folder atr watches. Any script or agent can drop a `.toml` or `.json` task file into it, and atr runs it like any other task. It is **off by default**. To turn it on, add this to your config and restart atr:
+
+```toml
+[[source]]
+kind = "inbox"
+dir = "~/.local/share/atr/inbox"   # any folder; created if missing
+poll_interval = "5s"               # optional, default 5s
+```
+
+A task file needs `prompt` (or `body`). Everything else is optional:
+
+```toml
+# ~/.local/share/atr/inbox/fix-typo.toml
+title = "Fix typo in notes"
+prompt = "Fix the spelling mistakes in notes.txt. Change nothing else."
+dir = "~/notes"          # or repo = "my-repo" for a git worktree; leave both out for answer-only
+output = "reply"         # reply (default), text, or webhook; pr / branch / patch need repo
+```
+
+The same fields work as JSON in a `.json` file. atr checks the folder every `poll_interval`. Files whose names start with `.` are ignored, so write to `.name.toml` and rename when done. After pickup:
+
+- A file that queued fine moves to `accepted/`.
+- A file that could not be read or queued (bad TOML/JSON, missing prompt, bad folder) moves to `failed/`, with the reason next to it in `<name>.error.txt`.
+- With the default `reply` output, the result is written to `results/<task key>.json` inside the inbox folder.
 
 ### Watching repos
 

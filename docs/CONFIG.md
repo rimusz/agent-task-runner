@@ -137,9 +137,38 @@ kind = "github"
 enabled = false
 ```
 
-Inbox files are TOML or JSON (`prompt` / `body`, optional `dir`, `repo`,
-`workspace`, `output`, `webhook`, `patch`, `provider`). Accepted files move to
-`accepted/`, failures to `failed/`, results to `results/{key}.json`.
+### Inbox folder
+
+Off unless a `[[source]] kind = "inbox"` entry with `enabled = true` (the
+default for a listed entry) and a `dir` exists. `dir` is required, `~` is
+expanded, and the folder plus `accepted/`, `failed/`, `results/` are created on
+first poll. `poll_interval` defaults to `5s` (minimum 1s). Reload with SIGHUP
+or restart the service.
+
+atr reads files ending `.toml` or `.json` (names starting with `.` are skipped,
+so write `.x.toml` then rename). Fields (TOML shown; JSON uses the same names):
+
+```toml
+# ~/.local/share/atr/inbox/fix-typo.toml
+title = "Fix typo in notes"      # optional; default is the first prompt line
+prompt = "Fix the spelling mistakes in notes.txt. Change nothing else."
+                                 # required; `body` (alias `text`, `message`) also works
+dir = "~/notes"                  # local folder workspace (edit in place)
+# repo = "my-repo"               # git workspace: watch repo name, owner/name, or path
+# workspace = "none"             # git | dir | none; default none when no dir/repo
+output = "reply"                 # reply (default) | text | webhook | issue_comment (GitHub tasks)
+                                 # pr | branch | patch need a git workspace
+# webhook = "https://example.com/hook"   # for output = "webhook"
+# patch = "/tmp/fix.patch"       # for output = "patch"
+# key = "notes-typo"             # optional task key; auto-allocated otherwise
+# provider = "claude"            # optional provider/driver hint
+# shadow = false
+```
+
+After pickup the file moves to `accepted/` if it was queued, or to `failed/`
+with the reason in `<name>.error.txt` if it could not be parsed or queued
+(missing prompt, bad dir/repo, git-only output without a repo). With
+`output = "reply"` the finished result is written to `results/{key}.json`.
 
 `atr add "…"` (optional `--dir` / `--repo` / `--output`) and `POST /tasks`
 enqueue a generic task. `GET /tasks/{key}` and `GET /tasks/{key}/result` read
