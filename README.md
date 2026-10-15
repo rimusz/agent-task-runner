@@ -1,6 +1,6 @@
 # atr
 
-**atr runs your coding agents in the background, using the CLIs you already have.**
+**Your AI subscriptions are idle 16 hours a day. atr turns them into a 24/7 dev team.**
 
 - Hand it a task (a prompt, plus a folder or repo if you like) and it runs it with Claude Code, Grok Build, Cursor, Codex or OpenCode.
 - When one provider hits its limit, it moves on to the next one in your list.
