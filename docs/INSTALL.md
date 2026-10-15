@@ -52,7 +52,7 @@ atr doctor
 
 - a local Mac (Apple Silicon),
 - any Linux distro (the Linux build is a static musl binary),
-- a cloud VM or headless server. Run `loginctl enable-linger "$USER"` so the service keeps running after you log out.
+- a cloud VM or headless server. Run `sudo loginctl enable-linger "$USER"` so the service keeps running after you log out.
 
 The coding CLIs atr drives (Claude, Codex, Cursor, Grok, OpenCode and others) must be installed and signed in on that same host.
 
@@ -81,7 +81,7 @@ Deploy atr (https://github.com/rimusz/agent-task-runner) on this machine. Follow
 
 6. Make sure the background service is installed and running (init normally does this already):
    atr service install
-   On headless Linux also run: loginctl enable-linger "$USER" so it keeps running after logout. On macOS the LaunchAgent (dev.atr.serve) must be loaded from the desktop session, not over SSH.
+   On headless Linux also run: sudo loginctl enable-linger "$USER" so it keeps running after logout. On macOS the LaunchAgent (dev.atr.serve) must be loaded from the desktop session, not over SSH.
 
 7. Ask me which GitHub repos to watch, then add each one and list them:
    atr repos add <owner/name> --path <local-clone-path>

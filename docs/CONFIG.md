@@ -200,6 +200,11 @@ LaunchAgent is still loaded, pass its label with
 `atr service install --legacy-label <old-label>` so install can stop that job
 before writing the current one. Two copies of `atr serve` must not run.
 
+On Linux, atr runs as a systemd user service, which stops when you log out.
+To keep it running after logout or reboot without logging in, run
+`sudo loginctl enable-linger $USER` once (needs sudo). Check it with
+`loginctl show-user $USER -p Linger`.
+
 `atr tasks rm` and `atr gc --tasks` delete finished, failed, or cancelled
 task rows only. Running tasks are refused.
 
