@@ -116,6 +116,8 @@ gh issue edit 12 --add-label for:atr
 
 Claude Code, Grok Build, Cursor, Codex and OpenCode. OpenCode also opens the door to DeepSeek, Kimi, Qwen, local Ollama, self-hosted vLLM and more. See [docs/USAGE.md](docs/USAGE.md#providers-and-opencode).
 
+**Why Grok Build:** it's the recommended main provider. atr uses it by default to plan and review, and it adds live progress on the dashboard and Telegram, per-run cost and token data, and session resume. Everything else works with any provider. See [docs/USAGE.md](docs/USAGE.md#grok-build-as-the-main-provider).
+
 ## More docs
 
 | Page | What it covers |
