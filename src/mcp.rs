@@ -893,6 +893,23 @@ cli = "/bin/true"
     }
 
     #[tokio::test]
+    async fn add_task_saves_provider_hint_before_queueing() {
+        // Regression (#5 item 7): the hint was stored after queueing, so
+        // serve could dispatch to the default provider first.
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path());
+        let add = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_task","arguments":{"title":"Hinted","body":"x","provider":" grok "}}}"#,
+        )
+        .await;
+        assert_eq!(add[0]["result"]["isError"], false, "{}", add[0]);
+        let t = s.db.get_task("task-hinted").unwrap().unwrap();
+        assert_eq!(t.provider_hint, "grok");
+        assert_eq!(t.status, "queued");
+    }
+
+    #[tokio::test]
     async fn initialize_and_tools() {
         let dir = tempfile::tempdir().unwrap();
         let s = shared(dir.path());
