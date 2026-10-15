@@ -721,4 +721,115 @@ token_file = "/tmp/atr-mcp-missing.token"
         assert_eq!(code, 400);
         assert!(body.contains("bytes"), "{body}");
     }
+    #[allow(clippy::result_large_err)]
+    fn post_json(url: &str, body: &str) -> Result<ureq::Response, ureq::Error> {
+        ureq::post(url)
+            .set("Content-Type", "application/json")
+            .send_string(body)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_task_rejects_bad_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), "");
+        let base = listen(s.clone()).await;
+        let url = format!("{base}/tasks");
+        for (body, want) in [
+            (r#"{"body":"   "}"#, "missing body"),
+            (r#"{"title":"no body"}"#, "missing body"),
+            (r#"{"body":"x","output":"carrier-pigeon"}"#, ""),
+            (r#"{"body":"x","dir":"/"}"#, "refusing"),
+            (r#"{"body":"x","dir":"/definitely/not/here"}"#, ""),
+        ] {
+            let (code, text) = status_body(post_json(&url, body).unwrap_err());
+            assert_eq!(code, 400, "{body} -> {text}");
+            assert!(text.contains(want), "{body} -> {text}");
+        }
+        assert!(s.db.list_tasks().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn task_lifecycle_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), "");
+        let base = listen(s.clone()).await;
+        assert_eq!(
+            ureq::get(&format!("{base}/health"))
+                .call()
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(
+            ureq::get(&format!("{base}/status"))
+                .call()
+                .unwrap()
+                .status(),
+            200
+        );
+
+        let resp = post_json(
+            &format!("{base}/tasks"),
+            r#"{"key":"http-life","title":"Life","body":"answer me","workspace":"none","output":"text","provider":"claude"}"#,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+        assert_eq!(v["key"], "http-life");
+        assert_eq!(v["output"], "text");
+        let t = s.db.get_task("http-life").unwrap().unwrap();
+        assert_eq!(t.provider_hint, "claude");
+        assert_eq!(t.title, "Life");
+
+        let got: serde_json::Value = serde_json::from_str(
+            &ureq::get(&format!("{base}/tasks/http-life"))
+                .call()
+                .unwrap()
+                .into_string()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(got["status"], "queued");
+        assert_eq!(got["workspace"], "none");
+
+        for path in ["tasks/nope", "tasks/nope/result"] {
+            let err = ureq::get(&format!("{base}/{path}")).call().unwrap_err();
+            assert_eq!(status(err), 404, "{path}");
+        }
+
+        let (code, text) =
+            status_body(post_json(&format!("{base}/tasks/http-life/messages"), "{}").unwrap_err());
+        assert_eq!(code, 400, "{text}");
+        let ok = post_json(
+            &format!("{base}/tasks/http-life/messages"),
+            r#"{"text":"one more thing"}"#,
+        )
+        .unwrap();
+        assert_eq!(ok.status(), 200);
+        let msgs = s.db.all_messages("http-life").unwrap();
+        assert!(msgs.len() >= 2, "{msgs:?}");
+
+        let c = post_json(&format!("{base}/tasks/http-life/cancel"), "{}").unwrap();
+        assert_eq!(c.status(), 200);
+        let t = s.db.get_task("http-life").unwrap().unwrap();
+        assert_ne!(t.status, "queued");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plugin_hook_records_event_on_latest_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), "");
+        let base = listen(s.clone()).await;
+        s.db.upsert_task("hook-1", "", None).unwrap();
+        let run = s.db.start_run("hook-1", "claude", "m").unwrap();
+        post_json(
+            &format!("{base}/hooks"),
+            r#"{"task":"hook-1","hook_event_name":"PostToolUse","tool":"Edit"}"#,
+        )
+        .unwrap();
+        // No task: accepted and ignored.
+        post_json(&format!("{base}/hooks"), r#"{"event":"Stop"}"#).unwrap();
+        let ev = s.db.events_for_run(run).unwrap();
+        assert_eq!(ev.len(), 1, "{ev:?}");
+        assert!(ev[0].raw.contains("PostToolUse"));
+    }
 }
