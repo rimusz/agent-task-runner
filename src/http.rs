@@ -831,6 +831,7 @@ token_file = "/tmp/atr-mcp-missing.token"
         let ev = s.db.events_for_run(run).unwrap();
         assert_eq!(ev.len(), 1, "{ev:?}");
         assert!(ev[0].raw.contains("PostToolUse"));
+    }
 
     fn mcp_cfg(token_path: &std::path::Path, env: &str) -> String {
         format!(
