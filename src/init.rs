@@ -486,41 +486,62 @@ fn choose_picks(d: &Discovery) -> Result<Vec<ProviderPick>> {
         };
         p.enabled = yn(&format!("enable {} ({extra})", p.name), p.enabled, false)?;
     }
-    if d.opencode.is_some() {
-        let defaults = detect::default_opencode_picks(d);
-        let def = defaults
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        if let Some(oc) = &d.opencode {
-            if !oc.models.is_empty() {
-                println!(
-                    "  pick from: {} (presets: {})",
-                    oc.models.join(", "),
-                    crate::presets::builtin_names()
-                );
+    if let Some(oc) = &d.opencode {
+        let state = if oc.providers.is_empty() {
+            "installed, not signed in"
+        } else {
+            "signed in"
+        };
+        if yn(&format!("enable opencode ({state})"), false, false)? {
+            if oc.models.is_empty() {
+                println!("  no OpenCode models available yet.");
+            } else {
+                println!("  OpenCode models available to you:");
+                for (i, m) in oc.models.iter().enumerate() {
+                    println!("    {:>2}) {m}", i + 1);
+                }
             }
-        }
-        let ans = prompt_line(
-            "OpenCode to add (preset or provider/model, comma-separated; empty skips extras)",
-            &def,
-            false,
-        )?;
-        for tok in ans.split(',') {
-            if let Some(p) = detect::pick_from_token(tok) {
-                if !picks.iter().any(|e| e.name == p.name) {
-                    picks.push(p);
+            println!("  (more providers can be connected with `opencode auth login`)");
+            if !oc.models.is_empty() {
+                let ans = prompt_line(
+                    "add which models? (numbers, comma-separated; empty = none)",
+                    "",
+                    false,
+                )?;
+                for p in opencode_choices(&ans, &oc.models) {
+                    if !picks.iter().any(|e| e.name == p.name) {
+                        picks.push(p);
+                    }
                 }
             }
         }
     }
-    let order = prompt_line(
-        "provider order (comma-separated)",
-        &detect::default_order_csv(&picks),
-        false,
-    )?;
+    let enabled = picks.iter().filter(|p| p.enabled).count();
+    let order = if enabled > 1 {
+        prompt_line(
+            "order to try enabled providers (comma-separated, first = preferred)",
+            &detect::default_order_csv(&picks),
+            false,
+        )?
+    } else {
+        String::new()
+    };
     Ok(detect::reorder_picks(picks, &order))
+}
+
+/// Map "1,3" (or model ids) against the listed OpenCode models.
+fn opencode_choices(ans: &str, models: &[String]) -> Vec<ProviderPick> {
+    ans.split(',')
+        .filter_map(|t| {
+            let t = t.trim();
+            let tok = match t.parse::<usize>() {
+                Ok(n) if n >= 1 && n <= models.len() => models[n - 1].as_str(),
+                Ok(_) => return None,
+                Err(_) => t,
+            };
+            detect::pick_from_token(tok)
+        })
+        .collect()
 }
 
 fn store_opencode_creds(
@@ -814,6 +835,20 @@ mod tests {
             "init must never print tokens: {msg}"
         );
         assert!(msg.contains("detected CLIs"), "{msg}");
+    }
+
+    #[test]
+    fn opencode_choices_by_number() {
+        let models = vec![
+            "opencode/big-pickle".to_string(),
+            "opencode/other".to_string(),
+        ];
+        assert!(opencode_choices("", &models).is_empty());
+        assert!(opencode_choices("9", &models).is_empty());
+        let p = opencode_choices("2", &models);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].kind, "opencode");
+        assert_eq!(p[0].model.as_deref(), Some("opencode/other"));
     }
 
     #[test]

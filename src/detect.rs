@@ -842,11 +842,21 @@ pub fn format_report(d: &Discovery, cfg: Option<&Config>) -> String {
         if oc.models.is_empty() {
             out.push_str("  opencode models: (none — run opencode models)\n");
         } else {
-            out.push_str(&format!("  opencode models: {}\n", oc.models.join(", ")));
+            out.push_str(&format!(
+                "  opencode models: {} available (listed when you enable opencode)\n",
+                oc.models.len()
+            ));
         }
     }
-    if !d.missing.is_empty() {
-        out.push_str(&format!("  not found: {}\n", d.missing.join(", ")));
+    // OpenCode presets (kimi, qwen, ...) are not CLIs; don't list them as missing.
+    let missing: Vec<&str> = d
+        .missing
+        .iter()
+        .map(String::as_str)
+        .filter(|m| presets::builtin(m).is_none())
+        .collect();
+    if !missing.is_empty() {
+        out.push_str(&format!("  not installed (optional): {}\n", missing.join(", ")));
     }
     out
 }
@@ -961,11 +971,7 @@ pub fn default_order_csv(picks: &[ProviderPick]) -> String {
         .filter(|p| p.enabled)
         .map(|p| p.name.as_str())
         .collect();
-    for p in picks {
-        if !p.enabled && !names.contains(&p.name.as_str()) {
-            names.push(p.name.as_str());
-        }
-    }
+    names.dedup();
     names.join(",")
 }
 
@@ -1265,5 +1271,36 @@ cli = "/Users/me/.local/bin/grok"
             Some("gpt-5.4")
         );
         assert!(cli_default_model_in("claude", &home).is_none());
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    fn pick(name: &str, enabled: bool) -> ProviderPick {
+        ProviderPick {
+            name: name.into(),
+            kind: name.into(),
+            enabled,
+            cli: None,
+            version: None,
+            preset: None,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn order_default_excludes_disabled() {
+        let picks = vec![
+            pick("claude", true),
+            pick("codex", false),
+            pick("grok", true),
+        ];
+        assert_eq!(default_order_csv(&picks), "claude,grok");
+        let out = reorder_picks(picks, "grok,claude");
+        let names: Vec<_> = out.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["grok", "claude", "codex"]);
+        assert!(!out[2].enabled);
     }
 }
