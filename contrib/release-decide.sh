@@ -7,7 +7,12 @@
 #   HEAD_SHA  current commit (default HEAD)
 #   LABELS    PR labels, space or newline separated (optional)
 #   COMMIT_MSG extra text to scan (optional)
-set -eu
+#   FORCE     "true" forces a release even with no code changes (optional)
+#
+# Only changes that affect the shipped binary or release archives cause a
+# release (allowlist, see ships()). A commit message containing [release]
+# in the pushed range, or FORCE=true, forces one.
+set -euf
 
 here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 head_sha=${HEAD_SHA:-HEAD}
@@ -24,7 +29,19 @@ fi
 
 latest=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n 1 || true)
 
-is_docs_only() {
+# Paths that end up in the binary or the release tarball.
+# contrib/ is packed, except the CI-only release helpers.
+ships() {
+    case $1 in
+        src/*|Cargo.toml|Cargo.lock|build.rs|config/*) return 0 ;;
+        contrib/release-decide.sh|contrib/next-version.sh) return 1 ;;
+        contrib/*) return 0 ;;
+    esac
+    return 1
+}
+
+# Succeeds when BEFORE..after is known and touches no shipped file.
+no_code_changes() {
     before=$1
     after=$2
     if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
@@ -34,9 +51,12 @@ is_docs_only() {
         return 1
     fi
     files=$(git diff --name-only "$before" "$after")
-    [ -n "$files" ] || return 1
-    leftover=$(printf '%s\n' "$files" | grep -vE '(^docs/)|(\.md$)|(^LICENSE)|(^\.github/ISSUE_TEMPLATE/)' || true)
-    [ -z "$leftover" ]
+    for f in $files; do
+        if ships "$f"; then
+            return 1
+        fi
+    done
+    return 0
 }
 
 bump=patch
@@ -53,17 +73,24 @@ scan "${COMMIT_MSG:-}"
 
 if [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
     && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-    scan "$(git log --format=%B "$BEFORE..$head_sha")"
+    msgs=$(git log --format=%B "$BEFORE..$head_sha")
 else
-    scan "$(git log -1 --format=%B "$head_sha")"
+    msgs=$(git log -1 --format=%B "$head_sha")
+fi
+scan "$msgs"
+
+force=no
+case ${FORCE:-} in true|yes|1) force=yes ;; esac
+if printf '%s\n' "$msgs" "${COMMIT_MSG:-}" | grep -qiF '[release]'; then
+    force=yes
 fi
 
 if [ -z "$latest" ]; then
     ver=0.1.1
     bump=patch
-elif is_docs_only "${BEFORE:-}" "$head_sha"; then
+elif [ "$force" = no ] && no_code_changes "${BEFORE:-}" "$head_sha"; then
     echo "skip=yes"
-    echo "reason=docs"
+    echo "reason=no-code"
     echo "ver=${latest#v}"
     echo "tag=$latest"
     echo "bump="

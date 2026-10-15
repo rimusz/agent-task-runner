@@ -721,4 +721,214 @@ token_file = "/tmp/atr-mcp-missing.token"
         assert_eq!(code, 400);
         assert!(body.contains("bytes"), "{body}");
     }
+
+    fn mcp_cfg(token_path: &std::path::Path, env: &str) -> String {
+        format!(
+            r#"
+[mcp]
+enabled = true
+token_env = "{env}"
+token_file = "{token}"
+"#,
+            token = token_path.display()
+        )
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn rpc(url: &str, auth: Option<&str>, body: &str) -> Result<ureq::Response, ureq::Error> {
+        let mut req = ureq::post(url)
+            .set("Content-Type", "application/json")
+            .set("Accept", "application/json");
+        if let Some(a) = auth {
+            req = req.set("Authorization", a);
+        }
+        req.send_string(body)
+    }
+
+    fn tool_json(resp: ureq::Response) -> serde_json::Value {
+        let v: serde_json::Value = serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+        assert_eq!(v["result"]["isError"], false, "{v}");
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_http_tools_over_bearer_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("mcp.token");
+        let token = crate::mcp::generate_token();
+        write_token_file(&token_path, &token).unwrap();
+        let s = shared(
+            dir.path(),
+            &mcp_cfg(&token_path, "ATR_MCP_HTTP_TOOLS_TEST_UNSET"),
+        );
+        let url = format!("{}/mcp", listen(s.clone()).await);
+        let auth = format!("Bearer {token}");
+
+        let listed = rpc(
+            &url,
+            Some(&auth),
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        )
+        .unwrap();
+        assert_eq!(listed.status(), 200);
+        let body = listed.into_string().unwrap();
+        assert!(!body.contains(&token), "token leaked in tools/list");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 12, "{v}");
+
+        let empty = tool_json(
+            rpc(
+                &url,
+                Some(&auth),
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_tasks","arguments":{}}}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(empty["tasks"].as_array().unwrap().len(), 0, "{empty}");
+
+        let added = tool_json(
+            rpc(
+                &url,
+                Some(&auth),
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add_task","arguments":{"title":"Sum","body":"what is 2+2?","workspace":"none","output":"text"}}}"#,
+            )
+            .unwrap(),
+        );
+        let key = added["key"].as_str().unwrap().to_string();
+        assert_eq!(added["workspace"], "none", "{added}");
+        let t = s.db.get_task(&key).unwrap().unwrap();
+        assert_eq!(t.source_kind, "mcp");
+
+        let st = tool_json(
+            rpc(
+                &url,
+                Some(&auth),
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"task_status","arguments":{{"key":"{key}"}}}}}}"#
+                ),
+            )
+            .unwrap(),
+        );
+        assert_eq!(st["key"], key.as_str(), "{st}");
+
+        let cfg = rpc(
+            &url,
+            Some(&auth),
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"config_get","arguments":{}}}"#,
+        )
+        .unwrap()
+        .into_string()
+        .unwrap();
+        assert!(
+            !cfg.contains(&token),
+            "config_get must not reveal the token"
+        );
+
+        // Tool calls are refused without the token.
+        let denied = rpc(
+            &url,
+            None,
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"list_tasks","arguments":{}}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(status(denied), 401);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_http_token_rotation_without_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("mcp.token");
+        write_token_file(&token_path, "old-rotation-token").unwrap();
+        let s = shared(
+            dir.path(),
+            &mcp_cfg(&token_path, "ATR_MCP_HTTP_ROTATE_TEST_UNSET"),
+        );
+        let url = format!("{}/mcp", listen(s).await);
+        let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        assert_eq!(
+            rpc(&url, Some("Bearer old-rotation-token"), ping)
+                .unwrap()
+                .status(),
+            200
+        );
+        write_token_file(&token_path, "new-rotation-token").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let old = rpc(&url, Some("Bearer old-rotation-token"), ping).unwrap_err();
+        assert_eq!(
+            status(old),
+            401,
+            "old token must be rejected after rotation"
+        );
+        assert_eq!(
+            rpc(&url, Some("Bearer new-rotation-token"), ping)
+                .unwrap()
+                .status(),
+            200
+        );
+        // Emptying the file disables HTTP MCP (503), it does not open it.
+        std::fs::write(&token_path, "\n").unwrap();
+        let empty = rpc(&url, Some("Bearer new-rotation-token"), ping).unwrap_err();
+        assert_eq!(status(empty), 503);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_http_env_token_wins_and_bad_headers_401() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("mcp.token");
+        write_token_file(&token_path, "file-token").unwrap();
+        let env = "ATR_MCP_HTTP_ENV_PRECEDENCE_TEST";
+        std::env::set_var(env, "env-token");
+        let s = shared(dir.path(), &mcp_cfg(&token_path, env));
+        let url = format!("{}/mcp", listen(s).await);
+        let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        assert_eq!(
+            rpc(&url, Some("Bearer env-token"), ping).unwrap().status(),
+            200
+        );
+        let file = rpc(&url, Some("Bearer file-token"), ping).unwrap_err();
+        assert_eq!(status(file), 401, "env token takes precedence over file");
+        for bad in [
+            "env-token",
+            "Token env-token",
+            "Bearer",
+            "Bearer ",
+            "Bearer env-token-extra",
+            "Bearer env-toke",
+        ] {
+            let e = rpc(&url, Some(bad), ping).unwrap_err();
+            assert_eq!(status(e), 401, "header {bad:?} must be 401");
+        }
+        std::env::remove_var(env);
+    }
+
+    #[test]
+    fn write_token_file_tightens_existing_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sub/mcp.token");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "loose\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        write_token_file(&p, "  tight  ").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "tight\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let a = crate::mcp::generate_token();
+        let b = crate::mcp::generate_token();
+        assert_ne!(a, b);
+        assert!(a.len() >= 32, "token too short");
+    }
 }
