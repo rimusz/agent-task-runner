@@ -35,7 +35,9 @@ jobs:
             echo "shell=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          files=$(git diff --name-only "$BASE" "$HEAD")
+          # Diff from the merge base, not BASE..HEAD: when main has moved on,
+          # BASE..HEAD also lists main's newer changes and runs the full build.
+          files=$(git diff --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD")
           printf '%s\n' "$files"
           # Same docs-only rule as contrib/release-decide.sh.
           code=$(printf '%s\n' "$files" | grep -vE '(^docs/)|(\.md$)|(^LICENSE)|(^\.github/ISSUE_TEMPLATE/)|^$' || true)
