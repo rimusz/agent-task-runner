@@ -127,8 +127,8 @@ pub async fn dispatch_available(shared: &Arc<Shared>) -> Result<()> {
                 shared: shared.clone(),
                 key: key.clone(),
             };
-            if let Err(e) = run_claimed(shared, key.clone(), provider).await {
-                tracing::error!(task = %key, "run: {e:#}");
+            if let Err(e) = run_claimed(shared.clone(), key.clone(), provider).await {
+                fail_claimed(&shared, &key, &e);
             }
         });
     }
@@ -579,7 +579,9 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     if let Some(h) = &handoff_text {
         let _ = shared.db.set_run_handoff(run_id, h);
     }
-    let checklist = if cfg.checklist.enabled {
+    let dir_workspace = ws_kind == crate::task::WorkspaceKind::Dir;
+    let files_dir = runner::runtime_files_dir(&cfg.state_db, &key, &wt, dir_workspace);
+    let checklist = if cfg.checklist.enabled && !dir_workspace {
         crate::checklist::load(&wt, cfg.checklist.max_bytes)
     } else {
         None
@@ -667,7 +669,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     } else {
         None
     };
-    let sys_path = wt.join(".atr").join("system.md");
+    let sys_path = files_dir.join("system.md");
     let attach_system = !resume_delta && has_slot;
     if attach_system {
         std::fs::create_dir_all(sys_path.parent().unwrap())?;
@@ -692,6 +694,8 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         } else {
             None
         },
+        dir_workspace,
+        &files_dir,
     )
     .await;
 
@@ -1282,9 +1286,10 @@ async fn maybe_review(
     let run_id = shared.db.start_run(key, &driver.name, &driver.model)?;
     let turn_id = shared.db.start_turn(run_id, key)?;
     let pid_slot = Arc::new(Mutex::new(None));
+    let files_dir = runner::runtime_files_dir(&cfg.state_db, key, wt, false);
     let result = runner::run_cli(
         &shared.db, cfg, &driver, wt, &prompt, None, true, run_id, turn_id, key, pid_slot, None,
-        None, None,
+        None, None, false, &files_dir,
     )
     .await;
     let result = match result {
@@ -1509,6 +1514,16 @@ fn should_warn_low_cache(db: &Db, key: &str, session: Option<&str>) -> Result<bo
     Ok(db.successful_session_runs(key, sid)? > 0)
 }
 
+pub(crate) fn fail_claimed(shared: &Shared, key: &str, err: &anyhow::Error) {
+    let reason = format!("{err:#}");
+    tracing::error!(task = %key, "run failed: {reason}");
+    if let Ok(Some(run_id)) = shared.db.open_run_for_task(key) {
+        let _ = shared.db.finish_run(run_id, "failed", Some(-1));
+    }
+    let _ = shared.db.set_task_result(key, &reason, "", None);
+    let _ = shared.db.set_status(key, "failed");
+}
+
 pub fn reconcile(shared: &Shared) -> Result<usize> {
     let runs = shared.db.open_runs()?;
     let mut n = 0;
@@ -1522,9 +1537,56 @@ pub fn reconcile(shared: &Shared) -> Result<usize> {
                 "reconciling run whose PID is gone"
             );
             shared.db.finish_run(r.id, "failed", Some(-1))?;
+            if let Ok(Some(t)) = shared.db.get_task(&r.task_key) {
+                if t.result_text.is_empty() {
+                    let _ = shared.db.set_task_result(
+                        &r.task_key,
+                        "orphaned run (process gone)",
+                        "",
+                        None,
+                    );
+                }
+            }
             shared.db.set_status(&r.task_key, "failed")?;
             n += 1;
         }
+    }
+    for t in shared.db.list_tasks()? {
+        if t.status != "running" {
+            continue;
+        }
+        if shared.inflight.lock().unwrap().contains_key(&t.key) {
+            continue;
+        }
+        let alive = match shared.db.open_run_for_task(&t.key)? {
+            Some(_) => shared
+                .db
+                .list_runs(Some(&t.key))?
+                .into_iter()
+                .rev()
+                .find(|r| r.ended.is_none())
+                .and_then(|r| r.pid)
+                .map(pid_alive)
+                .unwrap_or(false),
+            None => false,
+        };
+        if alive {
+            continue;
+        }
+        tracing::warn!(task = %t.key, "reconciling orphaned running task");
+        if let Ok(Some(run_id)) = shared.db.open_run_for_task(&t.key) {
+            let _ = shared.db.finish_run(run_id, "failed", Some(-1));
+        }
+        if t.result_text.is_empty() {
+            let _ = shared.db.set_task_result(
+                &t.key,
+                "orphaned running task (process gone or workspace setup failed)",
+                "",
+                None,
+            );
+        }
+        shared.db.set_status(&t.key, "failed")?;
+        n += 1;
     }
     Ok(n)
 }
@@ -2091,6 +2153,66 @@ cli = "{cli}"
             unavailable(&cfg, c, &db, &inflight, false, &clock).unwrap(),
             None,
             "a different Ollama model can run"
+        );
+    }
+
+    fn shared_for_reconcile(dir: &std::path::Path) -> std::sync::Arc<Shared> {
+        std::fs::write(dir.join("p.md"), "p\n").unwrap();
+        let text = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+display_timezone = "UTC"
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "/bin/true"
+"#,
+            db = dir.join("s.db").display(),
+            root = dir.display(),
+        );
+        let raw: crate::config::RawConfig = toml::from_str(&text).unwrap();
+        let cfg = crate::config::Config::from_raw(raw).unwrap();
+        Shared::from_config(dir.join("c.toml"), cfg).unwrap()
+    }
+
+    #[test]
+    fn fail_claimed_marks_running_task_failed_with_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_for_reconcile(dir.path());
+        shared.db.upsert_task("task-etc", "/etc", None).unwrap();
+        shared.db.set_status("task-etc", "running").unwrap();
+        fail_claimed(
+            &shared,
+            "task-etc",
+            &anyhow::anyhow!("/etc is not a git repository"),
+        );
+        let t = shared.db.get_task("task-etc").unwrap().unwrap();
+        assert_eq!(t.status, "failed");
+        assert!(
+            t.result_text.contains("not a git repository"),
+            "{}",
+            t.result_text
+        );
+    }
+
+    #[test]
+    fn reconcile_reaps_orphaned_running_task_without_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_for_reconcile(dir.path());
+        shared.db.upsert_task("task-orphan", "/etc", None).unwrap();
+        shared.db.set_status("task-orphan", "running").unwrap();
+        let n = reconcile(&shared).unwrap();
+        assert!(n >= 1, "expected to reap orphaned running task");
+        let t = shared.db.get_task("task-orphan").unwrap().unwrap();
+        assert_eq!(t.status, "failed");
+        assert!(
+            t.result_text.contains("orphaned") || t.result_text.contains("setup"),
+            "{}",
+            t.result_text
         );
     }
 }

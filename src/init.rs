@@ -18,6 +18,7 @@ pub struct InitOpts {
     pub yes: bool,
     pub force: bool,
     pub no_service: bool,
+    pub force_service: bool,
     pub config_path: PathBuf,
 }
 
@@ -183,13 +184,15 @@ pub fn run(opts: InitOpts) -> Result<String> {
     }
     if !opts.no_service {
         match crate::config::load_config(&opts.config_path) {
-            Ok(cfg) => match service::install(Some(&cfg), true, None) {
-                Ok(msg) => {
-                    out.push_str(&msg);
-                    out.push('\n');
+            Ok(cfg) => {
+                match service::install_for_init(Some(&cfg), &opts.config_path, opts.force_service) {
+                    Ok(msg) => {
+                        out.push_str(&msg);
+                        out.push('\n');
+                    }
+                    Err(e) => out.push_str(&format!("service install: {e:#}\n")),
                 }
-                Err(e) => out.push_str(&format!("service install: {e:#}\n")),
-            },
+            }
             Err(e) => out.push_str(&format!("config load after init: {e:#}\n")),
         }
     }
@@ -421,8 +424,10 @@ fn render_config(
                 "cli = \"{}\"\n",
                 escape(&cli.display().to_string())
             ));
-            if let Some(v) = &p.version {
-                out.push_str(&format!("expected_version = \"{}\"\n", escape(v)));
+            if p.kind != "grok" {
+                if let Some(v) = &p.version {
+                    out.push_str(&format!("expected_version = \"{}\"\n", escape(v)));
+                }
             }
         } else if p.kind != "opencode" {
             if let Some(kd) = kind_defaults(&p.kind) {
@@ -755,6 +760,7 @@ mod tests {
             yes: true,
             force: true,
             no_service: true,
+            force_service: false,
             config_path: path.clone(),
         })
         .unwrap();
@@ -828,6 +834,7 @@ exit 0
             yes: true,
             force: true,
             no_service: true,
+            force_service: false,
             config_path: path.clone(),
         })
         .unwrap();
@@ -848,6 +855,30 @@ exit 0
         assert_eq!(
             cfg.provider("claude").unwrap().expected_version.as_deref(),
             Some("9.9.9")
+        );
+        assert!(
+            cfg.provider("grok").unwrap().expected_version.is_none(),
+            "grok must not pin a stale expected_version"
+        );
+    }
+
+    #[test]
+    fn init_yes_skips_service_for_non_default_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ATR_INIT_SKIP_LOAD", "1");
+        std::env::set_var("ATR_SKILL_HOME", dir.path());
+        let path = dir.path().join("config.toml");
+        let msg = run(InitOpts {
+            yes: true,
+            force: true,
+            no_service: false,
+            force_service: false,
+            config_path: path,
+        })
+        .unwrap();
+        assert!(
+            msg.contains("skipped user service") || msg.contains("--force-service"),
+            "{msg}"
         );
     }
 }

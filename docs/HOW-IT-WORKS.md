@@ -210,7 +210,9 @@ token_env = "ATR_MCP_TOKEN"
 token_file = "~/.config/atr/mcp.token"
 ```
 
-Tools: `add_task` (optional `workspace` git/dir/none, `dir`, `repo`, `output`,
+Tools: `add_task` (`body` required; `title` optional, derived from the prompt;
+workspace defaults to `none` when neither `dir` nor `repo` is set; optional
+`workspace` git/dir/none, `dir`, `repo`, `output`,
 `webhook`, `patch`), `wait_task` (block until waiting/done/failed or
 `timeout_seconds`), `get_result` (text, diff, PR URL), `list_tasks`,
 `task_status` (timeline + last output), `steer_task`, `cancel_task`,

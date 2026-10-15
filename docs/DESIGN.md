@@ -57,7 +57,7 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   `POST /mcp` on the existing listener (localhost by default; Tailscale bind
   is optional). HTTP requires a bearer token from `mcp.token_env` (default
   `ATR_MCP_TOKEN`) or `mcp.token_file` (0600). atr never prints the token.
-  Tools enqueue (`add_task` with workspace/output), `wait_task`, `get_result`
+  Tools enqueue (`add_task` with optional title, workspace git/dir/none, output), `wait_task`, `get_result`
   (text, diff, PR URL), list, status (timeline + last output), steer, cancel,
   list repos/providers, usage, doctor, and read-only `config_get` (secrets
   redacted). Resources: `atr://status`, `atr://dashboard`. Config cannot be
@@ -69,7 +69,8 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   shadow, and inbox intake. `/add` is answer-only.
 - **Inbox:** drop a `.toml` / `.json` file into a `[[source]] kind = "inbox"`
   directory. atr moves it to `accepted/` or `failed/` and writes
-  `results/{key}.json`.
+  `results/{key}.json`. Files larger than `max_prompt_bytes` (default 256 KiB)
+  go to `failed/` with an error.
 
 `[[source]]` entries override the default for that kind only. Empty
 `[[source]]` keeps current behaviour: GitHub if `[github].enabled`, MCP/CLI/HTTP
@@ -77,8 +78,9 @@ always, Telegram if enabled, inbox off.
 
 Per-task **output**: `reply` (default, deliver to the source), `pr`,
 `issue_comment`, `branch`, `patch`, `text`, `webhook`. Git workspaces use a
-worktree. Dir workspaces edit in place (cwd stays inside the directory). None
-workspaces answer in text only.
+worktree. Dir workspaces edit in place; atr asks the CLI to stay inside the
+folder where the CLI supports it (best-effort; prompt files live in the state
+dir, not `.atr/` in the user's folder). None workspaces answer in text only.
 
 A new message for a running task is queued and never cancels or supersedes the
 live run.

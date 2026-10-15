@@ -31,6 +31,9 @@ enum Cmd {
         /// Write files but do not load launchd/systemd.
         #[arg(long)]
         no_service: bool,
+        /// Replace a loaded user service, or install one for a non-default config.
+        #[arg(long)]
+        force_service: bool,
     },
     /// Run the local HTTP server, scheduler, and GitHub poller.
     Serve,
@@ -358,11 +361,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             yes,
             force,
             no_service,
+            force_service,
         } => {
             let text = atr::init::run_and_doctor(atr::init::InitOpts {
                 yes,
                 force,
                 no_service,
+                force_service,
                 config_path: path,
             })
             .await?;
@@ -448,14 +453,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             };
             let shared = Shared::open(path)?;
             let cfg = shared.config.read().unwrap().clone();
-            let title = title.unwrap_or_else(|| {
-                text.lines()
-                    .next()
-                    .unwrap_or("task")
-                    .chars()
-                    .take(80)
-                    .collect()
-            });
+            atr::task::check_prompt_bytes(&text, cfg.max_prompt_bytes)?;
+            let title = title
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| atr::task::title_from_prompt(&text));
             let (workspace_kind, repo_path, allow_empty) = if let Some(d) = dir {
                 let p = atr::task::resolve_dir(&d.display().to_string())?;
                 (
@@ -504,6 +505,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 output_spec.as_deref(),
                 title.as_str(),
                 provider.as_deref(),
+                matches!(workspace_kind, atr::task::WorkspaceKind::Dir),
             ) {
                 println!("{key}");
                 return Ok(match status {
@@ -736,7 +738,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Cancel { key, force } => {
             if let Ok(cfg) = load_config(&path) {
                 match http_cancel(&cfg.listen, &key, force) {
-                    Ok(()) => return Ok(ExitCode::SUCCESS),
+                    Ok(()) => {
+                        println!("{}", atr::app::Shared::cancel_ok_line(&key, force));
+                        return Ok(ExitCode::SUCCESS);
+                    }
                     Err(e) => {
                         let msg = e.to_string();
                         if msg.contains("--force") || msg.contains("unknown task") {
@@ -747,6 +752,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             let shared = Shared::open(path)?;
             shared.cancel(&key, force)?;
+            println!("{}", atr::app::Shared::cancel_ok_line(&key, force));
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Upgrade { version } => {
@@ -840,6 +846,7 @@ fn http_create(
     output_spec: Option<&str>,
     title: &str,
     provider: Option<&str>,
+    as_dir: bool,
 ) -> Result<u16> {
     let url = format!("http://{listen}/tasks");
     let mut payload = serde_json::json!({
@@ -849,8 +856,14 @@ fn http_create(
         "source": "cli",
         "workspace": workspace,
         "output": output,
-        "repo": repo,
     });
+    if as_dir {
+        if let Some(d) = repo {
+            payload["dir"] = serde_json::Value::String(d.into());
+        }
+    } else if let Some(r) = repo {
+        payload["repo"] = serde_json::Value::String(r.into());
+    }
     if let Some(p) = provider {
         payload["provider"] = serde_json::Value::String(p.into());
     }

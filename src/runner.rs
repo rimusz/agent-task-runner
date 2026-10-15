@@ -102,6 +102,22 @@ pub fn terminate_tree_now(root: u32) {
     apply_kill(root, &tree, libc::SIGKILL);
 }
 
+/// Prompt/system files for a run. Dir workspaces keep these in the state
+/// directory so atr does not create `.atr/` inside the user's folder.
+pub fn runtime_files_dir(
+    state_db: &Path,
+    key: &str,
+    worktree: &Path,
+    dir_workspace: bool,
+) -> std::path::PathBuf {
+    if dir_workspace {
+        let root = state_db.parent().unwrap_or_else(|| Path::new("."));
+        root.join("prompts").join(key)
+    } else {
+        worktree.join(".atr")
+    }
+}
+
 pub async fn run_cli(
     db: &Db,
     cfg: &Config,
@@ -117,6 +133,8 @@ pub async fn run_cli(
     path_prepend: Option<&Path>,
     fork_from: Option<&str>,
     system_prompt: Option<&Path>,
+    dir_workspace: bool,
+    files_dir: &Path,
 ) -> Result<RunResult> {
     if provider.kind == "grok"
         && provider.plugin
@@ -143,12 +161,11 @@ pub async fn run_cli(
         .await;
     }
 
-    let prompt_dir = worktree.join(".atr");
-    std::fs::create_dir_all(&prompt_dir)?;
-    let prompt_path = prompt_dir.join("prompt.md");
+    std::fs::create_dir_all(files_dir)?;
+    let prompt_path = files_dir.join("prompt.md");
     std::fs::write(&prompt_path, prompt)?;
 
-    let spec = crate::providers::build_command_opts(
+    let mut spec = crate::providers::build_command_opts(
         provider,
         worktree,
         &prompt_path,
@@ -158,6 +175,9 @@ pub async fn run_cli(
         fork_from,
         system_prompt,
     );
+    if dir_workspace {
+        crate::providers::apply_dir_confinement(provider, &mut spec, worktree);
+    }
     tracing::info!(
         provider = %provider.name,
         program = %spec.program.display(),
@@ -809,5 +829,15 @@ os._exit(0)
             !crate::db::pid_alive(i64::from(orphan)),
             "leftover {orphan} must be reaped after a normal run exit"
         );
+    }
+
+    #[test]
+    fn dir_workspace_prompt_lives_in_state_dir() {
+        let state = Path::new("/var/lib/atr/state.db");
+        let wt = Path::new("/Users/me/notes");
+        let dir = runtime_files_dir(state, "task-notes", wt, true);
+        assert_eq!(dir, Path::new("/var/lib/atr/prompts/task-notes"));
+        let git = runtime_files_dir(state, "task-git", wt, false);
+        assert_eq!(git, Path::new("/Users/me/notes/.atr"));
     }
 }

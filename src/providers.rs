@@ -172,6 +172,28 @@ pub fn build_command_opts(
     }
 }
 
+/// Best-effort confinement for `--dir` workspaces. Codex already sandboxes
+/// with `-s`; Claude gets `--add-dir` so the folder is an explicit allowlist
+/// even if the CLI would otherwise walk up to a git root. Grok/OpenCode
+/// already pass `--cwd` / `--dir`. This is not a hard jail.
+pub fn apply_dir_confinement(p: &Provider, spec: &mut CommandSpec, dir: &Path) {
+    match p.kind.as_str() {
+        "claude" if !spec.args.iter().any(|a| a == "--add-dir") => {
+            spec.args.push("--add-dir".into());
+            spec.args.push(dir.display().to_string());
+        }
+        "codex" if !spec.args.iter().any(|a| a == "-s") => {
+            spec.args.push("-s".into());
+            spec.args.push(if p.sandbox.is_empty() {
+                "workspace-write".into()
+            } else {
+                p.sandbox.clone()
+            });
+        }
+        _ => {}
+    }
+}
+
 fn build_codex(
     p: &Provider,
     worktree: &Path,
@@ -1669,5 +1691,42 @@ mod tests {
             .args
             .iter()
             .any(|a| a.contains("append-system-prompt") || a == "--rules"));
+    }
+
+    #[test]
+    fn dir_confinement_adds_claude_add_dir_and_codex_sandbox() {
+        let mut claude = stub("claude");
+        claude.permission_mode = "bypassPermissions".into();
+        let mut spec = build_command(
+            &claude,
+            Path::new("/notes"),
+            Path::new("/state/prompts/t/prompt.md"),
+            "hi",
+            None,
+            true,
+        );
+        apply_dir_confinement(&claude, &mut spec, Path::new("/notes"));
+        assert!(
+            spec.args.windows(2).any(|w| w == ["--add-dir", "/notes"]),
+            "{:?}",
+            spec.args
+        );
+
+        let mut codex = stub("codex");
+        codex.sandbox = String::new();
+        let mut spec = build_command(
+            &codex,
+            Path::new("/notes"),
+            Path::new("/state/prompts/t/prompt.md"),
+            "hi",
+            None,
+            true,
+        );
+        apply_dir_confinement(&codex, &mut spec, Path::new("/notes"));
+        assert!(
+            spec.args.windows(2).any(|w| w == ["-s", "workspace-write"]),
+            "{:?}",
+            spec.args
+        );
     }
 }

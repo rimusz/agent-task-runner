@@ -34,7 +34,8 @@ the same file (Confirm, then reload). `atr config migrate` converts shorthand
 `driver`, `[planner]`, `[review]`, `[plugin]`, `[github] enabled / repo / label`
 (default `for:atr`), `[dashboard] enabled / bind`, `[telegram]` and
 `[telegram.assistant]`, `[[provider]]` order and `enabled`, `[mcp]`, `[cache]`,
-`[[source]]`.
+`[[source]]`, `max_prompt_bytes` (default `256k`; CLI/HTTP/MCP prompts and
+inbox files).
 
 ### Cache
 
@@ -131,6 +132,7 @@ kind = "inbox"
 enabled = true
 dir = "~/.local/share/atr/inbox"
 poll_interval = "5s"
+# max_bytes = "256k"   # inbox file cap; default max_prompt_bytes
 
 [[source]]
 kind = "github"
@@ -142,8 +144,10 @@ enabled = false
 Off unless a `[[source]] kind = "inbox"` entry with `enabled = true` (the
 default for a listed entry) and a `dir` exists. `dir` is required, `~` is
 expanded, and the folder plus `accepted/`, `failed/`, `results/` are created on
-first poll. `poll_interval` defaults to `5s` (minimum 1s). Reload with SIGHUP
-or restart the service.
+first poll. `poll_interval` defaults to `5s` (minimum 1s). Inbox files larger
+than `max_bytes` (default `max_prompt_bytes`, 256 KiB) are moved to `failed/`
+with an `.error.txt` reason. CLI, HTTP, and MCP prompts use the same cap.
+Reload with SIGHUP or restart the service.
 
 atr reads files ending `.toml` or `.json` (names starting with `.` are skipped,
 so write `.x.toml` then rename). Fields (TOML shown; JSON uses the same names):
@@ -184,7 +188,11 @@ the message was queued, `1` = error. `atr add` uses `POST /tasks` the same way.
 ## Service and edits
 
 `atr service install` writes **`dev.atr.serve`** (macOS LaunchAgent) or
-`atr.service` (systemd `--user`). `atr providers` and Telegram `/config set`
+`atr.service` (systemd `--user`). `atr init` will not replace a loaded
+`dev.atr.serve` job, and will not install a service when `ATR_CONFIG` or the
+config path is not the default, unless you pass `--force-service`. A
+non-default config gets a distinct LaunchAgent label derived from the config
+path. `atr providers` and Telegram `/config set`
 keep comments, back up `config.toml.bak`, and SIGHUP the daemon. If an older
 LaunchAgent is still loaded, pass its label with
 `atr service install --legacy-label <old-label>` so install can stop that job

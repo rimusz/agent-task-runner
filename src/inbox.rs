@@ -69,14 +69,19 @@ pub fn poll_once(shared: &Shared) -> Result<()> {
         if src.dir.as_os_str().is_empty() {
             continue;
         }
-        if let Err(e) = poll_dir(shared, &src.dir) {
+        let max_bytes = if src.max_bytes > 0 {
+            src.max_bytes
+        } else {
+            cfg.max_prompt_bytes
+        };
+        if let Err(e) = poll_dir(shared, &src.dir, max_bytes) {
             tracing::warn!(dir = %src.dir.display(), "inbox dir: {e:#}");
         }
     }
     Ok(())
 }
 
-fn poll_dir(shared: &Shared, dir: &Path) -> Result<()> {
+fn poll_dir(shared: &Shared, dir: &Path, max_bytes: u64) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("create inbox {}", dir.display()))?;
     fs::create_dir_all(dir.join("accepted"))?;
     fs::create_dir_all(dir.join("failed"))?;
@@ -94,7 +99,7 @@ fn poll_dir(shared: &Shared, dir: &Path) -> Result<()> {
         .collect();
     entries.sort();
     for path in entries {
-        match ingest_file(shared, dir, &path) {
+        match ingest_file(shared, dir, &path, max_bytes) {
             Ok(key) => {
                 let dest = unique_dest(&dir.join("accepted"), &path);
                 if let Err(e) = fs::rename(&path, &dest) {
@@ -132,7 +137,11 @@ fn unique_dest(dir: &Path, src: &Path) -> PathBuf {
     dir.join(format!("{stem}-{}.{}", crate::new_session_uuid(), ext))
 }
 
-fn ingest_file(shared: &Shared, inbox: &Path, path: &Path) -> Result<String> {
+fn ingest_file(shared: &Shared, inbox: &Path, path: &Path, max_bytes: u64) -> Result<String> {
+    let meta = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    if max_bytes > 0 && meta.len() > max_bytes {
+        bail!("inbox file is {} bytes; max is {max_bytes}", meta.len());
+    }
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let spec = parse_inbox_file(path, &text)?;
     let prompt = if !spec.prompt.trim().is_empty() {
@@ -143,18 +152,13 @@ fn ingest_file(shared: &Shared, inbox: &Path, path: &Path) -> Result<String> {
     if prompt.is_empty() {
         bail!("missing prompt");
     }
+    let cfg = shared.config.read().unwrap().clone();
+    task::check_prompt_bytes(&prompt, cfg.max_prompt_bytes.min(max_bytes))?;
     let title = if spec.title.trim().is_empty() {
-        prompt
-            .lines()
-            .next()
-            .unwrap_or("inbox")
-            .chars()
-            .take(80)
-            .collect()
+        task::title_from_prompt(&prompt)
     } else {
         spec.title.trim().to_string()
     };
-    let cfg = shared.config.read().unwrap().clone();
     let (workspace_kind, repo) = resolve_workspace(&cfg, &spec)?;
     let output = if spec.output.trim().is_empty() {
         OutputKind::Reply
@@ -347,5 +351,53 @@ cli = "/bin/true"
         assert_eq!(t.issue, None);
         let repo = t.repo.unwrap();
         assert!(task::path_inside(&work, Path::new(&repo)) || repo == work.display().to_string());
+    }
+
+    #[test]
+    fn oversized_file_moves_to_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let prompt = tmp.path().join("p.md");
+        std::fs::write(&prompt, "p\n").unwrap();
+        std::fs::write(
+            &cfg_path,
+            format!(
+                r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = ""
+system_prompt_file = "{prompt}"
+display_timezone = "UTC"
+max_prompt_bytes = "64"
+[[source]]
+kind = "inbox"
+enabled = true
+dir = "{inbox}"
+max_bytes = "64"
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "/bin/true"
+"#,
+                db = tmp.path().join("s.db").display(),
+                root = tmp.path().display(),
+                prompt = prompt.display(),
+                inbox = tmp.path().join("inbox").display(),
+            ),
+        )
+        .unwrap();
+        let cfg = load_config(&cfg_path).unwrap();
+        let s = Shared::from_config(cfg_path, cfg).unwrap();
+        let inbox = tmp.path().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let body = format!("prompt = \"{}\"\n", "x".repeat(200));
+        std::fs::write(inbox.join("huge.toml"), body).unwrap();
+        poll_once(&s).unwrap();
+        assert!(s.db.list_tasks().unwrap().is_empty());
+        assert!(!inbox.join("huge.toml").exists());
+        assert!(inbox.join("failed").join("huge.toml").exists());
+        let err = std::fs::read_to_string(inbox.join("failed").join("huge.error.txt")).unwrap();
+        assert!(err.contains("bytes"), "{err}");
     }
 }

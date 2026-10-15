@@ -108,64 +108,32 @@ async fn create_task(
         );
     };
     let cfg = shared.config.read().unwrap().clone();
+    if let Err(e) = crate::task::check_prompt_bytes(&body, cfg.max_prompt_bytes) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": e.to_string()})),
+        );
+    }
     let title = payload
         .title
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| {
-            body.lines()
-                .next()
-                .unwrap_or("task")
-                .chars()
-                .take(80)
-                .collect()
-        });
-    let dir = payload
-        .dir
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let (workspace_kind, repo_path, allow_empty) = if let Some(d) = dir {
-        match crate::task::resolve_dir(d) {
-            Ok(p) => (
-                crate::task::WorkspaceKind::Dir,
-                Some(p.display().to_string()),
-                false,
-            ),
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"ok": false, "error": e.to_string()})),
-                )
-            }
-        }
-    } else if let Some(r) = payload
-        .repo
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        if let Some(entry) = cfg.resolve_repo_filter(r) {
-            (
-                crate::task::WorkspaceKind::Git,
-                Some(entry.path.display().to_string()),
-                false,
+        .unwrap_or_else(|| crate::task::title_from_prompt(&body));
+    let (workspace_kind, repo_path, allow_empty) = match crate::task::resolve_intake_workspace(
+        payload.dir.as_deref(),
+        payload.repo.as_deref(),
+        payload.workspace.as_deref(),
+        |r| {
+            cfg.resolve_repo_filter(r)
+                .map(|e| e.path.display().to_string())
+        },
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": e.to_string()})),
             )
-        } else {
-            (crate::task::WorkspaceKind::Git, Some(r.to_string()), false)
         }
-    } else if let Some(w) = payload.workspace.as_deref() {
-        match crate::task::WorkspaceKind::parse(w) {
-            Ok(crate::task::WorkspaceKind::Git) => (crate::task::WorkspaceKind::Git, None, false),
-            Ok(k) => (k, None, k == crate::task::WorkspaceKind::None),
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"ok": false, "error": e.to_string()})),
-                )
-            }
-        }
-    } else {
-        (crate::task::WorkspaceKind::None, None, true)
     };
     let output_kind = match payload.output.as_deref() {
         Some(o) => match crate::task::OutputKind::parse(o) {
@@ -717,5 +685,44 @@ token_file = "/tmp/atr-mcp-missing.token"
         assert_eq!(t.workspace_kind, "dir");
         assert_eq!(t.issue, None);
         assert_eq!(t.source_kind, "http");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_task_repo_plus_workspace_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), "");
+        let base = listen(s.clone()).await;
+        let notes = dir.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let resp = ureq::post(&format!("{base}/tasks"))
+            .set("Content-Type", "application/json")
+            .send_string(&format!(
+                r#"{{"body":"fix the typo","repo":"{}","workspace":"dir"}}"#,
+                notes.display()
+            ))
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+        let t = s.db.get_task(v["key"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(t.workspace_kind, "dir");
+        let repo = t.repo.unwrap();
+        assert!(
+            repo.contains("notes") || std::path::Path::new(&repo) == notes.as_path(),
+            "{repo}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_task_rejects_oversized_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), r#"max_prompt_bytes = "32""#);
+        let base = listen(s).await;
+        let err = ureq::post(&format!("{base}/tasks"))
+            .set("Content-Type", "application/json")
+            .send_string(r#"{"body":"this prompt is definitely over thirty two bytes"}"#)
+            .unwrap_err();
+        let (code, body) = status_body(err);
+        assert_eq!(code, 400);
+        assert!(body.contains("bytes"), "{body}");
     }
 }

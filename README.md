@@ -200,7 +200,7 @@ atr init          # or: atr init --yes
 atr doctor
 ```
 
-`atr init` writes your config, finds the CLIs you already installed, lets you pick models, installs the user service, and runs doctor. `--yes` enables every detected **and signed-in** CLI. Same check later: `atr providers detect`. It does not overwrite existing files unless you pass `--force`. For GitHub you also need `git` and `gh` — see [docs/GITHUB.md](docs/GITHUB.md). Secrets are never printed.
+`atr init` writes your config, finds the CLIs you already installed, lets you pick models, installs the user service, and runs doctor. `--yes` enables every detected **and signed-in** CLI. Same check later: `atr providers detect`. It does not overwrite existing files unless you pass `--force`. It will not replace a loaded `dev.atr.serve` job or install a service for a non-default `ATR_CONFIG`/`HOME` unless you pass `--force-service` (or `--no-service` to skip). For GitHub you also need `git` and `gh` — see [docs/GITHUB.md](docs/GITHUB.md). Secrets are never printed.
 
 ### Giving it work
 
@@ -223,7 +223,7 @@ atr add "open a PR for the README typo" --repo ~/src/my-repo --output pr
 atr submit my-task --body "also fix the footer"
 ```
 
-`--dir` edits in place. `--repo` uses a git worktree. Neither flag means answer-only. `--output` is `reply` (default: answer the source), `pr`, `issue-comment`, `branch`, `patch`, `text`, or `webhook`.
+`--dir` edits in place. atr asks the CLI to stay inside that folder where the CLI supports it (Claude `--add-dir`, Codex sandbox `workspace-write`, Grok `--cwd`, OpenCode `--dir`). That is best-effort: some CLIs can still write outside, and atr does not snapshot-detect outside writes. Prompt files for dir tasks live in the state directory, not a `.atr/` folder in your notes. `--repo` uses a git worktree. Neither flag means answer-only. `--output` is `reply` (default: answer the source), `pr`, `issue-comment`, `branch`, `patch`, `text`, or `webhook`. Prompts (and inbox files) are capped at 256 KiB by default (`max_prompt_bytes`).
 
 Other agents and scripts can also hand it work through MCP, the HTTP API, Telegram, or an inbox folder. See [Hand work to atr](#hand-work-to-atr).
 
@@ -241,7 +241,7 @@ atr add "fix the typo in notes.txt" --dir ~/notes       # edit a plain folder in
 atr add "fix the README typo" --repo ~/src/my-repo --output pr   # git worktree, opens a PR
 ```
 
-**MCP.** Run `atr mcp` as an MCP server in your agent. `add_task` (needs `title` and `body`; optional `dir`, `repo`, `workspace`, `output`, `provider`) returns a task key. `wait_task` waits for that key to finish (`timeout_seconds`, default 120, max 3600). `get_result` returns the answer text, diff, and PR URL.
+**MCP.** Run `atr mcp` as an MCP server in your agent. `add_task` needs `body` (`title` is optional and defaults to the first prompt line). With neither `dir` nor `repo`, workspace is `none`, matching CLI and HTTP. Optional `dir`, `repo`, `workspace`, `output`, `provider`. Returns a task key. `wait_task` waits for that key to finish (`timeout_seconds`, default 120, max 3600). `get_result` returns the answer text, diff, and PR URL.
 
 **HTTP.** While atr is running, POST JSON to the local API (default `127.0.0.1:7420`). It returns the new task `key`; read the result from `GET /tasks/{key}/result`.
 
