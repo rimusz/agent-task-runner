@@ -2,6 +2,30 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub fn is_git_repo(path: &Path) -> bool {
+    let git = path.join(".git");
+    git.exists() || git.is_file()
+}
+
+/// Work in place in a local directory. Does not create a git worktree.
+pub fn ensure_dir_workspace(path: &Path) -> Result<PathBuf> {
+    if !path.exists() {
+        bail!("directory workspace {} does not exist", path.display());
+    }
+    if !path.is_dir() {
+        bail!("directory workspace {} is not a directory", path.display());
+    }
+    Ok(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Scratch folder for answer-only tasks (not a git repo).
+pub fn ensure_none_workspace(root: &Path, key: &str) -> Result<PathBuf> {
+    let dest = root.join("_none").join(key);
+    std::fs::create_dir_all(&dest)
+        .with_context(|| format!("create none workspace {}", dest.display()))?;
+    Ok(dest)
+}
+
 pub fn ensure_worktree(
     repo: &Path,
     root: &Path,

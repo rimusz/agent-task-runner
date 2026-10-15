@@ -16,7 +16,7 @@ pub const PROTOCOL_VERSION: &str = "2025-03-26";
 const TOOLS: &[(&str, &str)] = &[
     (
         "add_task",
-        "Enqueue a new atr task. Optional repo, key, and provider/driver hint.",
+        "Enqueue a new atr task. Optional workspace (git repo, local dir, or none), output, key, and provider/driver hint.",
     ),
     (
         "list_tasks",
@@ -31,6 +31,14 @@ const TOOLS: &[(&str, &str)] = &[
         "Send a follow-up message to a running or waiting task.",
     ),
     ("cancel_task", "Cancel a task. force=true kills a live run."),
+    (
+        "wait_task",
+        "Block until a task finishes (waiting/done/failed) or timeout_seconds elapses.",
+    ),
+    (
+        "get_result",
+        "Return a task's output text, diff, and PR URL (if any).",
+    ),
     ("list_repos", "List watch targets (shorthand or [[repo]])."),
     (
         "list_providers",
@@ -274,7 +282,7 @@ fn initialize() -> Value {
             "name": "atr",
             "version": crate::VERSION,
         },
-        "instructions": "Drive atr tasks. Serve must be running for work to dispatch. Use add_task, steer_task, task_status. Config is read-only."
+        "instructions": "Drive atr tasks. Serve must be running for work to dispatch. Use add_task, wait_task, get_result, steer_task, task_status. A task is a prompt plus an optional workspace (git, dir, or none). Config is read-only."
     })
 }
 
@@ -299,12 +307,32 @@ fn tool_schema(name: &str) -> Value {
             "properties": {
                 "title": {"type": "string"},
                 "body": {"type": "string"},
-                "repo": {"type": "string", "description": "Watch repo name, owner/name, or path"},
+                "repo": {"type": "string", "description": "Git workspace: watch repo name, owner/name, or path"},
+                "dir": {"type": "string", "description": "Local directory workspace (edit in place, stay inside)"},
+                "workspace": {"type": "string", "description": "git, dir, or none"},
+                "output": {"type": "string", "description": "reply, pr, issue_comment, branch, patch, text, webhook"},
+                "webhook": {"type": "string"},
+                "patch": {"type": "string"},
                 "key": {"type": "string"},
                 "provider": {"type": "string", "description": "Provider or driver hint"},
                 "hint": {"type": "string"}
             },
             "required": ["title", "body"]
+        }),
+        "wait_task" => json!({
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"},
+                "timeout_seconds": {"type": "number", "description": "Default 120, max 3600"}
+            },
+            "required": ["key"]
+        }),
+        "get_result" => json!({
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"}
+            },
+            "required": ["key"]
         }),
         "list_tasks" => json!({
             "type": "object",
@@ -393,6 +421,8 @@ async fn call_tool(shared: &Shared, params: &Value) -> Result<Value, (i64, Strin
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
     let out = match name {
         "add_task" => add_task(shared, &args),
+        "wait_task" => wait_task(shared, &args).await,
+        "get_result" => get_result(shared, &args),
         "list_tasks" => list_tasks(shared, &args),
         "task_status" => task_status(shared, &args),
         "steer_task" => steer_task(shared, &args),
@@ -442,22 +472,63 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
     let body = arg_str(args, &["body"]).ok_or("missing body")?;
     let cfg = shared.config.read().unwrap().clone();
     let repo_filter = arg_str(args, &["repo"]);
+    let dir = arg_str(args, &["dir", "path"]);
+    let workspace_in = arg_str(args, &["workspace"]);
+    let output_in = arg_str(args, &["output"]);
+    let webhook = arg_str(args, &["webhook"]);
+    let patch = arg_str(args, &["patch"]);
     let entry = repo_filter
         .as_deref()
         .and_then(|f| cfg.resolve_repo_filter(f));
-    let repo_path = entry
-        .as_ref()
-        .map(|e| e.path.display().to_string())
-        .or_else(|| repo_filter.clone());
+    let (workspace_kind, repo_path, allow_empty) = mcp_workspace(
+        &cfg,
+        workspace_in.as_deref(),
+        dir.as_deref(),
+        entry.as_ref(),
+        repo_filter.clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    let output_kind = output_in
+        .as_deref()
+        .map(crate::task::OutputKind::parse)
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(crate::task::OutputKind::Reply);
+    if output_kind.needs_git() && workspace_kind != crate::task::WorkspaceKind::Git {
+        return Err(format!(
+            "output {} needs a git workspace",
+            output_kind.as_str()
+        ));
+    }
+    let output_spec = webhook.or(patch).unwrap_or_default();
     let key = match arg_str(args, &["key"]) {
         Some(k) => k,
         None => unique_key(shared, &cfg, entry.as_ref(), &title)?,
     };
     let text = format!("# {title}\n\n{body}");
     let outcome = shared
-        .submit(&key, &text, "mcp", repo_path.as_deref(), None, false, false)
+        .submit_with(
+            &key,
+            &text,
+            "mcp",
+            repo_path.as_deref(),
+            None,
+            false,
+            false,
+            crate::app::SubmitOpts {
+                workspace_kind: Some(workspace_kind.as_str().into()),
+                output_kind: Some(output_kind.as_str().into()),
+                output_spec: if output_spec.is_empty() {
+                    None
+                } else {
+                    Some(output_spec)
+                },
+                source_kind: Some("mcp".into()),
+                title: Some(title.clone()),
+                allow_empty_repo: allow_empty,
+            },
+        )
         .map_err(|e| e.to_string())?;
-    let _ = shared.db.set_task_title(&key, &title);
     if let Some(hint) = arg_str(args, &["provider", "hint", "driver"]) {
         let _ = shared.db.set_provider_hint(&key, &hint);
     }
@@ -469,7 +540,45 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
             crate::SubmitOutcome::Queued => "queued",
         },
         "title": title,
+        "workspace": workspace_kind.as_str(),
+        "output": output_kind.as_str(),
     }))
+}
+
+fn mcp_workspace(
+    cfg: &Config,
+    workspace: Option<&str>,
+    dir: Option<&str>,
+    entry: Option<&crate::config::RepoEntry>,
+    repo_filter: Option<String>,
+) -> anyhow::Result<(crate::task::WorkspaceKind, Option<String>, bool)> {
+    if let Some(d) = dir {
+        let p = crate::task::resolve_dir(d)?;
+        return Ok((
+            crate::task::WorkspaceKind::Dir,
+            Some(p.display().to_string()),
+            false,
+        ));
+    }
+    let kind = match workspace {
+        Some(w) => crate::task::WorkspaceKind::parse(w)?,
+        None if entry.is_some() || repo_filter.is_some() => crate::task::WorkspaceKind::Git,
+        None => {
+            if cfg.repo_path.as_os_str().is_empty() {
+                crate::task::WorkspaceKind::None
+            } else {
+                crate::task::WorkspaceKind::Git
+            }
+        }
+    };
+    match kind {
+        crate::task::WorkspaceKind::None => Ok((kind, None, true)),
+        crate::task::WorkspaceKind::Dir => anyhow::bail!("workspace dir requires dir"),
+        crate::task::WorkspaceKind::Git => {
+            let path = entry.map(|e| e.path.display().to_string()).or(repo_filter);
+            Ok((kind, path, false))
+        }
+    }
 }
 
 fn unique_key(
@@ -487,44 +596,60 @@ fn unique_key(
             }
         })
         .unwrap_or_else(|| cfg.task_key_prefix.clone());
-    let slug = slugify(title);
-    let base = format!("{prefix}-{slug}");
-    if shared
-        .db
-        .get_task(&base)
-        .map_err(|e| e.to_string())?
-        .is_none()
-    {
-        return Ok(base);
-    }
-    for i in 2..100 {
-        let k = format!("{base}-{i}");
-        if shared.db.get_task(&k).map_err(|e| e.to_string())?.is_none() {
-            return Ok(k);
-        }
-    }
-    Err("could not allocate a unique task key".into())
+    crate::task::allocate_key(&shared.db, &prefix, title).map_err(|e| e.to_string())
 }
 
 pub fn slugify(title: &str) -> String {
-    let mut out = String::new();
-    let mut dash = false;
-    for c in title.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-            dash = false;
-        } else if !dash && !out.is_empty() {
-            out.push('-');
-            dash = true;
+    crate::task::slugify(title)
+}
+
+fn terminal_status(status: &str) -> bool {
+    matches!(
+        status,
+        "waiting" | "done" | "failed" | "needs_attention" | "cancelled"
+    )
+}
+
+async fn wait_task(shared: &Shared, args: &Value) -> Result<Value, String> {
+    let key = arg_str(args, &["key"]).ok_or("missing key")?;
+    let timeout = args
+        .get("timeout_seconds")
+        .and_then(|v| v.as_f64().or_else(|| v.as_u64().map(|n| n as f64)))
+        .unwrap_or(120.0)
+        .clamp(1.0, 3600.0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout);
+    loop {
+        let t = shared
+            .db
+            .get_task(&key)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("unknown task {key}"))?;
+        if terminal_status(&t.status) {
+            return get_result(shared, args);
         }
+        if std::time::Instant::now() >= deadline {
+            return Ok(json!({
+                "ok": false,
+                "key": key,
+                "status": t.status,
+                "timed_out": true,
+            }));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    let s = out.trim_matches('-');
-    let s: String = s.chars().take(40).collect();
-    if s.is_empty() {
-        "task".into()
-    } else {
-        s
-    }
+}
+
+fn get_result(shared: &Shared, args: &Value) -> Result<Value, String> {
+    let key = arg_str(args, &["key"]).ok_or("missing key")?;
+    let t = shared
+        .db
+        .get_task(&key)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("unknown task {key}"))?;
+    let mut payload = crate::output::result_payload(shared, &t);
+    payload["ok"] = json!(true);
+    payload["timed_out"] = json!(false);
+    Ok(payload)
 }
 
 fn list_tasks(shared: &Shared, args: &Value) -> Result<Value, String> {
@@ -556,6 +681,10 @@ fn list_tasks(shared: &Shared, args: &Value) -> Result<Value, String> {
                 "provider": t.provider,
                 "hint": t.provider_hint,
                 "repo": cfg.task_repo_name(&t),
+                "issue": t.issue,
+                "workspace": t.workspace_kind,
+                "output": t.output_kind,
+                "source": t.source_kind,
                 "updated": t.updated,
             })
         })
@@ -603,6 +732,10 @@ fn task_status(shared: &Shared, args: &Value) -> Result<Value, String> {
         "provider": t.provider,
         "hint": t.provider_hint,
         "repo": cfg.task_repo_name(&t),
+        "issue": t.issue,
+        "workspace": t.workspace_kind,
+        "output": t.output_kind,
+        "source": t.source_kind,
         "session_id": t.session_id,
         "updated": t.updated,
         "children": kids.iter().map(|c| json!({"key": c.key, "status": c.status, "title": c.title})).collect::<Vec<_>>(),
@@ -743,6 +876,11 @@ fn config_get(shared: &Shared) -> Result<Value, String> {
             "repo": cfg.github.repo,
             "label": cfg.github.label,
         },
+        "sources": cfg.sources.iter().map(|s| json!({
+            "kind": s.kind.as_str(),
+            "enabled": s.enabled,
+            "dir": s.dir.display().to_string(),
+        })).collect::<Vec<_>>(),
     }))
 }
 
@@ -805,6 +943,8 @@ cli = "/bin/true"
             .collect();
         for want in [
             "add_task",
+            "wait_task",
+            "get_result",
             "list_tasks",
             "task_status",
             "steer_task",
@@ -870,6 +1010,42 @@ cli = "/bin/true"
         )
         .await;
         assert_eq!(cancel[0]["result"]["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn add_task_none_workspace_wait_and_get_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path());
+        let add = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_task","arguments":{"title":"Math","body":"what is 2+2?","workspace":"none","output":"text"}}}"#,
+        )
+        .await;
+        let text = add[0]["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("task-math"), "{text}");
+        assert!(text.contains("none"), "{text}");
+        let t = s.db.get_task("task-math").unwrap().unwrap();
+        assert_eq!(t.issue, None);
+        assert_eq!(t.workspace_kind, "none");
+        assert_eq!(t.output_kind, "text");
+        s.db.set_status("task-math", "waiting").unwrap();
+        s.db.set_task_result("task-math", "4", "", None).unwrap();
+        let waited = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"wait_task","arguments":{"key":"task-math","timeout_seconds":2}}}"#,
+        )
+        .await;
+        let body = waited[0]["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("\"text\""), "{body}");
+        assert!(body.contains("4"), "{body}");
+        let got = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_result","arguments":{"key":"task-math"}}}"#,
+        )
+        .await;
+        let g = got[0]["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(g.contains("4"), "{g}");
+        assert!(!g.to_ascii_lowercase().contains("secret"), "{g}");
     }
 
     #[tokio::test]

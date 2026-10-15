@@ -38,6 +38,18 @@ pub enum SubmitOutcome {
     Queued,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SubmitOpts {
+    pub workspace_kind: Option<String>,
+    pub output_kind: Option<String>,
+    pub output_spec: Option<String>,
+    pub source_kind: Option<String>,
+    pub title: Option<String>,
+    /// When true, an empty repo stays empty (answer-only) instead of falling
+    /// back to `repo_path`.
+    pub allow_empty_repo: bool,
+}
+
 impl Shared {
     pub fn open(config_path: PathBuf) -> Result<Arc<Self>> {
         let config = load_config(&config_path)?;
@@ -75,8 +87,64 @@ impl Shared {
         shadow: bool,
         tests_ok: bool,
     ) -> Result<SubmitOutcome> {
+        self.submit_with(
+            key,
+            body,
+            source,
+            repo,
+            issue,
+            shadow,
+            tests_ok,
+            SubmitOpts::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_with(
+        &self,
+        key: &str,
+        body: &str,
+        source: &str,
+        repo: Option<&str>,
+        issue: Option<i64>,
+        shadow: bool,
+        tests_ok: bool,
+        opts: SubmitOpts,
+    ) -> Result<SubmitOutcome> {
         let cfg = self.config.read().unwrap().clone();
         let existing = self.db.get_task(key)?;
+        let source_kind = opts
+            .source_kind
+            .clone()
+            .or_else(|| {
+                crate::task::SourceKind::parse(source)
+                    .ok()
+                    .map(|k| k.as_str().to_string())
+            })
+            .unwrap_or_else(|| {
+                crate::task::infer_source_kind(issue, source)
+                    .as_str()
+                    .into()
+            });
+        if existing.is_none() {
+            if let Ok(kind) = crate::task::SourceKind::parse(&source_kind) {
+                if !cfg.intake_allows(kind)
+                    && !matches!(
+                        source,
+                        "review" | "verify" | "shadow" | "shadow-comment" | "plan"
+                    )
+                {
+                    bail!("intake source {kind:?} is disabled");
+                }
+            }
+        }
+        let workspace_kind = opts.workspace_kind.clone().or_else(|| {
+            existing
+                .as_ref()
+                .map(|t| t.workspace_kind.clone())
+                .filter(|s| !s.is_empty())
+        });
+        let none_ws = workspace_kind.as_deref() == Some("none") || opts.allow_empty_repo;
         let repo = match repo.map(str::trim).filter(|s| !s.is_empty()) {
             Some(s) => s.to_string(),
             None if existing
@@ -86,12 +154,24 @@ impl Shared {
             {
                 String::new()
             }
+            None if none_ws && existing.is_none() => String::new(),
             None if shadow => crate::shadow::shadow_repo_path(&cfg).display().to_string(),
             None => cfg.repo_path.display().to_string(),
         };
-        self.db.upsert_task(key, &repo, issue)?;
+        self.db.upsert_task_spec(
+            key,
+            &repo,
+            issue,
+            workspace_kind.as_deref(),
+            opts.output_kind.as_deref(),
+            opts.output_spec.as_deref(),
+            Some(source_kind.as_str()),
+        )?;
         if existing.is_none() && crate::plan::should_plan(&cfg, body) {
             let _ = self.db.set_task_role(key, "plan");
+        }
+        if let Some(title) = opts.title.as_deref().filter(|s| !s.is_empty()) {
+            let _ = self.db.set_task_title(key, title);
         }
         if shadow {
             self.db.mark_shadow(key)?;
@@ -297,6 +377,10 @@ impl Shared {
                 "role": t.role,
                 "title": t.title,
                 "deps": t.deps,
+                "issue": t.issue,
+                "workspace": t.workspace_kind,
+                "output": t.output_kind,
+                "source": t.source_kind,
             })).collect::<Vec<_>>(),
             "driver": cfg.driver_name(),
             "planner": cfg.planner.mode.as_str(),
@@ -363,6 +447,7 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
     let gh = shared.clone();
     let shadow = shared.clone();
     let tg = shared.clone();
+    let inbox = shared.clone();
     let gc = shared.clone();
     let hup = shared.clone();
 
@@ -372,6 +457,7 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
         _ = crate::github::poll_loop(gh) => {}
         _ = crate::shadow::poll_loop(shadow) => {}
         _ = crate::telegram::bot_loop(tg) => {}
+        _ = crate::inbox::poll_loop(inbox) => {}
         _ = crate::gc::daily_loop(gc) => {}
         _ = sighup_loop(hup) => {}
     }
@@ -420,6 +506,10 @@ pub async fn serve_background(shared: Arc<Shared>) -> Result<SocketAddr> {
     let tg = shared.clone();
     tokio::spawn(async move {
         crate::telegram::bot_loop(tg).await;
+    });
+    let inbox = shared.clone();
+    tokio::spawn(async move {
+        crate::inbox::poll_loop(inbox).await;
     });
     let gc = shared.clone();
     tokio::spawn(async move {

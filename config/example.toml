@@ -8,8 +8,9 @@ listen = "127.0.0.1:7420"
 state_db = "~/.local/share/atr/state.db"
 # Tasks land in {worktree_root}/{repo}/{task-key}.
 worktree_root = "~/atr-work"
-# One-repo shorthand. `atr serve` refuses to start if this is empty
-# and there is no [[repo]] block. See README Watching repos.
+# One-repo shorthand for git worktrees. Required only when GitHub intake
+# is on (or you pass --repo / workspace = "git"). Empty is fine for
+# answer-only and --dir tasks. See README Giving it work.
 repo_path = "~/src/my-repo"
 repo_default_branch = "main"
 worktree_branch_prefix = "atr"
@@ -88,6 +89,15 @@ poll_interval = "60s"
 # base = "main"
 # system_prompt_file = ""
 # max_parallel = 0
+
+# Intake sources. Omit this table to keep today's defaults: GitHub follows
+# [github].enabled, MCP/CLI/HTTP always on, Telegram follows [telegram].enabled,
+# inbox off. Listing a kind here overrides only that kind.
+# [[source]]
+# kind = "inbox"
+# enabled = true
+# dir = "~/.local/share/atr/inbox"
+# poll_interval = "5s"
 
 # Read-only mirror of labelled issues. Never pushes, comments, or notifies.
 [shadow]

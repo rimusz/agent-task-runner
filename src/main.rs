@@ -59,6 +59,34 @@ enum Cmd {
         #[arg(long)]
         tests_ok: bool,
     },
+    /// Enqueue a generic task (prompt + optional workspace). No issue number.
+    Add {
+        /// Prompt text (or use --body / --body-file / stdin).
+        prompt: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+        /// Local directory workspace (edit in place; stay inside).
+        #[arg(long, conflicts_with = "repo")]
+        dir: Option<PathBuf>,
+        /// Git repository workspace (worktree / branch). Name, owner/name, or path.
+        #[arg(long)]
+        repo: Option<String>,
+        /// reply (default), pr, issue-comment, branch, patch, text, webhook
+        #[arg(long)]
+        output: Option<String>,
+        #[arg(long)]
+        webhook: Option<String>,
+        #[arg(long)]
+        patch: Option<PathBuf>,
+        #[arg(long)]
+        key: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+    },
     /// Show providers (with order numbers), inflight tasks, and usage.
     Status {
         /// Print the machine-readable JSON snapshot.
@@ -397,6 +425,120 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 SubmitOutcome::Queued => Ok(ExitCode::from(EX_TEMPFAIL as u8)),
             }
         }
+        Cmd::Add {
+            prompt,
+            body,
+            body_file,
+            dir,
+            repo,
+            output,
+            webhook,
+            patch,
+            key,
+            provider,
+            title,
+        } => {
+            let text = if let Some(p) = prompt.filter(|s| !s.trim().is_empty()) {
+                if body.is_some() || body_file.is_some() {
+                    anyhow::bail!("pass the prompt as an argument or --body, not both");
+                }
+                p
+            } else {
+                read_body(body, body_file)?
+            };
+            let shared = Shared::open(path)?;
+            let cfg = shared.config.read().unwrap().clone();
+            let title = title.unwrap_or_else(|| {
+                text.lines()
+                    .next()
+                    .unwrap_or("task")
+                    .chars()
+                    .take(80)
+                    .collect()
+            });
+            let (workspace_kind, repo_path, allow_empty) = if let Some(d) = dir {
+                let p = atr::task::resolve_dir(&d.display().to_string())?;
+                (
+                    atr::task::WorkspaceKind::Dir,
+                    Some(p.display().to_string()),
+                    false,
+                )
+            } else if let Some(r) = repo.as_deref() {
+                if let Some(entry) = cfg.resolve_repo_filter(r) {
+                    (
+                        atr::task::WorkspaceKind::Git,
+                        Some(entry.path.display().to_string()),
+                        false,
+                    )
+                } else {
+                    let p = atr::task::resolve_git_repo(r)?;
+                    (
+                        atr::task::WorkspaceKind::Git,
+                        Some(p.display().to_string()),
+                        false,
+                    )
+                }
+            } else {
+                (atr::task::WorkspaceKind::None, None, true)
+            };
+            let output_kind = match output.as_deref() {
+                Some(o) => atr::task::OutputKind::parse(o)?,
+                None => atr::task::OutputKind::Reply,
+            };
+            if output_kind.needs_git() && workspace_kind != atr::task::WorkspaceKind::Git {
+                anyhow::bail!("output {} needs --repo", output_kind.as_str());
+            }
+            let output_spec = webhook.or_else(|| patch.map(|p| p.display().to_string()));
+            let key = match key {
+                Some(k) => k,
+                None => atr::task::allocate_key(&shared.db, &cfg.task_key_prefix, &title)?,
+            };
+            let body = format!("# {title}\n\n{text}");
+            if let Ok(status) = http_create(
+                &cfg.listen,
+                &key,
+                &text,
+                repo_path.as_deref(),
+                workspace_kind.as_str(),
+                output_kind.as_str(),
+                output_spec.as_deref(),
+                title.as_str(),
+                provider.as_deref(),
+            ) {
+                println!("{key}");
+                return Ok(match status {
+                    200 => ExitCode::SUCCESS,
+                    202 => ExitCode::from(EX_TEMPFAIL as u8),
+                    _ => ExitCode::from(1),
+                });
+            }
+            drop(cfg);
+            let outcome = shared.submit_with(
+                &key,
+                &body,
+                "cli",
+                repo_path.as_deref(),
+                None,
+                false,
+                false,
+                atr::SubmitOpts {
+                    workspace_kind: Some(workspace_kind.as_str().into()),
+                    output_kind: Some(output_kind.as_str().into()),
+                    output_spec,
+                    source_kind: Some("cli".into()),
+                    title: Some(title),
+                    allow_empty_repo: allow_empty,
+                },
+            )?;
+            if let Some(hint) = provider {
+                let _ = shared.db.set_provider_hint(&key, &hint);
+            }
+            println!("{key}");
+            match outcome {
+                SubmitOutcome::Accepted => Ok(ExitCode::SUCCESS),
+                SubmitOutcome::Queued => Ok(ExitCode::from(EX_TEMPFAIL as u8)),
+            }
+        }
         Cmd::Status { json, repo } => {
             let shared = Shared::open(path)?;
             app::print_status(&shared, json, repo.as_deref());
@@ -684,6 +826,44 @@ fn http_submit(
             "shadow": shadow,
             "tests_ok": tests_ok,
         }))?;
+    Ok(resp.status())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn http_create(
+    listen: &str,
+    key: &str,
+    body: &str,
+    repo: Option<&str>,
+    workspace: &str,
+    output: &str,
+    output_spec: Option<&str>,
+    title: &str,
+    provider: Option<&str>,
+) -> Result<u16> {
+    let url = format!("http://{listen}/tasks");
+    let mut payload = serde_json::json!({
+        "key": key,
+        "body": body,
+        "title": title,
+        "source": "cli",
+        "workspace": workspace,
+        "output": output,
+        "repo": repo,
+    });
+    if let Some(p) = provider {
+        payload["provider"] = serde_json::Value::String(p.into());
+    }
+    if let Some(spec) = output_spec {
+        if output == "webhook" {
+            payload["webhook"] = serde_json::Value::String(spec.into());
+        } else if output == "patch" {
+            payload["patch"] = serde_json::Value::String(spec.into());
+        }
+    }
+    let resp = ureq::post(&url)
+        .set("User-Agent", "atr")
+        .send_json(payload)?;
     Ok(resp.status())
 }
 

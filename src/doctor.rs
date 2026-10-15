@@ -385,14 +385,19 @@ fn opencode_auth_probe(checks: &mut Vec<Check>, p: &crate::config::Provider) {
 fn github_auth_checks(checks: &mut Vec<Check>, cfg: &Config, config_path: &Path) {
     // GitHub intake off: skip gh auth/token/ssh like each other. Shadow still
     // checks its own token without requiring `gh auth status`.
-    let need = cfg.github.enabled;
+    let need = cfg.intake_allows(crate::task::SourceKind::Github);
     let opts = crate::github_auth::probe_opts_from_config(cfg, config_path);
     let snap = if need {
         crate::github_auth::probe(opts)
     } else {
         crate::github_auth::probe_local(opts)
     };
-    push_github_auth_checks(checks, &snap, cfg.github.enabled, cfg.shadow.enabled);
+    push_github_auth_checks(
+        checks,
+        &snap,
+        cfg.intake_allows(crate::task::SourceKind::Github),
+        cfg.shadow.enabled,
+    );
 }
 
 fn push_github_auth_checks(
@@ -568,13 +573,23 @@ fn repo_path_check(checks: &mut Vec<Check>, cfg: &Config) {
     let empty = repos.is_empty()
         || (repos.len() == 1 && repos[0].shorthand && repos[0].path.as_os_str().is_empty());
     if empty {
-        push(
-            checks,
-            "repo_path",
-            Status::Fail,
-            "empty".into(),
-            Some("set repo_path or [[repo]] in config.toml (atr init / atr repos add)".into()),
-        );
+        if cfg.intake_allows(crate::task::SourceKind::Github) {
+            push(
+                checks,
+                "repo_path",
+                Status::Fail,
+                "empty".into(),
+                Some("set repo_path or [[repo]] in config.toml (atr init / atr repos add)".into()),
+            );
+        } else {
+            push(
+                checks,
+                "repo_path",
+                Status::Warn,
+                "empty (no default git repo)".into(),
+                Some("optional for answer-only / --dir tasks; set repo_path or [[repo]] for git work".into()),
+            );
+        }
         return;
     }
     for r in &repos {

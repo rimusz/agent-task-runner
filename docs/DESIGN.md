@@ -40,32 +40,55 @@ API key in `shadow.env` only and write base URL + `{env:VAR}` into
 
 ## 1. Intake
 
+A task is a prompt plus an optional workspace (`git` / `dir` / `none`). Issue
+numbers are optional. GitHub-label intake is one source; it still keys tasks
+as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
+/ `gh pr create`). atr does not add its own GitHub comments on `output = reply`.
+
 - **GitHub:** poll a configured repo for issues labelled `for:atr` (`gh` API,
   interval from TOML). One task = one issue. Later comments queue as the next
-  turn if a run is already live.
-- **HTTP:** `POST /tasks/{key}/messages`. Exit-code contract: 0 accepted,
-  75 = task busy → message **queued** (not resent, not superseding), 1 = error.
-- **CLI:** `atr submit`.
+  turn if a run is already live. Workspace `git`, output `reply`.
+- **HTTP:** `POST /tasks` creates a generic task; `POST /tasks/{key}/messages`
+  is a follow-up. Exit-code contract: 0 accepted, 75 = task busy → message
+  **queued** (not resent, not superseding), 1 = error. `GET /tasks/{key}` and
+  `GET /tasks/{key}/result` read status and the stored result.
+- **CLI:** `atr add` (prompt + `--dir` / `--repo` / neither) and `atr submit`.
 - **MCP:** `atr mcp` is stdio (local agents or SSH). Streamable HTTP is
   `POST /mcp` on the existing listener (localhost by default; Tailscale bind
   is optional). HTTP requires a bearer token from `mcp.token_env` (default
   `ATR_MCP_TOKEN`) or `mcp.token_file` (0600). atr never prints the token.
-  Tools enqueue, list, status (timeline + last output), steer, cancel, list
-  repos/providers, usage, doctor, and read-only `config_get` (secrets
+  Tools enqueue (`add_task` with workspace/output), `wait_task`, `get_result`
+  (text, diff, PR URL), list, status (timeline + last output), steer, cancel,
+  list repos/providers, usage, doctor, and read-only `config_get` (secrets
   redacted). Resources: `atr://status`, `atr://dashboard`. Config cannot be
   changed over MCP. Serve must be running for work to dispatch.
 - **Telegram** lives inside `atr serve` (long-poll, no webhook): `/status`
-  `/tasks` `/task` `/cancel` `/retry` `/usage` `/shadow` `/pause` `/resume`
+  `/tasks` `/task` `/add` `/cancel` `/retry` `/usage` `/shadow` `/pause` `/resume`
   `/providers` `/enable` `/disable` `/config` `/repos`. `allowed_chat_ids` is required.
-  Destructive commands confirm via an inline button. `/pause` stops GitHub and
-  shadow intake only.
+  Destructive commands confirm via an inline button. `/pause` stops GitHub,
+  shadow, and inbox intake. `/add` is answer-only.
+- **Inbox:** drop a `.toml` / `.json` file into a `[[source]] kind = "inbox"`
+  directory. atr moves it to `accepted/` or `failed/` and writes
+  `results/{key}.json`.
+
+`[[source]]` entries override the default for that kind only. Empty
+`[[source]]` keeps current behaviour: GitHub if `[github].enabled`, MCP/CLI/HTTP
+always, Telegram if enabled, inbox off.
+
+Per-task **output**: `reply` (default, deliver to the source), `pr`,
+`issue_comment`, `branch`, `patch`, `text`, `webhook`. Git workspaces use a
+worktree. Dir workspaces edit in place (cwd stays inside the directory). None
+workspaces answer in text only.
 
 A new message for a running task is queued and never cancels or supersedes the
 live run.
 
 ## 2. State (SQLite, WAL)
 
-`tasks(key, repo, issue, status[queued|running|waiting|done|failed], provider, session_id, worktree, created, updated)`
+`tasks(key, repo, issue, status[queued|running|waiting|done|failed], provider, session_id, worktree, created, updated, workspace_kind, output_kind, output_spec, source_kind, result_text, result_diff, result_pr_url)`
+Opening an older DB `ALTER`s these columns in and backfills: empty `repo` →
+`workspace_kind=none`, else `git`; `output_kind=reply`; `source_kind=github`
+when `issue` is set, else `cli`. Existing rows keep their keys and status.
 `task_sessions(task_key, provider, session_id, updated)` — resume id for this provider only.
 `shadow_results(...)` — local-only comparison rows (diff, diffstat of every changed/untracked file, tests, verify, tokens, cost, cache hit). Tasks have a `shadow` flag.
 `verify_results(run_id, command, passed, exit_code, output)` — post-success check commands from `[verify]`.

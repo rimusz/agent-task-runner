@@ -2,7 +2,7 @@
 
 ## What atr is
 
-atr is a small program that lives on your computer and runs coding agents for you. It talks to the official CLIs you already pay for — Claude Code, Grok Build, Cursor, Codex, and OpenCode — on those subscriptions. It does not call vendor APIs itself and it does not bill per run. You sign in to each CLI. atr watches for work (usually a GitHub issue labelled `for:atr`), starts the next available agent, and lets you see and steer the run from Telegram, a local web page, or the terminal.
+atr is a small program that lives on your computer and runs coding agents for you. It talks to the official CLIs you already pay for — Claude Code, Grok Build, Cursor, Codex, and OpenCode — on those subscriptions. It does not call vendor APIs itself and it does not bill per run. You sign in to each CLI. atr takes a **task** — a prompt plus an optional workspace — from GitHub, MCP, the CLI, HTTP, Telegram, or a drop folder, starts the next available agent, and lets you see and steer the run from Telegram, a local web page, or the terminal.
 
 ## How you use it
 
@@ -44,18 +44,28 @@ atr doctor
 
 ### Giving it work
 
-The usual path is GitHub. Label an open issue `for:atr`. atr picks it up and starts a task. Later comments on the same issue are follow-ups. See [Writing a good task issue](#writing-a-good-task-issue).
+A task is a prompt plus an optional workspace. It does not need a GitHub issue. The workspace is a git repo, a local directory, or none (answer only). In a non-git directory the agent may edit files but must stay inside that directory. With no workspace it only answers in text.
+
+The usual GitHub path is unchanged. Label an open issue `for:atr`. atr picks it up and starts a task keyed `{prefix}-{issue}`. Later comments on the same issue are follow-ups. See [Writing a good task issue](#writing-a-good-task-issue).
 
 ```bash
 gh issue edit 12 --add-label for:atr
 ```
 
-Turn GitHub watching on during `atr init`, or later in config. You can also give it work from the terminal:
+Turn GitHub watching on during `atr init`, or later in config.
+
+You can also hand it work without GitHub:
 
 ```bash
-atr submit my-task --body "open a PR for the README typo" --repo ~/src/my-repo
+atr add "what is 2+2?"
+atr add "fix the typo in notes.txt" --dir ~/notes
+atr add "open a PR for the README typo" --repo ~/src/my-repo --output pr
 atr submit my-task --body "also fix the footer"
 ```
+
+`--dir` edits in place. `--repo` uses a git worktree. Neither flag means answer-only. `--output` is `reply` (default: answer the source), `pr`, `issue-comment`, `branch`, `patch`, `text`, or `webhook`.
+
+Other agents can `atr mcp` (`add_task` / `wait_task` / `get_result`), `POST /tasks`, send Telegram `/add`, or drop a TOML/JSON file into an inbox directory.
 
 `atr serve` (or the user service) must be running for queued work to start.
 
@@ -86,6 +96,7 @@ atr telegram test
 /tasks
 /repos
 /task my-task
+/add what is 2+2?
 /usage month
 /cancel my-task
 ```
@@ -111,7 +122,7 @@ atr cancel my-task --force
 
 Other coding agents can give atr work too.
 
-- **On this machine:** run `atr mcp` and add it as an MCP server in Claude Code, Cursor, Codex, or Grok Build. Snippets and the tool list: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#mcp-tool-reference).
+- **On this machine:** run `atr mcp` and add it as an MCP server in Claude Code, Cursor, Codex, or Grok Build. `add_task` accepts workspace (`git` / `dir` / `none`) and output; `wait_task` blocks until the task finishes (or times out); `get_result` returns text, diff, and PR URL. Snippets and the tool list: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#mcp-tool-reference).
 - **GitHub-label method:** label an issue `for:atr`. Comments become follow-ups. Use this when the other agent lives on GitHub.
 
 `atr serve` must be running either way.
@@ -149,7 +160,7 @@ The coding CLIs atr drives (Claude, Codex, Cursor, Grok, OpenCode and others) mu
 - on the same machine, with local stdio: `atr mcp`
 - from another machine, with HTTP `/mcp` over Tailscale and a bearer token
 
-Other ways in are the GitHub `for:atr` label, the `atr` CLI over SSH, the HTTP API, and the dashboard on port 7420. MCP can add, steer and cancel tasks, but it cannot change config. Details: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#mcp-tool-reference) and [docs/CONFIG.md](docs/CONFIG.md#mcp).
+Other ways in are the GitHub `for:atr` label, `atr add` / `atr submit` over SSH, `POST /tasks`, Telegram `/add`, an inbox directory of TOML/JSON files, and the dashboard on port 7420. MCP can add, wait, fetch results, steer and cancel tasks, but it cannot change config. Details: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#mcp-tool-reference) and [docs/CONFIG.md](docs/CONFIG.md#mcp).
 
 **GitHub access.** A GitHub token is **required**. Watching labels, reading issues and posting comments all go through the GitHub API, which needs a token. An SSH key cannot do that. One token is enough: your `gh auth login`, or a fine-grained PAT in `GH_TOKEN` (Issues, Contents and Pull requests read/write, plus Workflows if the repo has CI files to push). Run `gh auth setup-git` and git uses that same token for clone and push. An SSH key is **optional** and only covers git clone and push, as an alternative to the token. atr stores no credentials itself.
 
@@ -254,7 +265,7 @@ While atr is running, open `http://127.0.0.1:7420/`. It is read-only and refresh
 |---|---|
 | `atr doctor` says a CLI is missing | Install that vendor CLI, then `atr providers detect`. |
 | `atr doctor` says you are not signed in | Sign in to that CLI, then restart atr. |
-| `atr submit` does nothing | atr is not running. Try `atr status`, then `atr service restart`. |
+| `atr submit` / `atr add` does nothing | atr is not running. Try `atr status`, then `atr service restart`. |
 | GitHub issues ignored | Watching is off, or the label is not `for:atr`. See [docs/GITHUB.md](docs/GITHUB.md). |
 | `atr doctor` — `gh auth` FAIL | Run `gh auth login`, or put `GH_TOKEN` in `shadow.env`. |
 | Cursor / Claude fail over SSH | Run atr on the desktop, not over SSH. |

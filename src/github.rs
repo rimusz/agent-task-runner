@@ -38,7 +38,10 @@ pub async fn poll_loop(shared: Arc<Shared>) {
     loop {
         let (enabled, interval) = {
             let cfg = shared.config.read().unwrap();
-            (cfg.github.enabled, cfg.github_poll_interval)
+            (
+                cfg.intake_allows(crate::task::SourceKind::Github),
+                cfg.github_poll_interval,
+            )
         };
         if enabled {
             if let Err(e) = poll_once(&shared).await {
@@ -55,7 +58,7 @@ pub async fn poll_once(shared: &Shared) -> Result<()> {
         return Ok(());
     }
     let cfg = shared.config.read().unwrap().clone();
-    if !cfg.github.enabled {
+    if !cfg.intake_allows(crate::task::SourceKind::Github) {
         return Ok(());
     }
     let targets: Vec<_> = cfg
@@ -121,7 +124,7 @@ async fn poll_repo(
                 issue.body.unwrap_or_default(),
                 issue.number
             );
-            shared.submit(
+            shared.submit_with(
                 &key,
                 &body,
                 "github",
@@ -129,6 +132,14 @@ async fn poll_repo(
                 Some(issue.number),
                 false,
                 false,
+                crate::app::SubmitOpts {
+                    workspace_kind: Some("git".into()),
+                    output_kind: Some("reply".into()),
+                    output_spec: None,
+                    source_kind: Some("github".into()),
+                    title: Some(issue.title.clone()),
+                    allow_empty_repo: false,
+                },
             )?;
         }
         let names: Vec<_> = issue.labels.iter().map(|l| l.name.as_str()).collect();
@@ -200,4 +211,112 @@ async fn ingest_comments(
         shared.db.set_comment_cursor(key, &max_id.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::load_config;
+    use std::sync::Arc;
+
+    fn shared(dir: &std::path::Path, extra: &str) -> Arc<Shared> {
+        let src =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-gh.sh");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(dir.join("fake")).unwrap();
+        let gh = bin.join("gh");
+        std::fs::copy(&src, &gh).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cfg_path = dir.join("config.toml");
+        let prompt = dir.join("p.md");
+        std::fs::write(&prompt, "p\n").unwrap();
+        std::fs::write(
+            &cfg_path,
+            format!(
+                r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}/repo"
+system_prompt_file = "{prompt}"
+display_timezone = "UTC"
+[github]
+enabled = true
+cli = "{gh}"
+repo = "owner/acme"
+label = "for:atr"
+poll_interval = "60s"
+{extra}
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "/bin/true"
+"#,
+                db = dir.join("s.db").display(),
+                root = dir.display(),
+                prompt = prompt.display(),
+                gh = gh.display(),
+            ),
+        )
+        .unwrap();
+        let cfg = load_config(&cfg_path).unwrap();
+        Shared::from_config(cfg_path, cfg).unwrap()
+    }
+
+    #[tokio::test]
+    async fn label_poll_creates_task_and_comment_follow_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake");
+        std::fs::create_dir_all(&fake).unwrap();
+        std::fs::write(
+            fake.join("gh-issues.json"),
+            r#"[{"number":12,"title":"Fix login","body":"do the work","labels":[{"name":"for:atr"}]}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            fake.join("gh-comments.json"),
+            r#"[{"id":99,"body":"also tests","user":{"login":"alice","type":"User"}}]"#,
+        )
+        .unwrap();
+        let s = shared(dir.path(), "");
+        poll_once(&s).await.unwrap();
+        let t = s.db.get_task("task-12").unwrap().expect("labelled issue");
+        assert_eq!(t.issue, Some(12));
+        assert_eq!(t.source_kind, "github");
+        assert_eq!(t.workspace_kind, "git");
+        assert_eq!(t.output_kind, "reply");
+        let msgs = s.db.pending_messages("task-12").unwrap();
+        assert!(msgs.iter().any(|m| m.source == "github"));
+        assert!(
+            msgs.iter().any(|m| m.source == "github-comment"),
+            "{msgs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_github_source_skips_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake");
+        std::fs::create_dir_all(&fake).unwrap();
+        std::fs::write(
+            fake.join("gh-issues.json"),
+            r#"[{"number":12,"title":"Fix login","body":"do the work","labels":[{"name":"for:atr"}]}]"#,
+        )
+        .unwrap();
+        let s = shared(
+            dir.path(),
+            r#"
+[[source]]
+kind = "github"
+enabled = false
+"#,
+        );
+        poll_once(&s).await.unwrap();
+        assert!(s.db.get_task("task-12").unwrap().is_none());
+    }
 }

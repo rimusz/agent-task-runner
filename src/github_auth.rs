@@ -596,8 +596,8 @@ pub fn probe_opts_from_config<'a>(
             cfg.github.cli.as_str()
         },
         shadow_token_env: cfg.shadow.gh_token_env.as_str(),
-        probe_ssh: cfg.github.enabled,
-        probe_scopes: cfg.github.enabled || cfg.shadow.enabled,
+        probe_ssh: cfg.intake_allows(crate::task::SourceKind::Github),
+        probe_scopes: cfg.intake_allows(crate::task::SourceKind::Github) || cfg.shadow.enabled,
     }
 }
 

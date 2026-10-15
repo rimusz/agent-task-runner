@@ -189,6 +189,7 @@ const TELEGRAM: &[&str] = &[
     "/status",
     "/tasks",
     "/task",
+    "/add",
     "/cancel",
     "/retry",
     "/usage",
@@ -391,6 +392,7 @@ fn readme_headings_and_commands_match_help() {
     let global = section_commands(&top_help, "Options:");
     assert!(top.contains("init"), "{top:?}");
     assert!(top.contains("submit"), "{top:?}");
+    assert!(top.contains("add"), "{top:?}");
     assert!(top.contains("providers"), "{top:?}");
 
     let inv = extract_atr_invocations(&readme);
