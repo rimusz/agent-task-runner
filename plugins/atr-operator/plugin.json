@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "atr-operator",
+  "description": "Operate atr (agent task runner) from a coding CLI — stdio MCP plus the atr skill.",
+  "author": {
+    "name": "rimusz",
+    "url": "https://github.com/rimusz/agent-task-runner"
+  },
+  "homepage": "https://github.com/rimusz/agent-task-runner",
+  "repository": "https://github.com/rimusz/agent-task-runner",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["atr", "mcp", "agent-task-runner", "skills"]
+}

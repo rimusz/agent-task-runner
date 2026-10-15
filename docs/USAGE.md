@@ -129,7 +129,7 @@ atr cancel my-task --force
 
 Other coding agents can give atr work too.
 
-- **On this machine:** run `atr mcp` and add it as an MCP server in Claude Code, Cursor, Codex, or Grok Build. `add_task` accepts workspace (`git` / `dir` / `none`) and output; `wait_task` blocks until the task finishes (or times out); `get_result` returns text, diff, and PR URL. Snippets and the tool list: [HOW-IT-WORKS.md](HOW-IT-WORKS.md#mcp-tool-reference).
+- **On this machine:** run `atr mcp` and add it as an MCP server in Claude Code, Cursor, Codex, or Grok Build. `add_task` accepts workspace (`git` / `dir` / `none`) and output; `wait_task` blocks until the task finishes (or times out); `get_result` returns text, diff, and PR URL. Snippets and the tool list: [HOW-IT-WORKS.md](HOW-IT-WORKS.md#mcp-tool-reference). Local Agent Plugin: [plugins/atr-operator](../plugins/atr-operator/README.md).
 - **GitHub-label method:** label an issue `for:atr`. Comments become follow-ups. Use this when the other agent lives on GitHub.
 
 `atr serve` must be running either way.
