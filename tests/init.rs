@@ -68,3 +68,30 @@ fn init_yes_in_temp_home_writes_files() {
     );
     assert_eq!(cfg.mcp.token_file, token_path);
 }
+
+#[test]
+fn init_force_keeps_existing_mcp_token() {
+    let dir = tempfile::tempdir().unwrap();
+    // No ATR_SKILL_HOME: it is process-global and races the other init test;
+    // a non-default config dir skips skill install anyway.
+    let cfg_path = dir.path().join("config.toml");
+    let opts = || InitOpts {
+        yes: true,
+        force: true,
+        no_service: true,
+        force_service: false,
+        config_path: cfg_path.clone(),
+    };
+    run(opts()).unwrap();
+    let token_path = dir.path().join("mcp.token");
+    let first = fs::read_to_string(&token_path).unwrap();
+    let text = run(opts()).unwrap();
+    assert_eq!(
+        fs::read_to_string(&token_path).unwrap(),
+        first,
+        "re-running init must not rotate an existing token"
+    );
+    assert!(!text.contains(first.trim()), "init printed the token");
+    assert!(text.contains("not shown"), "{text}");
+    assert_eq!(load_config(&cfg_path).unwrap().mcp.token_file, token_path);
+}

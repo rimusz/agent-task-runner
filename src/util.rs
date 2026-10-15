@@ -64,41 +64,27 @@ pub fn copy_file(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn host_target() -> &'static str {
+/// Release asset platform name for this host (`atr-<ver>-<asset>.tar.gz`):
+/// macos-arm64, linux-x86_64, linux-arm64 or linux-x86_64-musl.
+pub fn host_asset() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        return "aarch64-apple-darwin";
+        return "macos-arm64";
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "musl"))]
     {
-        return "x86_64-unknown-linux-musl";
+        return "linux-x86_64-musl";
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        return "x86_64-unknown-linux-gnu";
+        return "linux-x86_64";
     }
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
-        return "aarch64-unknown-linux-gnu";
+        return "linux-arm64";
     }
     #[allow(unreachable_code)]
     "unknown"
-}
-
-/// Friendly release asset platform name (used in `atr-<ver>-<asset>.tar.gz`).
-/// Rust target triples are only used for building.
-pub fn asset_platform(target: &str) -> Option<&'static str> {
-    match target {
-        "aarch64-apple-darwin" => Some("macos-arm64"),
-        "x86_64-unknown-linux-gnu" => Some("linux-x86_64"),
-        "aarch64-unknown-linux-gnu" => Some("linux-arm64"),
-        "x86_64-unknown-linux-musl" => Some("linux-x86_64-musl"),
-        _ => None,
-    }
-}
-
-pub fn host_asset() -> &'static str {
-    asset_platform(host_target()).unwrap_or("unknown")
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {
@@ -124,21 +110,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn asset_platform_maps_targets() {
-        assert_eq!(asset_platform("aarch64-apple-darwin"), Some("macos-arm64"));
-        assert_eq!(
-            asset_platform("x86_64-unknown-linux-gnu"),
-            Some("linux-x86_64")
+    fn host_asset_is_a_friendly_release_name() {
+        let a = host_asset();
+        assert!(
+            [
+                "macos-arm64",
+                "linux-x86_64",
+                "linux-arm64",
+                "linux-x86_64-musl",
+                "unknown"
+            ]
+            .contains(&a),
+            "{a}"
         );
-        assert_eq!(
-            asset_platform("aarch64-unknown-linux-gnu"),
-            Some("linux-arm64")
-        );
-        assert_eq!(
-            asset_platform("x86_64-unknown-linux-musl"),
-            Some("linux-x86_64-musl")
-        );
-        assert_eq!(asset_platform("x86_64-apple-darwin"), None);
+        assert!(!a.contains("unknown-linux") && !a.contains("apple-darwin"));
     }
 
     #[test]
