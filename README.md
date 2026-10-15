@@ -129,6 +129,7 @@ Claude Code, Grok Build, Cursor, Codex and OpenCode. OpenCode also opens the doo
 | [docs/CONFIG.md](docs/CONFIG.md) | Config file, paths, several repos, dashboard bind |
 | [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) | How providers, MCP and CI fit together |
 | [docs/DESIGN.md](docs/DESIGN.md) | Internals, for people changing atr |
+| [docs/RELEASING.md](docs/RELEASING.md) | How to cut a release (on demand only) |
 
 ## Trademarks and license
 
