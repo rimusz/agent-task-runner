@@ -449,6 +449,9 @@ fn looks_like_usage(value: &Value) -> bool {
         || value.pointer("/part/tokens").is_some()
 }
 
+/// xAI billing ticks per US dollar.
+pub const GROK_TICKS_PER_USD: f64 = 10_000_000_000.0;
+
 /// `grok usage <sid>` session object. `inputTokens` includes cache reads.
 pub fn parse_grok_usage_cli(value: &Value) -> Option<UsageNumbers> {
     let session = value.get("session").unwrap_or(value);
@@ -476,17 +479,12 @@ pub fn parse_grok_usage_cli(value: &Value) -> Option<UsageNumbers> {
         ],
     );
     let output = grab_u64(session, &["outputTokens", "output_tokens"]);
-    let ticks = grab_f64(
-        session,
-        &["costUsdTicks", "cost_usd_ticks", "total_cost_usd"],
-    );
-    let cost_usd = ticks.map(|t| {
-        if t.abs() >= 1000.0 {
-            t / 1_000_000.0
-        } else {
-            t
-        }
-    });
+    // Grok Build reports cost in xAI "USD ticks": 1 USD = 10^10 ticks
+    // (https://docs.x.ai/developers/cost-tracking). A plain dollar field is
+    // taken as-is.
+    let cost_usd = grab_f64(session, &["costUsdTicks", "cost_usd_ticks"])
+        .map(|t| t / GROK_TICKS_PER_USD)
+        .or_else(|| grab_f64(session, &["total_cost_usd", "cost_usd"]));
     Some(UsageNumbers {
         input: input_incl.saturating_sub(cache_read),
         output,
@@ -1507,7 +1505,15 @@ mod tests {
         assert_eq!(u.cache_read, 20);
         assert_eq!(u.cache_write, 5);
         assert_eq!(u.output, 8);
-        assert!((u.cost_usd.unwrap() - 0.0025).abs() < 1e-9);
+        assert!((u.cost_usd.unwrap() - 2.5e-7).abs() < 1e-15);
+        // Real Grok Build 1.0.52 output from the Mini: 126833600 ticks = $0.0126836.
+        let real: Value = serde_json::from_str(
+            r#"{"sessionId":"s","session":{"inputTokens":19090,"outputTokens":142,"cachedReadTokens":1152,"cacheCreationTokens":0,"costUsdTicks":126833600,"primaryModelId":"grok-4.7-build"}}"#,
+        )
+        .unwrap();
+        let r = parse_grok_usage_cli(&real).unwrap();
+        assert!((r.cost_usd.unwrap() - 0.01268336).abs() < 1e-12);
+        assert_eq!(r.input, 19090 - 1152);
     }
 
     #[test]
