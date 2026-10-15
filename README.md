@@ -4,13 +4,173 @@
 
 atr is a small program that lives on your computer and runs coding agents for you. It talks to the official CLIs you already pay for — Claude Code, Grok Build, Cursor, Codex, and OpenCode — on those subscriptions. It does not call vendor APIs itself and it does not bill per run. You sign in to each CLI. atr takes a **task** — a prompt plus an optional workspace — from GitHub, MCP, the CLI, HTTP, Telegram, or a drop folder, starts the next available agent, and lets you see and steer the run from Telegram, a local web page, or the terminal.
 
+## Install with your coding agent
+
+Paste the prompt below into Claude Code, Codex, Cursor, or Grok on the machine that will run atr. The agent installs and configures atr end to end. **You** still sign in to each vendor CLI yourself; the prompt never asks for, handles, or prints API keys or tokens.
+
+Release binaries: `aarch64-apple-darwin` (macOS Apple Silicon only), `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`. There is no Intel Mac (`x86_64-apple-darwin`) build — on Intel macOS use `cargo install --git`.
+
+```
+Deploy atr (https://github.com/rimusz/agent-task-runner) on this machine. Follow these steps in order. Never print, echo, log, or paste any secret, token, password, or API key. Never sign in to anything on my behalf.
+
+1. Detect the platform with uname -s and uname -m, and whether this is a desktop session or a headless server/VM (no display, reached over SSH).
+   - macOS arm64 -> target aarch64-apple-darwin. Intel Mac has no build: use cargo install --git instead.
+   - Linux x86_64 glibc -> x86_64-unknown-linux-gnu; Linux x86_64 musl (Alpine) -> x86_64-unknown-linux-musl; Linux aarch64 -> aarch64-unknown-linux-gnu.
+
+2. Install the binary. Download atr-<ver>-<target>.tar.gz from the latest GitHub release (verify the .sha256 if present), unpack it, and install it to ~/.local/bin/atr with mode 755. Create ~/.local/bin if needed and make sure it is on PATH (zsh: ~/.zprofile; bash: ~/.profile). If the download fails, fall back to: cargo install --git https://github.com/rimusz/agent-task-runner
+   Confirm with: atr --version
+
+3. Check the coding CLIs: atr providers detect
+   It lists Claude Code, Grok Build, Cursor, Codex, OpenCode and others with version and signed-in status. Do NOT sign in for me. For each one that is installed but signed out, tell me the exact login command it prints and wait until I say I have done it. On macOS, "unverified (keychain locked)" over SSH is fine; Cursor must be signed in at the desktop.
+
+4. Check GitHub access with gh auth status (it must show a logged-in account; never print the token). If not logged in, ask me to run gh auth login myself. Then run gh auth setup-git so git clone/push use the same token. A token is required for watching labels and posting comments; an SSH key is optional and only covers git.
+
+5. Configure. Ask me whether I want to answer the setup questions myself (then hand me the terminal for: atr init) or accept defaults, which enables every detected and signed-in CLI:
+   atr init --yes
+   Never add --force unless I agree to overwrite an existing config.
+
+6. Make sure the background service is installed and running (init normally does this already):
+   atr service install
+   On headless Linux also run: loginctl enable-linger "$USER" so it keeps running after logout. On macOS the LaunchAgent (dev.atr.serve) must be loaded from the desktop session, not over SSH.
+
+7. Ask me which GitHub repos to watch, then add each one and list them:
+   atr repos add <owner/name> --path <local-clone-path>
+   atr repos list
+
+8. Optional, only if I say yes: let this agent use it over MCP.
+   - Local: register an MCP server named "atr" in your own MCP config with command "atr" and args ["mcp"].
+   - Remote (over Tailscale): create a random token file ~/.config/atr/mcp.token with mode 0600 (for example: umask 077; openssl rand -hex 32 > ~/.config/atr/mcp.token), add an [mcp] section with enabled = true to the config, then restart:
+     atr service restart
+     Point the remote client at http://<host>:7420/mcp with the header "Authorization: Bearer ${ATR_MCP_TOKEN}". Never display the token value.
+
+9. Run the health check and report:
+   atr doctor
+   Report: OS and target, binary path, version, which CLIs are enabled and signed in, GitHub status (logged in yes/no, setup-git done), service status, repos added, MCP setup (if any), and every doctor line marked warn or FAIL with a suggested fix.
+```
+
+**Arch / Omarchy.** The `x86_64-unknown-linux-gnu` or `x86_64-unknown-linux-musl` binary works. Or `pacman -S rust` and `cargo install --git https://github.com/rimusz/agent-task-runner`.
+
+**Asahi** (Apple Silicon Mac running Linux). Use `aarch64-unknown-linux-gnu`. Asahi uses 16K pages — if that binary does not run, build from source (`cargo install --git` or `cargo install --path .`).
+
+## Use cases
+
+atr is one program with many ways in. Pick the uses that fit you; they all run the same kind of task on the same machine.
+
+| Use case | What you need to set up |
+|---|---|
+| [1. Background runner on your laptop](#1-background-runner-on-your-laptop) | atr + `atr init` (installs the user service), at least one signed-in coding CLI |
+| [2. Always-on Linux server or cloud VM](#2-always-on-linux-server-or-cloud-vm) | Same as 1, plus `loginctl enable-linger "$USER"` |
+| [3. GitHub issue worker](#3-github-issue-worker) | GitHub token (`gh auth login` or `GH_TOKEN`), repos added with `atr repos add` |
+| [4. Backend for AI agents (MCP)](#4-backend-for-ai-agents-mcp) | `atr mcp` in your agent's MCP config; for remote use, Tailscale + an MCP token |
+| [5. Scripts and automations](#5-scripts-and-automations) | `curl` to `POST /tasks`, or the inbox folder turned on in config |
+| [6. Plain folders and quick questions](#6-plain-folders-and-quick-questions) | Nothing extra: `atr add` with `--dir` or no workspace |
+| [7. Control from your phone](#7-control-from-your-phone) | `atr telegram setup`; for the dashboard off-machine, a Tailscale bind |
+| [8. Several AI providers with fallback](#8-several-ai-providers-with-fallback) | Two or more signed-in CLIs, ordered with `atr providers move` |
+
+### 1. Background runner on your laptop
+
+Run atr quietly on your own Mac or Linux laptop. Queue work, close the terminal, and it keeps going in the background using the CLIs you already pay for.
+
+```bash
+atr init          # writes config and installs the user service
+atr add "fix the typo in notes.txt" --dir ~/notes
+atr status
+```
+
+### 2. Always-on Linux server or cloud VM
+
+Put atr on a headless Linux box or cloud VM so it works around the clock, even when nobody is logged in. Sign in to the coding CLIs on that server, then keep the service alive after logout.
+
+```bash
+atr init --yes
+loginctl enable-linger "$USER"
+atr doctor
+```
+
+### 3. GitHub issue worker
+
+Label an issue `for:atr` and atr picks it up, does the work, and opens a pull request. Comments on the issue become follow-ups. One install can watch several repos.
+
+```bash
+atr repos add owner/website --path ~/src/website
+atr repos add owner/api --path ~/src/api
+gh issue edit 12 --add-label for:atr
+```
+
+### 4. Backend for AI agents (MCP)
+
+Let Claude Code, Codex, Cursor, Grok Build, Grok Bot or OpenCode hand work to atr and get the answer back. On the same machine they run `atr mcp`; from another machine they connect over Tailscale with a token. They add work with `add_task`, wait with `wait_task`, and fetch the answer, diff or PR link with `get_result`.
+
+```json
+{
+  "mcpServers": {
+    "atr": { "command": "atr", "args": ["mcp"] }
+  }
+}
+```
+
+Remote setup with a token: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#mcp-tool-reference).
+
+### 5. Scripts and automations
+
+Any script, cron job or tool can queue work: send an HTTP request, or drop a small task file into the inbox folder. See [Hand work to atr](#hand-work-to-atr) for the inbox setup.
+
+```bash
+curl -s -X POST http://127.0.0.1:7420/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Sum","body":"what is 2+2?","workspace":"none","output":"text"}'
+```
+
+```toml
+# ~/.local/share/atr/inbox/notes.toml
+prompt = "Fix the spelling mistakes in notes.txt."
+dir = "~/notes"
+```
+
+### 6. Plain folders and quick questions
+
+Not everything is a git repo. Point atr at any folder and it edits files there (and only there), or give no folder at all and it just answers.
+
+```bash
+atr add "tidy up the headings in these markdown files" --dir ~/docs
+atr add "explain what a race condition is"
+```
+
+### 7. Control from your phone
+
+Connect a Telegram bot to queue work and check progress from anywhere. The read-only dashboard at `http://127.0.0.1:7420/` shows what is running, queued and done; reach it from your phone over Tailscale (see [docs/CONFIG.md](docs/CONFIG.md#dashboard)).
+
+```bash
+atr telegram setup
+```
+
+```
+/add what is 2+2?
+/status
+/tasks
+```
+
+### 8. Several AI providers with fallback
+
+Use several subscriptions side by side, for example Claude, Grok, Cursor, Codex and OpenCode. When one runs out or hits its limit, atr moves to the next one in your order automatically.
+
+OpenCode is a supported coding CLI too, and it opens the door to many more AI providers: DeepSeek, Kimi, Qwen, GLM, MiniMax, local Ollama, a self-hosted vLLM server, and any other model OpenCode supports. See [Providers and OpenCode](#providers-and-opencode).
+
+```bash
+atr providers detect
+atr providers add deepseek
+atr providers move claude --to 1
+atr providers enable cursor
+atr usage --period 7d
+```
+
 ## How you use it
 
 Four steps: install and log in once, give it work, watch it, and keep it updated.
 
 ### Setup once
 
-Install the binary (pick the tarball for this machine), sign in to each CLI **yourself**, then run `atr init`. atr never handles vendor login keys — those stay with Claude / Grok / Cursor / Codex / OpenCode. Or paste a prompt into your coding agent: [Install with your coding agent](#install-with-your-coding-agent).
+Install the binary (pick the tarball for this machine), sign in to each CLI **yourself**, then run `atr init`. atr never handles vendor login keys — those stay with Claude / Grok / Cursor / Codex / OpenCode. Or paste the deploy prompt into your coding agent: [Install with your coding agent](#install-with-your-coding-agent).
 
 ```bash
 ver=0.1.1
@@ -176,6 +336,38 @@ Other coding agents can give atr work too.
 
 `atr serve` must be running either way.
 
+### Providers and OpenCode
+
+atr drives Claude Code, Grok Build, Cursor and Codex through their own CLIs. **OpenCode** is the fifth supported CLI, and through it atr can use many more providers: DeepSeek, Kimi, Qwen, GLM, MiniMax, local Ollama, a self-hosted vLLM server, and any other model OpenCode supports, by its `provider/model` id. Sign in with `opencode auth login` (local Ollama needs no key).
+
+Shortcuts for common ones:
+
+```bash
+atr providers add deepseek
+atr providers add kimi
+atr providers add ollama
+```
+
+Or write it in config yourself. Order in the file is the fallback order:
+
+```toml
+[[provider]]
+name = "claude"
+kind = "claude"
+
+[[provider]]
+name = "deepseek"
+kind = "opencode"
+model = "deepseek/deepseek-chat"
+
+[[provider]]
+name = "local"
+kind = "opencode"
+model = "ollama/llama3.2"
+```
+
+More, including self-hosted vLLM: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#providers).
+
 ### Maintenance
 
 ```bash
@@ -221,48 +413,6 @@ Other ways in are the GitHub `for:atr` label, `atr add` / `atr submit` over SSH,
 | `git clone` / `git push` | The same token via `gh auth setup-git`, **or** an SSH key (optional) |
 
 Details: [docs/GITHUB.md](docs/GITHUB.md).
-
-## Install with your coding agent
-
-Paste **one** of the prompts below into Claude Code, Codex, Cursor, or Grok on the machine that will run atr. The agent installs the binary and the user service. **You** still sign in to each vendor CLI. The prompts never ask for or handle API keys.
-
-Release binaries: `aarch64-apple-darwin` (macOS Apple Silicon only), `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`. There is no Intel Mac (`x86_64-apple-darwin`) build — on Intel macOS use `cargo install --git`.
-
-### macOS (Apple Silicon)
-
-```
-Install atr from https://github.com/rimusz/agent-task-runner on this Mac.
-
-1. Confirm this is macOS Apple Silicon (arm64/aarch64). Releases are Apple Silicon only (aarch64-apple-darwin). Do not look for an Intel x86_64-apple-darwin build.
-2. Download the latest GitHub release tarball atr-<ver>-aarch64-apple-darwin.tar.gz (verify the .sha256 if present). Unpack and install the atr binary to ~/.local/bin/atr (mode 755). Create ~/.local/bin if needed and put it on PATH (zsh: ~/.zprofile or ~/.zshrc).
-3. If the download fails, fall back to: cargo install --git https://github.com/rimusz/agent-task-runner
-4. Run atr init
-5. Install the LaunchAgent (dev.atr.serve): atr service install. atr serve must run in the desktop (Aqua) session so Cursor can use the login keychain — not over SSH.
-6. Run atr doctor
-7. Report the binary path, the output of atr --version and the init / service / doctor results (ok/warn/FAIL). Never print secrets, tokens, or keys.
-
-Never ask for or handle vendor API keys. I sign in to Claude, Grok, Cursor, Codex, and OpenCode myself.
-```
-
-### Linux (x86_64 / aarch64)
-
-```
-Install atr from https://github.com/rimusz/agent-task-runner on this Linux machine.
-
-1. Detect OS and arch. Pick a release target: x86_64 + glibc → x86_64-unknown-linux-gnu; x86_64 + musl (Alpine) → x86_64-unknown-linux-musl; aarch64 + glibc → aarch64-unknown-linux-gnu.
-2. Download the matching atr-<ver>-<target>.tar.gz from the latest GitHub release (verify the .sha256 if present). Install the atr binary to ~/.local/bin/atr (mode 755) and put ~/.local/bin on PATH (~/.profile or ~/.bashrc).
-3. If the download fails, fall back to: cargo install --git https://github.com/rimusz/agent-task-runner
-4. Run atr init
-5. Install the systemd user unit: atr service install. If this host is headless, also run: loginctl enable-linger "$USER"
-6. Run atr doctor
-7. Report the binary path, the output of atr --version and the target used plus init / service / doctor results. Never print secrets, tokens, or keys.
-
-Never ask for or handle vendor API keys. I sign in to each CLI myself.
-```
-
-**Arch / Omarchy.** The `x86_64-unknown-linux-gnu` or `x86_64-unknown-linux-musl` binary works. Or `pacman -S rust` and `cargo install --git https://github.com/rimusz/agent-task-runner`.
-
-**Asahi** (Apple Silicon Mac running Linux). Use `aarch64-unknown-linux-gnu`. Asahi uses 16K pages — if that binary does not run, build from source (`cargo install --git` or `cargo install --path .`).
 
 ## Writing a good task issue
 
