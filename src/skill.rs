@@ -88,6 +88,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn operator_plugin_skill_matches_repo_skill() {
+        let plugin = std::fs::read_to_string(format!(
+            "{}/plugins/atr-operator/skills/atr/SKILL.md",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("plugins/atr-operator/skills/atr/SKILL.md");
+        assert_eq!(
+            plugin, SKILL_MD,
+            "plugins/atr-operator/skills/atr/SKILL.md must stay a copy of skills/atr/SKILL.md"
+        );
+    }
+
+    #[test]
+    fn operator_plugin_manifest_is_stdio_atr_mcp() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let plugin: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{root}/plugins/atr-operator/plugin.json"))
+                .expect("plugin.json"),
+        )
+        .expect("plugin.json json");
+        assert_eq!(
+            plugin["$schema"],
+            "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+        );
+        assert_eq!(plugin["name"], "atr-operator");
+        assert_eq!(plugin["license"], "MIT OR Apache-2.0");
+        assert_eq!(
+            plugin["homepage"],
+            "https://github.com/rimusz/agent-task-runner"
+        );
+        assert_eq!(
+            plugin["repository"],
+            "https://github.com/rimusz/agent-task-runner"
+        );
+
+        let mcp: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{root}/plugins/atr-operator/mcp.json"))
+                .expect("mcp.json"),
+        )
+        .expect("mcp.json json");
+        assert_eq!(
+            mcp["$schema"],
+            "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
+        );
+        let atr = &mcp["mcpServers"]["atr"];
+        assert_eq!(atr["type"], "stdio");
+        assert_eq!(atr["command"], "atr");
+        assert_eq!(atr["args"], serde_json::json!(["mcp"]));
+        assert!(atr.get("env").is_none(), "mcp.json must not carry secrets");
+        assert!(
+            atr.get("headers").is_none(),
+            "stdio mcp.json must not carry HTTP headers"
+        );
+    }
+
+    #[test]
     fn skill_mentions_readme_topics() {
         for needle in [
             "atr init",

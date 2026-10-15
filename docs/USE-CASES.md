@@ -55,7 +55,7 @@ Let Claude Code, Codex, Cursor, Grok Build, Grok Bot or OpenCode hand work to at
 }
 ```
 
-Remote setup with a token: [HOW-IT-WORKS.md](HOW-IT-WORKS.md#mcp-tool-reference).
+Remote setup with a token: [HOW-IT-WORKS.md](HOW-IT-WORKS.md#mcp-tool-reference). A local Agent Plugin plus per-CLI MCP snippets: [plugins/atr-operator](../plugins/atr-operator/README.md).
 
 ### 5. Scripts and automations
 
