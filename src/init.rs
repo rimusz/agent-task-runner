@@ -170,8 +170,11 @@ pub fn run(opts: InitOpts) -> Result<String> {
     out.push_str(&gh_guide);
     // Skills go into the user's real CLI dirs (~/.claude, ~/.codex, ...).
     // A test/side config must not touch those.
-    if custom_dir {
-        out.push_str("skill install skipped (non-default config dir)\n");
+    let skill_home_set = std::env::var_os("ATR_SKILL_HOME").is_some_and(|v| !v.is_empty());
+    if custom_dir && !skill_home_set {
+        out.push_str(
+            "skill install skipped (non-default config dir; set ATR_SKILL_HOME to install)\n",
+        );
     } else {
         match crate::skill::install_default() {
             Ok(Some(msg)) => out.push_str(&msg),
