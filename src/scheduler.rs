@@ -2281,6 +2281,125 @@ cli = "/bin/true"
         );
     }
 
+    fn shared_with_cli(dir: &std::path::Path, cli: &str) -> std::sync::Arc<Shared> {
+        std::fs::write(dir.join("p.md"), "p\n").unwrap();
+        let text = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+display_timezone = "UTC"
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "{cli}"
+"#,
+            db = dir.join("s.db").display(),
+            root = dir.display(),
+        );
+        let raw: crate::config::RawConfig = toml::from_str(&text).unwrap();
+        let cfg = crate::config::Config::from_raw(raw).unwrap();
+        Shared::from_config(dir.join("c.toml"), cfg).unwrap()
+    }
+
+    /// A stand-in "CLI" in its own process group, so killing its group can
+    /// never reach the test runner.
+    fn spawn_sleeper() -> std::process::Child {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    }
+
+    fn wait_exit(child: &mut std::process::Child, ms: u64) -> bool {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        while std::time::Instant::now() < end {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn reap_orphans_at_start_kills_left_over_cli_and_reconcile_fails_task() {
+        // Regression (#5 item 5): serve was SIGKILLed while a CLI ran in its
+        // own process group; the task stayed `running` forever.
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_cli(dir.path(), "/bin/sleep");
+        let mut child = spawn_sleeper();
+        shared.db.upsert_task("task-left", "/etc", None).unwrap();
+        shared.db.set_status("task-left", "running").unwrap();
+        let run = shared.db.start_run("task-left", "claude", "").unwrap();
+        shared.db.set_run_pid(run, child.id()).unwrap();
+
+        assert_eq!(reap_orphans_at_start(&shared).unwrap(), 1);
+        assert!(wait_exit(&mut child, 5000), "orphaned CLI must be killed");
+        assert!(reconcile(&shared).unwrap() >= 1);
+        let t = shared.db.get_task("task-left").unwrap().unwrap();
+        assert_eq!(t.status, "failed");
+        assert!(t.result_text.contains("orphaned"), "{}", t.result_text);
+        assert!(shared.db.open_runs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reap_orphans_at_start_leaves_unrelated_or_inflight_pids_alone() {
+        // A reused PID that is not the provider's CLI must never be killed,
+        // and neither may a run this serve is still tracking.
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_cli(dir.path(), "/bin/true");
+        let mut child = spawn_sleeper();
+        shared.db.upsert_task("task-reused", "/etc", None).unwrap();
+        let run = shared.db.start_run("task-reused", "claude", "").unwrap();
+        shared.db.set_run_pid(run, child.id()).unwrap();
+        assert_eq!(reap_orphans_at_start(&shared).unwrap(), 0);
+        assert!(child.try_wait().unwrap().is_none(), "unrelated PID killed");
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let shared2 = shared_with_cli(dir2.path(), "/bin/sleep");
+        shared2.db.upsert_task("task-live", "/etc", None).unwrap();
+        let run2 = shared2.db.start_run("task-live", "claude", "").unwrap();
+        shared2.db.set_run_pid(run2, child.id()).unwrap();
+        shared2.inflight.lock().unwrap().insert(
+            "task-live".into(),
+            InFlight {
+                provider: "claude".into(),
+                pid: child.id(),
+                run_id: run2,
+                kill: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                shadow: false,
+            },
+        );
+        assert_eq!(reap_orphans_at_start(&shared2).unwrap(), 0);
+        assert_eq!(reconcile(&shared2).unwrap(), 0);
+        assert!(child.try_wait().unwrap().is_none(), "in-flight CLI killed");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn reconcile_fails_open_run_whose_pid_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_cli(dir.path(), "/bin/sleep");
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        shared.db.upsert_task("task-gone", "/etc", None).unwrap();
+        shared.db.set_status("task-gone", "running").unwrap();
+        let run = shared.db.start_run("task-gone", "claude", "").unwrap();
+        shared.db.set_run_pid(run, pid).unwrap();
+        assert!(reconcile(&shared).unwrap() >= 1);
+        let t = shared.db.get_task("task-gone").unwrap().unwrap();
+        assert_eq!(t.status, "failed");
+        assert!(t.result_text.contains("process gone"), "{}", t.result_text);
+    }
+
     #[test]
     fn reconcile_reaps_orphaned_running_task_without_run() {
         let dir = tempfile::tempdir().unwrap();

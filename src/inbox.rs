@@ -305,6 +305,34 @@ cli = "/bin/true"
     }
 
     #[test]
+    fn inbox_provider_is_saved_as_hint() {
+        // Regression (#5 item 7) for inbox files.
+        let tmp = tempfile::tempdir().unwrap();
+        let s = shared(tmp.path());
+        let inbox = tmp.path().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(
+            inbox.join("hinted.toml"),
+            "prompt = \"hi\"\nprovider = \"grok\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            inbox.join("plain.toml"),
+            "prompt = \"hi too\"\nprovider = \"  \"\n",
+        )
+        .unwrap();
+        poll_once(&s).unwrap();
+        let tasks = s.db.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 2, "{tasks:?}");
+        let hints: Vec<_> = tasks.iter().map(|t| t.provider_hint.clone()).collect();
+        assert!(hints.contains(&"grok".to_string()), "{hints:?}");
+        assert!(
+            hints.contains(&String::new()),
+            "blank provider must not pin: {hints:?}"
+        );
+    }
+
+    #[test]
     fn picks_up_toml_and_json_without_issue() {
         let tmp = tempfile::tempdir().unwrap();
         let s = shared(tmp.path());
