@@ -43,7 +43,61 @@ pub struct Task {
     pub review_rounds: i64,
     pub provider_hint: String,
     pub title: String,
+    /// git | dir | none
+    pub workspace_kind: String,
+    /// reply | pr | issue_comment | branch | patch | text | webhook
+    pub output_kind: String,
+    /// webhook URL, patch path, telegram chat id, inbox results dir
+    pub output_spec: String,
+    /// github | mcp | cli | http | telegram | inbox
+    pub source_kind: String,
+    pub result_text: String,
+    pub result_diff: String,
+    pub result_pr_url: String,
 }
+
+impl Default for Task {
+    fn default() -> Self {
+        Self {
+            key: String::new(),
+            repo: None,
+            issue: None,
+            status: "queued".into(),
+            provider: None,
+            session_id: None,
+            worktree: None,
+            stall_retries: 0,
+            handoff: None,
+            tried: None,
+            created: String::new(),
+            updated: String::new(),
+            shadow: false,
+            verify_retries: 0,
+            protect_tests_skip: false,
+            labels: String::new(),
+            parent_key: None,
+            role: "worker".into(),
+            deps: String::new(),
+            review_rounds: 0,
+            provider_hint: String::new(),
+            title: String::new(),
+            workspace_kind: "git".into(),
+            output_kind: "reply".into(),
+            output_spec: String::new(),
+            source_kind: String::new(),
+            result_text: String::new(),
+            result_diff: String::new(),
+            result_pr_url: String::new(),
+        }
+    }
+}
+
+const TASK_SELECT: &str = "key, repo, issue, status, provider, session_id, worktree,
+                          stall_retries, handoff, tried, created, updated, shadow,
+                          verify_retries, protect_tests_skip, labels, parent_key, role,
+                          deps, review_rounds, provider_hint, title,
+                          workspace_kind, output_kind, output_spec, source_kind,
+                          result_text, result_diff, result_pr_url";
 
 #[derive(Debug, Clone)]
 pub struct RunRow {
@@ -372,6 +426,52 @@ impl Db {
             "ALTER TABLE tasks ADD COLUMN title TEXT NOT NULL DEFAULT ''",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN workspace_kind TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN output_kind TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN output_spec TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN source_kind TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN result_text TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN result_diff TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN result_pr_url TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        conn.execute_batch(
+            r#"
+            UPDATE tasks SET workspace_kind = CASE
+                WHEN workspace_kind != '' THEN workspace_kind
+                WHEN repo IS NULL OR repo = '' THEN 'none'
+                ELSE 'git'
+            END;
+            UPDATE tasks SET output_kind = CASE
+                WHEN output_kind != '' THEN output_kind
+                ELSE 'reply'
+            END;
+            UPDATE tasks SET source_kind = CASE
+                WHEN source_kind != '' THEN source_kind
+                WHEN issue IS NOT NULL THEN 'github'
+                ELSE 'cli'
+            END;
+            "#,
+        )?;
         drop(conn);
         self.normalize_legacy_usage()?;
         Ok(())
@@ -443,21 +543,73 @@ impl Db {
     }
 
     pub fn upsert_task(&self, key: &str, repo: &str, issue: Option<i64>) -> Result<Task> {
+        self.upsert_task_spec(key, repo, issue, None, None, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_task_spec(
+        &self,
+        key: &str,
+        repo: &str,
+        issue: Option<i64>,
+        workspace_kind: Option<&str>,
+        output_kind: Option<&str>,
+        output_spec: Option<&str>,
+        source_kind: Option<&str>,
+    ) -> Result<Task> {
         let now = now_rfc3339();
+        let ws = workspace_kind
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                if repo.trim().is_empty() {
+                    "none"
+                } else {
+                    "git"
+                }
+            });
+        let out = output_kind
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("reply");
+        let spec = output_spec.unwrap_or("").trim();
+        let src = source_kind
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| if issue.is_some() { "github" } else { "" });
         let conn = self.lock();
         conn.execute(
             r#"
-            INSERT INTO tasks (key, repo, issue, status, created, updated)
-            VALUES (?1, ?2, ?3, 'queued', ?4, ?4)
+            INSERT INTO tasks (
+                key, repo, issue, status, created, updated,
+                workspace_kind, output_kind, output_spec, source_kind
+            )
+            VALUES (?1, ?2, ?3, 'queued', ?4, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(key) DO UPDATE SET
                 repo = CASE
                     WHEN excluded.repo IS NULL OR excluded.repo = '' THEN tasks.repo
                     ELSE excluded.repo
                 END,
                 issue = COALESCE(excluded.issue, tasks.issue),
+                workspace_kind = CASE
+                    WHEN excluded.workspace_kind = '' THEN tasks.workspace_kind
+                    ELSE excluded.workspace_kind
+                END,
+                output_kind = CASE
+                    WHEN excluded.output_kind = '' THEN tasks.output_kind
+                    ELSE excluded.output_kind
+                END,
+                output_spec = CASE
+                    WHEN excluded.output_spec = '' THEN tasks.output_spec
+                    ELSE excluded.output_spec
+                END,
+                source_kind = CASE
+                    WHEN excluded.source_kind = '' THEN tasks.source_kind
+                    ELSE excluded.source_kind
+                END,
                 updated = excluded.updated
             "#,
-            params![key, repo, issue, now],
+            params![key, repo, issue, now, ws, out, spec, src],
         )?;
         drop(conn);
         self.get_task(key)?
@@ -468,11 +620,7 @@ impl Db {
         let conn = self.lock();
         let t = conn
             .query_row(
-                r#"SELECT key, repo, issue, status, provider, session_id, worktree,
-                          stall_retries, handoff, tried, created, updated, shadow,
-                          verify_retries, protect_tests_skip, labels, parent_key, role,
-                          deps, review_rounds, provider_hint, title
-                   FROM tasks WHERE key = ?1"#,
+                &format!("SELECT {TASK_SELECT} FROM tasks WHERE key = ?1"),
                 params![key],
                 row_to_task,
             )
@@ -482,13 +630,9 @@ impl Db {
 
     pub fn list_tasks(&self) -> Result<Vec<Task>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            r#"SELECT key, repo, issue, status, provider, session_id, worktree,
-                      stall_retries, handoff, tried, created, updated, shadow,
-                      verify_retries, protect_tests_skip, labels, parent_key, role,
-                      deps, review_rounds, provider_hint, title
-               FROM tasks ORDER BY updated DESC"#,
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {TASK_SELECT} FROM tasks ORDER BY updated DESC"
+        ))?;
         let rows = stmt.query_map([], row_to_task)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -552,6 +696,24 @@ impl Db {
         conn.execute(
             "UPDATE tasks SET title = ?1, updated = ?2 WHERE key = ?3",
             params![title, now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_task_result(
+        &self,
+        key: &str,
+        text: &str,
+        diff: &str,
+        pr_url: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            r#"UPDATE tasks SET result_text = ?1, result_diff = ?2,
+                   result_pr_url = CASE WHEN ?3 IS NULL OR ?3 = '' THEN result_pr_url ELSE ?3 END,
+                   updated = ?4
+               WHERE key = ?5"#,
+            params![text, diff, pr_url.unwrap_or(""), now_rfc3339(), key],
         )?;
         Ok(())
     }
@@ -2067,6 +2229,13 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         review_rounds: r.get::<_, i64>(19).unwrap_or(0),
         provider_hint: r.get::<_, Option<String>>(20)?.unwrap_or_default(),
         title: r.get::<_, Option<String>>(21)?.unwrap_or_default(),
+        workspace_kind: r.get::<_, Option<String>>(22)?.unwrap_or_default(),
+        output_kind: r.get::<_, Option<String>>(23)?.unwrap_or_default(),
+        output_spec: r.get::<_, Option<String>>(24)?.unwrap_or_default(),
+        source_kind: r.get::<_, Option<String>>(25)?.unwrap_or_default(),
+        result_text: r.get::<_, Option<String>>(26)?.unwrap_or_default(),
+        result_diff: r.get::<_, Option<String>>(27)?.unwrap_or_default(),
+        result_pr_url: r.get::<_, Option<String>>(28)?.unwrap_or_default(),
     })
 }
 
@@ -2852,6 +3021,56 @@ mod tests {
         db.upsert_task("acme-1", "", Some(1)).unwrap();
         let t = db.get_task("acme-1").unwrap().unwrap();
         assert_eq!(t.repo.as_deref(), Some("/shadow/src"));
+    }
+
+    #[test]
+    fn migrate_keeps_existing_tasks_and_backfills_generic_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE tasks (
+                    key TEXT PRIMARY KEY,
+                    repo TEXT,
+                    issue INTEGER,
+                    status TEXT NOT NULL,
+                    provider TEXT,
+                    session_id TEXT,
+                    worktree TEXT,
+                    stall_retries INTEGER NOT NULL DEFAULT 0,
+                    handoff TEXT,
+                    tried TEXT,
+                    comment_cursor TEXT,
+                    created TEXT NOT NULL,
+                    updated TEXT NOT NULL,
+                    shadow INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO tasks (key, repo, issue, status, created, updated)
+                VALUES ('acme-12', '/src/acme', 12, 'waiting', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                INSERT INTO tasks (key, repo, issue, status, created, updated)
+                VALUES ('local-1', '/tmp/notes', NULL, 'queued', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                "#,
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let gh = db.get_task("acme-12").unwrap().unwrap();
+        assert_eq!(gh.issue, Some(12));
+        assert_eq!(gh.repo.as_deref(), Some("/src/acme"));
+        assert_eq!(gh.status, "waiting");
+        assert_eq!(gh.workspace_kind, "git");
+        assert_eq!(gh.output_kind, "reply");
+        assert_eq!(gh.source_kind, "github");
+        let local = db.get_task("local-1").unwrap().unwrap();
+        assert_eq!(local.issue, None);
+        assert_eq!(local.workspace_kind, "git");
+        assert_eq!(local.source_kind, "cli");
+        db.upsert_task("answer-1", "", None).unwrap();
+        let none = db.get_task("answer-1").unwrap().unwrap();
+        assert_eq!(none.workspace_kind, "none");
+        assert_eq!(none.issue, None);
     }
 
     #[test]

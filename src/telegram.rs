@@ -11,7 +11,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const MAX_TEXT: usize = 3500;
-const COMMANDS: &str = "commands: /help /status /tasks /task /cancel /retry /usage /shadow /pause /resume /providers /enable /disable /config /repos";
+const COMMANDS: &str = "commands: /help /status /tasks /task /add /cancel /retry /usage /shadow /pause /resume /providers /enable /disable /config /repos";
 const ASSISTANT_PREFIX: &str = "tg";
 
 #[derive(Debug, Clone)]
@@ -247,7 +247,9 @@ fn send_message(
     if let Some(m) = markup {
         payload["reply_markup"] = m;
     }
-    let send = ureq::post(&url).set("User-Agent", "atr").send_json(payload);
+    let send = crate::util::ureq_agent(Duration::from_secs(10))
+        .post(&url)
+        .send_json(payload);
     if let Err(e) = send {
         tracing::warn!("telegram send failed: {}", redact(&e.to_string(), token));
     }
@@ -267,8 +269,12 @@ pub async fn bot_loop(shared: Arc<Shared>) {
         let cfg = shared.config.read().unwrap().telegram.clone();
         if !cfg.enabled {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            maybe_daily(&shared);
-            flush_due(&shared);
+            let shared2 = shared.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                maybe_daily(&shared2);
+                flush_due(&shared2);
+            })
+            .await;
             continue;
         }
         if bot_token(&cfg).is_none() || allowed_chats(&cfg).is_empty() {
@@ -277,9 +283,14 @@ pub async fn bot_loop(shared: Arc<Shared>) {
             continue;
         }
         let shared2 = shared.clone();
-        let _ = tokio::task::spawn_blocking(move || poll_once(&shared2)).await;
-        maybe_daily(&shared);
-        flush_due(&shared);
+        let _ = tokio::task::spawn_blocking(move || {
+            poll_once(&shared2);
+            maybe_daily(&shared2);
+            flush_due(&shared2);
+        })
+        .await;
+        // Yield so a fast getUpdates (tests / empty inbox) cannot busy-loop the runtime.
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -301,10 +312,8 @@ fn poll_once(shared: &Shared) {
         token,
         offset
     );
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(40))
-        .build();
-    let resp = match agent.get(&url).set("User-Agent", "atr").call() {
+    let agent = crate::util::ureq_agent(Duration::from_secs(40));
+    let resp = match agent.get(&url).call() {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("telegram getUpdates: {}", redact(&e.to_string(), &token));
@@ -416,6 +425,7 @@ fn handle_command(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
                 markup: None,
             }
         }
+        "/add" => handle_add(shared, chat, text),
         "/usage" => {
             let a = parts.next();
             let b = parts.next();
@@ -477,7 +487,11 @@ fn handle_command(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
                 &format!("Retry {key}?"),
             )
         }
-        "/pause" => confirm(chat, Action::Pause, "Pause intake (GitHub/shadow pollers)?"),
+        "/pause" => confirm(
+            chat,
+            Action::Pause,
+            "Pause intake (GitHub/shadow/inbox pollers)?",
+        ),
         "/resume" => confirm(chat, Action::Resume, "Resume intake?"),
         "/enable" => {
             let name = parts.next().unwrap_or("").to_string();
@@ -510,6 +524,79 @@ fn handle_command(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
             )
         }
         _ => help_outgoing(chat),
+    }
+}
+
+fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
+    let rest = raw
+        .split_once(char::is_whitespace)
+        .map(|(_, r)| r.trim())
+        .unwrap_or("");
+    if rest.is_empty() {
+        return Outgoing {
+            chat_id: chat,
+            text: "usage: /add <prompt>   (answer-only; no workspace)".into(),
+            markup: None,
+        };
+    }
+    let cfg = shared.config.read().unwrap().clone();
+    if !cfg.intake_allows(crate::task::SourceKind::Telegram) {
+        return Outgoing {
+            chat_id: chat,
+            text: "telegram intake is disabled".into(),
+            markup: None,
+        };
+    }
+    let title: String = rest
+        .lines()
+        .next()
+        .unwrap_or("task")
+        .chars()
+        .take(80)
+        .collect();
+    let key = match crate::task::allocate_key(&shared.db, &cfg.task_key_prefix, &title) {
+        Ok(k) => k,
+        Err(e) => {
+            return Outgoing {
+                chat_id: chat,
+                text: format!("{e:#}"),
+                markup: None,
+            }
+        }
+    };
+    drop(cfg);
+    match shared.submit_with(
+        &key,
+        rest,
+        "telegram",
+        None,
+        None,
+        false,
+        false,
+        crate::app::SubmitOpts {
+            workspace_kind: Some("none".into()),
+            output_kind: Some("reply".into()),
+            output_spec: Some(chat.to_string()),
+            source_kind: Some("telegram".into()),
+            title: Some(title),
+            allow_empty_repo: true,
+        },
+    ) {
+        Ok(SubmitOutcome::Accepted) => Outgoing {
+            chat_id: chat,
+            text: format!("queued {key}"),
+            markup: None,
+        },
+        Ok(SubmitOutcome::Queued) => Outgoing {
+            chat_id: chat,
+            text: format!("queued follow-up on {key}"),
+            markup: None,
+        },
+        Err(e) => Outgoing {
+            chat_id: chat,
+            text: format!("{e:#}"),
+            markup: None,
+        },
     }
 }
 
@@ -658,6 +745,7 @@ fn is_driveable_command(cmd: &str) -> bool {
         "/status"
             | "/tasks"
             | "/task"
+            | "/add"
             | "/usage"
             | "/shadow"
             | "/providers"
@@ -1463,6 +1551,13 @@ fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
     Some((a.parse().ok()?, b.parse().ok()?))
 }
 
+#[doc(hidden)]
+pub fn clear_notify_batch() {
+    let mut b = batch().lock().unwrap();
+    b.lines.clear();
+    b.last = Instant::now();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1789,6 +1884,21 @@ cli = "/bin/true"
         assert!(out[0].text.contains("/help"), "{}", out[0].text);
         assert!(out[0].text.contains("/providers"), "{}", out[0].text);
         assert!(out[0].text.contains("/config"), "{}", out[0].text);
+        assert!(out[0].text.contains("/add"), "{}", out[0].text);
+    }
+
+    #[test]
+    fn add_command_queues_answer_only_task() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let upd = json!({"message":{"chat":{"id":42},"text":"/add what is 2+2?"}});
+        let out = handle_update(&shared, &upd).unwrap();
+        assert!(out[0].text.contains("queued"), "{}", out[0].text);
+        let tasks = shared.db.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].issue, None);
+        assert_eq!(tasks[0].workspace_kind, "none");
+        assert_eq!(tasks[0].source_kind, "telegram");
     }
 
     #[test]

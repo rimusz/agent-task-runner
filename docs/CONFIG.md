@@ -2,7 +2,8 @@
 
 All policy lives in `~/.config/atr/config.toml`. Override the path with
 `--config` or `ATR_CONFIG`. Unknown keys are rejected. `atr serve` refuses to
-start if a required setting (`repo_path` or `[[repo]]`, …) is empty.
+start if a required setting is empty. `repo_path` (or `[[repo]]`) is required
+only when GitHub intake is on.
 
 Shipped example: [`config/example.toml`](../config/example.toml).
 `atr init` writes this file (or merges missing keys). Reload a running daemon
@@ -32,7 +33,8 @@ the same file (Confirm, then reload). `atr config migrate` converts shorthand
 
 `driver`, `[planner]`, `[review]`, `[plugin]`, `[github] enabled / repo / label`
 (default `for:atr`), `[dashboard] enabled / bind`, `[telegram]` and
-`[telegram.assistant]`, `[[provider]]` order and `enabled`, `[mcp]`, `[cache]`.
+`[telegram.assistant]`, `[[provider]]` order and `enabled`, `[mcp]`, `[cache]`,
+`[[source]]`.
 
 ### Cache
 
@@ -117,11 +119,38 @@ atr repos enable website
 atr config migrate
 ```
 
+## Sources
+
+Omit `[[source]]` to keep current defaults: GitHub follows `[github].enabled`,
+MCP/CLI/HTTP are on, Telegram follows `[telegram].enabled`, inbox is off.
+Listing a kind overrides **only** that kind.
+
+```toml
+[[source]]
+kind = "inbox"
+enabled = true
+dir = "~/.local/share/atr/inbox"
+poll_interval = "5s"
+
+[[source]]
+kind = "github"
+enabled = false
+```
+
+Inbox files are TOML or JSON (`prompt` / `body`, optional `dir`, `repo`,
+`workspace`, `output`, `webhook`, `patch`, `provider`). Accepted files move to
+`accepted/`, failures to `failed/`, results to `results/{key}.json`.
+
+`atr add "…"` (optional `--dir` / `--repo` / `--output`) and `POST /tasks`
+enqueue a generic task. `GET /tasks/{key}` and `GET /tasks/{key}/result` read
+it back. Output kinds: `reply` (default, answer the source), `pr`,
+`issue_comment`, `branch`, `patch`, `text`, `webhook`.
+
 ## Submit and the local API
 
 `atr submit` talks to the local HTTP API (`127.0.0.1:7420`). If serve is down
 it writes SQLite directly. Exit `0` = accepted, `75` = the task was busy so
-the message was queued, `1` = error.
+the message was queued, `1` = error. `atr add` uses `POST /tasks` the same way.
 
 ## Service and edits
 

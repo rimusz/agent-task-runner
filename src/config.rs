@@ -78,6 +78,10 @@ pub struct RawConfig {
     pub mcp: RawMcp,
     #[serde(default)]
     pub cache: RawCache,
+    /// Repeatable intake sources. Empty = current defaults (GitHub if `[github]
+    /// enabled`, MCP/CLI/HTTP always, Telegram if enabled, inbox off).
+    #[serde(rename = "source", default)]
+    pub sources: Vec<RawSource>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -186,6 +190,27 @@ pub struct RawPlugin {
     /// Stop hook runs this command and blocks until it passes. Empty = off.
     #[serde(default)]
     pub test_command: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawSource {
+    pub kind: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Inbox directory (`kind = "inbox"`).
+    #[serde(default)]
+    pub dir: String,
+    #[serde(default)]
+    pub poll_interval: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceEntry {
+    pub kind: crate::task::SourceKind,
+    pub enabled: bool,
+    pub dir: PathBuf,
+    pub poll_interval: Duration,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -585,6 +610,8 @@ pub struct Config {
     pub plugin: PluginConfig,
     pub mcp: McpConfig,
     pub cache: CacheConfig,
+    /// Explicit `[[source]]` entries. Empty means built-in defaults.
+    pub sources: Vec<SourceEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -2090,6 +2117,33 @@ impl Config {
                 worktree_pool: raw.cache.worktree_pool,
                 headline_min_input: raw.cache.headline_min_input.max(0),
             },
+            sources: {
+                let mut out = Vec::new();
+                for s in raw.sources {
+                    let kind = crate::task::SourceKind::parse(&s.kind)?;
+                    if kind == crate::task::SourceKind::Inbox
+                        && s.dir.trim().is_empty()
+                        && s.enabled
+                    {
+                        bail!("[[source]] kind = \"inbox\" needs dir");
+                    }
+                    out.push(SourceEntry {
+                        kind,
+                        enabled: s.enabled,
+                        dir: if s.dir.trim().is_empty() {
+                            PathBuf::new()
+                        } else {
+                            expand_path(&s.dir)
+                        },
+                        poll_interval: parse_duration(if s.poll_interval.trim().is_empty() {
+                            "5s"
+                        } else {
+                            &s.poll_interval
+                        })?,
+                    });
+                }
+                out
+            },
         })
     }
 
@@ -2256,11 +2310,17 @@ impl Config {
         if self.worktree_root.as_os_str().is_empty() {
             missing.push("worktree_root");
         }
-        if self.repos.is_empty() {
-            if self.repo_path.as_os_str().is_empty() {
-                missing.push("repo_path");
+        if self.intake_allows(crate::task::SourceKind::Github) {
+            if self.repos.is_empty() {
+                if self.repo_path.as_os_str().is_empty() {
+                    missing.push("repo_path");
+                }
+            } else if !self.repos.iter().any(|r| !r.path.as_os_str().is_empty()) {
+                missing.push("[[repo]].path");
             }
-        } else if !self.repos.iter().any(|r| !r.path.as_os_str().is_empty()) {
+        } else if !self.repos.is_empty()
+            && !self.repos.iter().any(|r| !r.path.as_os_str().is_empty())
+        {
             missing.push("[[repo]].path");
         }
         if self.system_prompt_file.as_os_str().is_empty() {
@@ -2269,7 +2329,7 @@ impl Config {
         if self.providers.is_empty() {
             missing.push("[[provider]]");
         }
-        if self.github.enabled {
+        if self.intake_allows(crate::task::SourceKind::Github) {
             let watch = self.effective_repos();
             let any = watch
                 .iter()
@@ -2302,6 +2362,30 @@ impl Config {
             "cannot start atr serve; set these required settings: {}",
             missing.join(", ")
         )
+    }
+
+    /// Whether intake of this kind is on. An explicit `[[source]]` for that
+    /// kind wins. Otherwise: GitHub follows `[github].enabled`, Telegram
+    /// follows `[telegram].enabled`, inbox is off, MCP/CLI/HTTP are on.
+    pub fn intake_allows(&self, kind: crate::task::SourceKind) -> bool {
+        if let Some(s) = self.sources.iter().find(|s| s.kind == kind) {
+            return s.enabled;
+        }
+        match kind {
+            crate::task::SourceKind::Github => self.github.enabled,
+            crate::task::SourceKind::Telegram => self.telegram.enabled,
+            crate::task::SourceKind::Inbox => false,
+            crate::task::SourceKind::Mcp
+            | crate::task::SourceKind::Cli
+            | crate::task::SourceKind::Http => true,
+        }
+    }
+
+    pub fn inbox_sources(&self) -> Vec<&SourceEntry> {
+        self.sources
+            .iter()
+            .filter(|s| s.kind == crate::task::SourceKind::Inbox && s.enabled)
+            .collect()
     }
 }
 
@@ -2569,8 +2653,58 @@ kind = "claude"
 "#,
         )
         .unwrap();
-        let err = cfg.validate_for_serve().unwrap_err().to_string();
+        cfg.validate_for_serve()
+            .expect("github off: empty repo_path is allowed");
+        let gh = parse_config_toml(
+            r#"
+repo_path = ""
+[github]
+enabled = true
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap();
+        let err = gh.validate_for_serve().unwrap_err().to_string();
         assert!(err.contains("repo_path"), "{err}");
+    }
+
+    #[test]
+    fn source_table_overrides_and_defaults() {
+        let none = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap();
+        assert!(none.sources.is_empty());
+        assert!(!none.intake_allows(crate::task::SourceKind::Github));
+        assert!(none.intake_allows(crate::task::SourceKind::Mcp));
+        assert!(none.intake_allows(crate::task::SourceKind::Cli));
+        assert!(!none.intake_allows(crate::task::SourceKind::Inbox));
+        let with = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[[source]]
+kind = "inbox"
+dir = "/tmp/atr-inbox"
+[[source]]
+kind = "github"
+enabled = false
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap();
+        assert!(with.intake_allows(crate::task::SourceKind::Inbox));
+        assert!(!with.intake_allows(crate::task::SourceKind::Github));
+        assert!(with.intake_allows(crate::task::SourceKind::Mcp));
+        assert_eq!(with.inbox_sources()[0].dir, PathBuf::from("/tmp/atr-inbox"));
     }
 
     #[test]

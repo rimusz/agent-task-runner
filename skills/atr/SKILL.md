@@ -30,7 +30,7 @@ You are answering in Telegram about atr. You already have a read-only snapshot o
 - atr will show an inline **Confirm** (old → new) before anything is applied.
 - Read-only questions (“how do I add kimi?”, “why did task X fail?”) get a short answer from this skill + the snapshot. Do not invent keys or tokens.
 
-Allowed command families: `/status` `/tasks` `/task` `/usage` `/shadow` `/providers` `/config` `/repos` `/cancel` `/retry` `/pause` `/resume` `/enable` `/disable` `/help`.
+Allowed command families: `/status` `/tasks` `/task` `/add` `/usage` `/shadow` `/providers` `/config` `/repos` `/cancel` `/retry` `/pause` `/resume` `/enable` `/disable` `/help`.
 
 ## Init
 
@@ -123,7 +123,7 @@ Every change or destructive action still needs inline **Confirm** (old → new).
 
 ## Other agents (MCP)
 
-`atr mcp` is stdio. HTTP is `POST /mcp` on `listen` with `Authorization: Bearer $ATR_MCP_TOKEN` (or the 0600 token file). atr never prints the token. Tools: add/list/steer/cancel tasks, status, repos, providers, usage, doctor, read-only config. GitHub-label method still works without MCP (`for:atr`).
+`atr mcp` is stdio. HTTP is `POST /mcp` on `listen` with `Authorization: Bearer $ATR_MCP_TOKEN` (or the 0600 token file). atr never prints the token. Tools: `add_task` (workspace git/dir/none, output), `wait_task`, `get_result` (text, diff, PR URL), list/steer/cancel, status, repos, providers, usage, doctor, read-only config. GitHub-label method still works without MCP (`for:atr`). `atr add "prompt"` / `--dir` / `--repo` enqueue a task without an issue.
 
 ```bash
 atr mcp

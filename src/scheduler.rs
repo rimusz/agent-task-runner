@@ -390,6 +390,10 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     }
 
     let entry = cfg.repo_for_task(&task);
+    let ws_kind = crate::task::WorkspaceKind::parse(&task.workspace_kind)
+        .unwrap_or_else(|_| crate::task::infer_workspace_kind(task.repo.as_deref().unwrap_or("")));
+    let output_kind =
+        crate::task::OutputKind::parse(&task.output_kind).unwrap_or(crate::task::OutputKind::Reply);
     let repo = if task.shadow {
         shadow_source_repo(&cfg, &task)?
     } else {
@@ -419,37 +423,56 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             }
         })
         .unwrap_or_else(|| cfg.repo_default_branch.clone());
-    let wt = if cfg.cache.worktree_pool {
-        let slot = pick_pool_slot(
-            &shared,
-            &repo,
-            &provider.name,
-            &key,
-            task.worktree.as_deref(),
-            provider.max_parallel.max(1),
-        );
-        let dest = worktree::pool_slot_path(&cfg.worktree_root, &repo, &provider.name, slot);
-        let branch = format!("{branch_prefix}/{key}");
-        let keep = (dest.join(".git").exists() || dest.join(".git").is_file())
-            && worktree::current_branch(&dest).as_deref() == Some(branch.as_str());
-        worktree::acquire_pool_worktree(
-            &repo,
-            &cfg.worktree_root,
-            &provider.name,
-            slot,
-            &key,
-            &branch_prefix,
-            &base_branch,
-            !keep,
-        )?
-    } else {
-        worktree::ensure_worktree(
-            &repo,
-            &cfg.worktree_root,
-            &key,
-            &branch_prefix,
-            &base_branch,
-        )?
+    let wt = match ws_kind {
+        crate::task::WorkspaceKind::None => {
+            worktree::ensure_none_workspace(&cfg.worktree_root, &key)?
+        }
+        crate::task::WorkspaceKind::Dir => {
+            let path = if repo.as_os_str().is_empty() {
+                anyhow::bail!("dir workspace for {key} has no path");
+            } else {
+                repo.clone()
+            };
+            worktree::ensure_dir_workspace(&path)?
+        }
+        crate::task::WorkspaceKind::Git => {
+            if !worktree::is_git_repo(&repo) && repo.as_os_str().is_empty() {
+                anyhow::bail!("git workspace for {key} has no repo path");
+            }
+            if cfg.cache.worktree_pool {
+                let slot = pick_pool_slot(
+                    &shared,
+                    &repo,
+                    &provider.name,
+                    &key,
+                    task.worktree.as_deref(),
+                    provider.max_parallel.max(1),
+                );
+                let dest =
+                    worktree::pool_slot_path(&cfg.worktree_root, &repo, &provider.name, slot);
+                let branch = format!("{branch_prefix}/{key}");
+                let keep = (dest.join(".git").exists() || dest.join(".git").is_file())
+                    && worktree::current_branch(&dest).as_deref() == Some(branch.as_str());
+                worktree::acquire_pool_worktree(
+                    &repo,
+                    &cfg.worktree_root,
+                    &provider.name,
+                    slot,
+                    &key,
+                    &branch_prefix,
+                    &base_branch,
+                    !keep,
+                )?
+            } else {
+                worktree::ensure_worktree(
+                    &repo,
+                    &cfg.worktree_root,
+                    &key,
+                    &branch_prefix,
+                    &base_branch,
+                )?
+            }
+        }
     };
     if task.shadow {
         worktree::ensure_shadow_no_push(&wt)?;
@@ -593,6 +616,13 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             checklist.as_deref(),
         )
     };
+    if !resume_delta {
+        if let Some(note) =
+            crate::task::workspace_note(ws_kind, &wt.display().to_string(), output_kind)
+        {
+            rendered = crate::task::insert_before_messages(&rendered, &note);
+        }
+    }
     if assistant {
         rendered.push('\n');
         rendered.push_str(&crate::telegram::assistant_snapshot(&shared).await);
@@ -1012,6 +1042,9 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     if assistant {
         crate::telegram::deliver_assistant_result(&shared, &key, run_id, &final_outcome);
     }
+    if final_outcome != "success" {
+        let _ = crate::output::capture(&shared, &key);
+    }
     shared.kick.notify_waiters();
     Ok(())
 }
@@ -1151,6 +1184,8 @@ fn finish_waiting(
     );
     if more {
         shared.kick.notify_waiters();
+    } else if let Err(e) = crate::output::finalize(shared, key) {
+        tracing::warn!(task = %key, "output delivery: {e:#}");
     }
     maybe_finish_parent(shared, key)?;
     Ok(())
@@ -1299,28 +1334,8 @@ async fn maybe_review(
 fn pick_driver_fallback(cfg: &Config, db: &Db) -> Option<Provider> {
     let empty = HashMap::new();
     let dummy = crate::db::Task {
-        key: String::new(),
-        repo: None,
-        issue: None,
-        status: "queued".into(),
-        provider: None,
-        session_id: None,
-        worktree: None,
-        stall_retries: 0,
-        handoff: None,
-        tried: None,
-        created: String::new(),
-        updated: String::new(),
-        shadow: false,
-        verify_retries: 0,
-        protect_tests_skip: false,
-        labels: String::new(),
-        parent_key: None,
         role: "review".into(),
-        deps: String::new(),
-        review_rounds: 0,
-        provider_hint: String::new(),
-        title: String::new(),
+        ..Default::default()
     };
     pick_provider(cfg, db, &empty, &dummy, &Clock::system())
         .ok()

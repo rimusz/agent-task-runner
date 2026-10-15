@@ -210,9 +210,12 @@ token_env = "ATR_MCP_TOKEN"
 token_file = "~/.config/atr/mcp.token"
 ```
 
-Tools: `add_task`, `list_tasks`, `task_status` (timeline + last output),
-`steer_task`, `cancel_task`, `list_repos`, `list_providers` (with usage),
-`usage_summary`, `doctor`, and read-only `config_get` (secrets redacted).
+Tools: `add_task` (optional `workspace` git/dir/none, `dir`, `repo`, `output`,
+`webhook`, `patch`), `wait_task` (block until waiting/done/failed or
+`timeout_seconds`), `get_result` (text, diff, PR URL), `list_tasks`,
+`task_status` (timeline + last output), `steer_task`, `cancel_task`,
+`list_repos`, `list_providers` (with usage), `usage_summary`, `doctor`, and
+read-only `config_get` (secrets redacted).
 Config cannot be changed over MCP. Resources: `atr://status`, `atr://dashboard`.
 
 `atr serve` must be running for queued work to dispatch. `atr mcp` stdio talks

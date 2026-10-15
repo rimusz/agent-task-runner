@@ -702,27 +702,11 @@ cli = "/bin/true"
     fn dummy_task(skip: bool, labels: &str) -> crate::db::Task {
         crate::db::Task {
             key: "acme-1".into(),
-            repo: None,
             issue: Some(1),
             status: "running".into(),
-            provider: None,
-            session_id: None,
-            worktree: None,
-            stall_retries: 0,
-            handoff: None,
-            tried: None,
-            created: String::new(),
-            updated: String::new(),
-            shadow: false,
-            verify_retries: 0,
             protect_tests_skip: skip,
             labels: labels.into(),
-            parent_key: None,
-            role: "worker".into(),
-            deps: String::new(),
-            review_rounds: 0,
-            provider_hint: String::new(),
-            title: String::new(),
+            ..Default::default()
         }
     }
 
