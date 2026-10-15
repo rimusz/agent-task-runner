@@ -193,6 +193,11 @@ enum Cmd {
         #[arg(long)]
         print: bool,
     },
+    /// Install the atr agent skill for installed CLIs only.
+    Skills {
+        #[command(subcommand)]
+        cmd: SkillsCmd,
+    },
     /// Download a GitHub release, verify sha256, swap the binary, restart.
     /// Without a version, does nothing if already on the latest release.
     Upgrade {
@@ -227,6 +232,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ShadowCmd,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum SkillsCmd {
+    /// Write skills/atr/SKILL.md for each installed CLI (claude, cursor-agent,
+    /// codex, grok, opencode). Missing CLIs are skipped. Configs are untouched.
+    Install,
 }
 
 #[derive(Subcommand, Debug)]
@@ -770,6 +782,15 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 .map(|c| c.listen)
                 .unwrap_or_else(|_| "127.0.0.1:7420".into());
             println!("{}", atr::ui::run(&listen, print));
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Skills {
+            cmd: SkillsCmd::Install,
+        } => {
+            match atr::skill::install_default()? {
+                Some(msg) => print!("{msg}"),
+                None => anyhow::bail!("HOME not set; set ATR_SKILL_HOME"),
+            }
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Upgrade { version, force } => {
