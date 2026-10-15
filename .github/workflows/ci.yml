@@ -120,6 +120,35 @@ jobs:
         with:
           command: check
 
+  # Coverage report (informational, never fails the build on a number).
+  # Runs only when code changes, like the other Rust jobs.
+  coverage:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: coverage
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --all --lcov --output-path lcov.info -- --test-threads=4
+          {
+            echo '### Coverage'
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+          retention-days: 14
+
   gitleaks:
     runs-on: ubuntu-latest
     timeout-minutes: 5
