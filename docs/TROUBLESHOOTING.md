@@ -22,7 +22,7 @@ broken. Each non-ok line prints a `fix:` hint.
 | `ssh github` | no SSH key (fine for HTTPS remotes) | — | Only needed for SSH remotes |
 | `shadow token` | — | shadow on, no token | Any of `ATR_GH_TOKEN` / `ATR_SHADOW_GH_TOKEN` in `shadow.env` |
 | `shadow.env mode` | group/other can read it | — | `chmod 600 ~/.config/atr/shadow.env` |
-| `cli <name>` | version doesn't contain `expected_version` | CLI path missing | Update the CLI or the pin; install it or set `cli` |
+| `cli <name>` | only when a pin is set: version doesn't contain `expected_version` | CLI path missing | Pins are optional: remove `expected_version` (doctor then shows `version=<found>` as info), or update the pin/CLI; install it or set `cli` |
 | `repo_path`, `listen`, `system_prompt` | — | path missing / port busy | Fix the path, or stop whatever holds the port |
 | `telegram reachability` | 3+ failed polls | unreachable 15+ min | network/DNS/proxy to api.telegram.org |
 | `telegram`, `telegram token`, `telegram chat` | config incomplete | token set but unusable / no chat | `atr telegram setup`, then `atr telegram test` |
@@ -38,6 +38,7 @@ session, where the keychain is unlocked):
 
 - `pin=ok … (verified by service at …)` — fine.
 - `pin=MISMATCH … (service check at …)` — real warning; update the CLI or pin.
+- `version=… (seen by service at …)` — no pin configured; informational.
 - `pin skipped over SSH (keychain locked); service session verifies at start` —
   no record yet (serve not started since upgrade). Not a problem; it shows `ok`.
 
