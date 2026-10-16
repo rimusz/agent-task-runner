@@ -44,6 +44,7 @@ pub mod shadow;
 pub mod skill;
 pub mod task;
 pub mod telegram;
+pub mod telegram_health;
 pub mod telegram_setup;
 pub mod tz;
 pub mod ui;

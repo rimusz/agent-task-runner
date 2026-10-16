@@ -945,6 +945,22 @@ fn telegram_check(checks: &mut Vec<Check>, cfg: &Config, config_path: &Path) {
         push(checks, "telegram", Status::Ok, "disabled".into(), None);
         return;
     }
+    let h = crate::telegram_health::status_json(cfg, config_path, chrono::Utc::now());
+    let (st, hint) = match h["level"].as_str().unwrap_or("unknown") {
+        "fail" => (
+            Status::Fail,
+            Some("check this host's network/DNS/proxy to api.telegram.org; see docs/TROUBLESHOOTING.md#6-telegram".to_string()),
+        ),
+        "warn" => (Status::Warn, Some("transient network trouble to api.telegram.org; watch atr logs".to_string())),
+        _ => (Status::Ok, None),
+    };
+    push(
+        checks,
+        "telegram reachability",
+        st,
+        h["message"].as_str().unwrap_or("").to_string(),
+        hint,
+    );
     let shadow = crate::telegram_setup::shadow_env_path(config_path);
     let key = cfg.telegram.bot_token_env.as_str();
     let from_env = std::env::var(key)

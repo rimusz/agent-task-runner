@@ -259,6 +259,32 @@ Read-only page. Do not add buttons. Ask in a comment if the empty copy should ma
 
 Later: `atr telegram test` to ping. Unknown chats get no reply. Full command list: `/help`.
 
+Commands (allowed chats only; also registered in the `/` menu via setMyCommands):
+
+| Command | What it does |
+|---|---|
+| `/status` | queue, running tasks, providers |
+| `/tasks`, `/task <id>` | recent and running tasks; one task's detail |
+| `/cancel <id>` | cancel a task (asks Confirm) |
+| `/doctor` | `atr doctor`, warn/FAIL lines only |
+| `/tokens` | GitHub tokens: owner, env var, ok/warn/fail, days left — never values |
+| `/add`, `/usage`, `/ui`, `/help` | queue work, spend, dashboard link, everything else |
+
+Buttons: GitHub auth-failure and token-expiry alerts carry **Run doctor**; the
+assistant's "⏳ working" message carries **Cancel** (only cancels that chat's
+own assistant task). Button presses are checked against `allowed_chat_ids`.
+
+Long replies are split at paragraph / code-fence boundaries (each part stays
+valid formatting, under Telegram's 4096-char limit). Replies that would need
+more than 4 parts arrive as one `reply.md` document.
+
+Reachability: a getUpdates timeout is logged at debug; WARN after 3 failures
+in a row; INFO when it recovers. Unreachable for 15+ minutes fires the
+`[notify] command` hook (`ATR_ALERT_KIND=telegram_unreachable`, then
+`telegram_recovered`) — Telegram itself can't deliver that alert. State shows
+in `atr doctor` (`telegram reachability`), `atr status` (`telegram:` line) and
+a dashboard banner.
+
 ## Dashboard
 
 While atr is running, open `http://127.0.0.1:7420/`. It is read-only and refreshes on its own. Reaching it from another machine: [CONFIG.md](CONFIG.md#dashboard).

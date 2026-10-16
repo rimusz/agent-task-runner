@@ -418,7 +418,10 @@ fn send(cfg: &Config, a: &Alert, key: &str, owner: Option<&str>) {
         Alert::Recovered => tracing::info!("{text}"),
     }
     if cfg.telegram.enabled || crate::notify::configured(&cfg.telegram) {
-        crate::notify::notify(&cfg.telegram, &text);
+        let button = !matches!(a, Alert::Recovered);
+        if !crate::telegram::send_alert(&cfg.telegram, &text, button) {
+            crate::notify::notify(&cfg.telegram, &text);
+        }
     }
 }
 

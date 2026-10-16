@@ -117,7 +117,7 @@ atr telegram setup    # BotFather token + /start → allowed_chat_ids
 atr telegram test
 ```
 
-`/help` lists commands. Free-text (not a `/command`) from an allowed chat goes to the Telegram assistant when `[telegram.assistant] enabled = true`: first available provider/model in order (or `telegram.assistant.provider`), this skill + redacted status/doctor/config, one conversation per chat with resume, `telegram.assistant.timeout` as the run cap. Usage is counted like any other run.
+`/help` lists commands; they are also registered in the `/` menu. `/status`, `/tasks`, `/cancel <id>` (Confirm), `/doctor` (warn/FAIL only), `/tokens` (GitHub token owner/env var/state/days left, never values). GitHub auth/expiry alerts have a **Run doctor** button; the "⏳ working" message has **Cancel** (that chat's assistant task only). Long replies are split cleanly; >4 parts arrive as `reply.md`. Telegram reachability: debug on single timeouts, WARN after 3 in a row, `[notify]` hook `telegram_unreachable` after 15 min, shown in doctor (`telegram reachability`), `atr status` and the dashboard. Free-text (not a `/command`) from an allowed chat goes to the Telegram assistant when `[telegram.assistant] enabled = true`: first available provider/model in order (or `telegram.assistant.provider`), this skill + redacted status/doctor/config, one conversation per chat with resume, `telegram.assistant.timeout` as the run cap. Usage is counted like any other run.
 
 Every change or destructive action still needs inline **Confirm** (old → new).
 

@@ -27,6 +27,7 @@ pre { white-space: pre-wrap; font: 12px/1.35 ui-monospace, monospace; background
 <h1>atr</h1>
 <p class="meta" id="meta">loading…</p>
 <div id="ghauth" class="banner" hidden></div>
+<div id="tghealth" class="banner" hidden></div>
 <p class="meta">
   <label>repo
     <select id="repoFilter">
@@ -100,6 +101,13 @@ function paint(d) {
     gb.textContent = (ga.level === "fail" ? "GitHub auth failing: " : "GitHub token: ") + (ga.message || "");
     gb.hidden = false;
   } else { gb.hidden = true; }
+  const th = d.telegram_health || {};
+  const tb = $("tghealth");
+  if (th.level === "fail" || th.level === "warn") {
+    tb.className = "banner " + th.level;
+    tb.textContent = "Telegram: " + (th.message || "");
+    tb.hidden = false;
+  } else { tb.hidden = true; }
   $("meta").textContent = (d.timezone || "") + " · " + (d.now || "") +
     " · " + (d.listen || "") + (d.intake_paused ? " · intake paused" : "") +
     (d.driver ? " · driver " + d.driver : "") + " · refresh 5s";

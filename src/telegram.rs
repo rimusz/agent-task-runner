@@ -15,8 +15,8 @@ const COMMANDS: &str = "\
 atr Telegram
 
 Watch
-• status — what's running
-• tasks / task <id> — queue
+• status · tasks / task <id> — running & recent
+• doctor · tokens — health, GitHub tokens
 • usage [period] — spend & cache
 • ui — dashboard link
 
@@ -179,6 +179,21 @@ pub fn api_base(cfg: &TelegramConfig) -> String {
 }
 
 pub fn sanitize(text: &str, secrets: &[&str]) -> String {
+    let mut s = sanitize_full(text, secrets);
+    if s.len() > MAX_TEXT {
+        let keep = MAX_TEXT.saturating_sub(14);
+        let mut end = keep;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push_str("…[truncated]");
+    }
+    s
+}
+
+/// Like [`sanitize`] but without truncation (long replies are split instead).
+pub fn sanitize_full(text: &str, secrets: &[&str]) -> String {
     let mut s = text.replace('\u{0000}', "");
     for sec in secrets {
         if !sec.is_empty() {
@@ -196,15 +211,6 @@ pub fn sanitize(text: &str, secrets: &[&str]) -> String {
     }
     if s.contains("----- atr variable -----") || s.contains("## Messages") {
         s = "(prompt omitted)".into();
-    }
-    if s.len() > MAX_TEXT {
-        let keep = MAX_TEXT.saturating_sub(14);
-        let mut end = keep;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        s.truncate(end);
-        s.push_str("…[truncated]");
     }
     s
 }
@@ -283,19 +289,91 @@ fn send_one(cfg: &TelegramConfig, chat_id: i64, text: &str, markup: Option<Value
 }
 
 /// Send assistant Markdown as Telegram HTML; fall back to plain text if Telegram rejects it.
+/// Long replies are split at paragraph / code-fence boundaries (each chunk is
+/// valid HTML on its own); more than `MAX_CHUNKS` chunks go out as a `.md` file.
 fn send_one_markdown(cfg: &TelegramConfig, chat_id: i64, text: &str, markup: Option<Value>) {
     let Some(token) = bot_token(cfg) else {
         return;
     };
-    let body = sanitize(text, &[&token]);
-    let html = markdown_to_telegram_html(&body);
-    match send_message_mode(cfg, &token, chat_id, &html, markup.clone(), Some("HTML")) {
-        Err(e) if e.starts_with("HTTP 400") => {
-            tracing::warn!("telegram rejected HTML formatting; resending as plain text");
-            let _ = send_message_mode(cfg, &token, chat_id, &body, markup, None);
+    let body = sanitize_full(text, &[&token]);
+    let chunks = crate::telegram_health::split_markdown(&body, crate::telegram_health::CHUNK_LIMIT);
+    if crate::telegram_health::should_send_document(chunks.len()) {
+        let first = chunks.first().cloned().unwrap_or_default();
+        let caption: String = first.chars().take(200).collect();
+        match send_document(
+            cfg,
+            &token,
+            chat_id,
+            "reply.md",
+            body.as_bytes(),
+            &format!("{caption}… (full reply attached)"),
+        ) {
+            Ok(()) => return,
+            Err(e) => tracing::warn!("telegram sendDocument failed ({e}); sending chunks"),
         }
-        _ => {}
     }
+    let n = chunks.len();
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        let m = if i + 1 == n { markup.clone() } else { None };
+        let html = markdown_to_telegram_html(&chunk);
+        match send_message_mode(cfg, &token, chat_id, &html, m.clone(), Some("HTML")) {
+            Err(e) if e.starts_with("HTTP 400") => {
+                tracing::warn!("telegram rejected HTML formatting; resending as plain text");
+                let _ = send_message_mode(cfg, &token, chat_id, &chunk, m, None);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn send_document(
+    cfg: &TelegramConfig,
+    token: &str,
+    chat_id: i64,
+    filename: &str,
+    content: &[u8],
+    caption: &str,
+) -> std::result::Result<(), String> {
+    let url = format!("{}/bot{}/sendDocument", api_base(cfg), token);
+    let (ct, body) =
+        crate::telegram_health::multipart_document(chat_id, filename, content, caption);
+    crate::util::ureq_agent(SEND_HTTP_TIMEOUT)
+        .post(&url)
+        .set("Content-Type", &ct)
+        .send_bytes(&body)
+        .map(|_| ())
+        .map_err(|e| redact(&e.to_string(), token))
+}
+
+/// Send `text` to every allowed chat right away (not batched), optionally
+/// with an inline "Run doctor" button. Used for GitHub auth/expiry alerts.
+pub fn send_alert(cfg: &TelegramConfig, text: &str, doctor_button: bool) -> bool {
+    let Some(token) = bot_token(cfg) else {
+        return false;
+    };
+    let chats = allowed_chats(cfg);
+    if chats.is_empty() {
+        return false;
+    }
+    let prefix = if cfg.prefix.is_empty() {
+        "atr:"
+    } else {
+        cfg.prefix.as_str()
+    };
+    let body = sanitize(&format!("{prefix} {text}"), &[&token]);
+    let markup = doctor_button.then(doctor_markup);
+    for chat in chats {
+        let _ = send_message_mode(cfg, &token, chat, &body, markup.clone(), None);
+    }
+    true
+}
+
+pub fn doctor_markup() -> Value {
+    json!({"inline_keyboard": [[{"text": "Run doctor", "callback_data": "doctor"}]]})
+}
+
+pub fn cancel_markup(key: &str) -> Value {
+    json!({"inline_keyboard": [[{"text": "Cancel", "callback_data": format!("cx:{key}")}]]})
 }
 
 fn html_escape(s: &str) -> String {
@@ -447,9 +525,13 @@ fn edit_message(
     chat_id: i64,
     message_id: i64,
     text: &str,
+    markup: Option<Value>,
 ) -> bool {
     let url = format!("{}/bot{}/editMessageText", api_base(cfg), token);
-    let payload = json!({"chat_id": chat_id, "message_id": message_id, "text": text});
+    let mut payload = json!({"chat_id": chat_id, "message_id": message_id, "text": text});
+    if let Some(m) = markup {
+        payload["reply_markup"] = m;
+    }
     match crate::util::ureq_agent(SEND_HTTP_TIMEOUT)
         .post(&url)
         .send_json(payload)
@@ -547,7 +629,12 @@ fn send_outgoing(shared: &Shared, cfg: &TelegramConfig, o: Outgoing) {
         return;
     }
     let body = sanitize(&text, &[&token]);
-    let mid = send_message_mode(cfg, &token, o.chat_id, &body, o.markup, None);
+    let markup = if interim && o.markup.is_none() {
+        Some(cancel_markup(&assistant_task_key(o.chat_id)))
+    } else {
+        o.markup
+    };
+    let mid = send_message_mode(cfg, &token, o.chat_id, &body, markup, None);
     if interim {
         if let Ok(Some(id)) = mid {
             let now = chrono::Utc::now().timestamp();
@@ -579,7 +666,7 @@ pub fn assistant_started(shared: &Shared, key: &str, provider: &str) {
         return;
     };
     let text = interim_working_text(Some(&provider_label_for(shared, provider)));
-    if old != text && edit_message(&cfg, &token, chat, id, &text) {
+    if old != text && edit_message(&cfg, &token, chat, id, &text, Some(cancel_markup(key))) {
         let _ = shared
             .db
             .meta_set(&interim_meta_key(chat), &format!("{id}:{t}:{text}"));
@@ -602,7 +689,7 @@ fn finish_interim(
     };
     let secs = (chrono::Utc::now().timestamp() - t).max(0) as u64;
     let text = interim_done_text(provider.unwrap_or("assistant"), secs, ok);
-    edit_message(cfg, &token, chat, id, &text);
+    edit_message(cfg, &token, chat, id, &text, None);
 }
 
 /// Per-attempt HTTP timeout for sendMessage. Generous because a read timeout is
@@ -761,6 +848,7 @@ pub async fn bot_loop(shared: Arc<Shared>) {
         }
         let shared2 = shared.clone();
         let _ = tokio::task::spawn_blocking(move || {
+            register_commands_once(&shared2.config.read().unwrap().telegram.clone());
             poll_once(&shared2);
             maybe_daily(&shared2);
             flush_due(&shared2);
@@ -799,14 +887,17 @@ fn poll_once(shared: &Shared) {
         offset
     );
     let agent = crate::util::ureq_agent(poll_http_timeout());
+    let full_cfg = shared.config.read().unwrap().clone();
     let resp = match agent.get(&url).call() {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!("telegram getUpdates: {}", redact(&e.to_string(), &token));
+            let msg = redact(&e.to_string(), &token);
+            crate::telegram_health::observe_poll(&full_cfg, &shared.config_path, Some(&msg));
             std::thread::sleep(Duration::from_secs(2));
             return;
         }
     };
+    crate::telegram_health::observe_poll(&full_cfg, &shared.config_path, None);
     let v: Value = match resp.into_json() {
         Ok(v) => v,
         Err(_) => return,
@@ -822,6 +913,9 @@ fn poll_once(shared: &Shared) {
         if let Some(id) = upd.get("update_id").and_then(|n| n.as_i64()) {
             max_id = max_id.max(id + 1);
         }
+        if let Some(id) = upd.pointer("/callback_query/id").and_then(|v| v.as_str()) {
+            answer_callback(&cfg, &token, id);
+        }
         if let Ok(outs) = handle_update(shared, upd) {
             for o in outs {
                 send_outgoing(shared, &cfg, o);
@@ -830,6 +924,105 @@ fn poll_once(shared: &Shared) {
     }
     if max_id != offset {
         let _ = shared.db.meta_set("telegram_offset", &max_id.to_string());
+    }
+}
+
+fn answer_callback(cfg: &TelegramConfig, token: &str, id: &str) {
+    let url = format!("{}/bot{}/answerCallbackQuery", api_base(cfg), token);
+    let _ = crate::util::ureq_agent(Duration::from_secs(10))
+        .post(&url)
+        .send_json(json!({"callback_query_id": id}));
+}
+
+/// Commands registered with BotFather via setMyCommands (shown in the `/` menu).
+pub const BOT_COMMANDS: &[(&str, &str)] = &[
+    ("status", "What's running"),
+    ("tasks", "Recent and running tasks"),
+    ("task", "One task: /task <id>"),
+    ("cancel", "Cancel a task: /cancel <id>"),
+    ("doctor", "Health checks (warn/FAIL only)"),
+    ("tokens", "GitHub tokens: state, days left"),
+    ("usage", "Spend and cache"),
+    ("add", "Queue a task: /add <prompt>"),
+    ("ui", "Dashboard link"),
+    ("help", "All commands"),
+];
+
+pub fn bot_commands_payload() -> Value {
+    json!({"commands": BOT_COMMANDS.iter().map(|(c, d)| json!({"command": c, "description": d})).collect::<Vec<_>>()})
+}
+
+static COMMANDS_SET: OnceLock<()> = OnceLock::new();
+
+fn register_commands_once(cfg: &TelegramConfig) {
+    if COMMANDS_SET.get().is_some() {
+        return;
+    }
+    let Some(token) = bot_token(cfg) else {
+        return;
+    };
+    let url = format!("{}/bot{}/setMyCommands", api_base(cfg), token);
+    match crate::util::ureq_agent(Duration::from_secs(10))
+        .post(&url)
+        .send_json(bot_commands_payload())
+    {
+        Ok(_) => {
+            let _ = COMMANDS_SET.set(());
+            tracing::info!("telegram: registered bot commands");
+        }
+        Err(e) => tracing::debug!("telegram setMyCommands: {}", redact(&e.to_string(), &token)),
+    }
+}
+
+/// `atr doctor` warn/FAIL lines only (for /doctor and the "Run doctor" button).
+pub fn doctor_problems_text(report: &crate::doctor::Report) -> String {
+    let bad: Vec<&crate::doctor::Check> = report
+        .checks
+        .iter()
+        .filter(|c| c.status != crate::doctor::Status::Ok)
+        .collect();
+    if bad.is_empty() {
+        return format!("doctor: all {} checks ok", report.checks.len());
+    }
+    let mut out = format!("doctor: {} problem(s)\n", bad.len());
+    for c in bad {
+        let tag = if c.status == crate::doctor::Status::Fail {
+            "FAIL"
+        } else {
+            "warn"
+        };
+        out.push_str(&format!("\n{tag} {} — {}", c.name, c.detail));
+        if let Some(h) = &c.hint {
+            out.push_str(&format!("\n  fix: {h}"));
+        }
+    }
+    out
+}
+
+fn run_doctor_text(shared: &Shared) -> String {
+    let cfg = shared.config.read().unwrap().clone();
+    let path = shared.config_path.clone();
+    let fut = async move { crate::doctor::run(&cfg, &path, false).await };
+    let report = match tokio::runtime::Handle::try_current() {
+        Ok(h) => std::thread::scope(|s| s.spawn(|| h.block_on(fut)).join()),
+        Err(_) => match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => Ok(rt.block_on(fut)),
+            Err(e) => return format!("doctor failed: {e}"),
+        },
+    };
+    match report {
+        Ok(r) => doctor_problems_text(&r),
+        Err(_) => "doctor failed".into(),
+    }
+}
+
+fn tokens_text(shared: &Shared) -> String {
+    match crate::gh_token_cli::list(&shared.config_path) {
+        Ok(t) => format!("GitHub tokens (values never shown)\n\n{t}"),
+        Err(e) => format!("tokens: {e:#}"),
     }
 }
 
@@ -909,6 +1102,16 @@ fn handle_command(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
         "/repos" => Outgoing {
             chat_id: chat,
             text: format_repos(shared),
+            markup: None,
+        },
+        "/doctor" => Outgoing {
+            chat_id: chat,
+            text: run_doctor_text(shared),
+            markup: None,
+        },
+        "/tokens" => Outgoing {
+            chat_id: chat,
+            text: tokens_text(shared),
             markup: None,
         },
         "/task" => {
@@ -1311,7 +1514,7 @@ pub fn assistant_reply(shared: &Shared, key: &str, run_id: i64, outcome: &str) -
     }
     let mut outs = vec![Outgoing {
         chat_id: chat,
-        text: sanitize(&visible, &[]),
+        text: sanitize_full(&visible, &[]),
         markup: None,
     }];
     for cmd in cmds {
@@ -1649,6 +1852,32 @@ fn confirm(chat: i64, action: Action, prompt: &str) -> Outgoing {
 }
 
 fn handle_callback(shared: &Shared, chat: i64, data: &str) -> Outgoing {
+    if data == "doctor" {
+        return Outgoing {
+            chat_id: chat,
+            text: run_doctor_text(shared),
+            markup: None,
+        };
+    }
+    if let Some(key) = data.strip_prefix("cx:") {
+        // Interim "Cancel" button: only the chat's own assistant task.
+        if key != assistant_task_key(chat) {
+            return Outgoing {
+                chat_id: chat,
+                text: "that button is not for this chat".into(),
+                markup: None,
+            };
+        }
+        let text = match shared.cancel(key, false) {
+            Ok(()) => format!("cancelled {key}"),
+            Err(e) => format!("cancel failed: {e:#}"),
+        };
+        return Outgoing {
+            chat_id: chat,
+            text: sanitize(&text, &[]),
+            markup: None,
+        };
+    }
     let mut parts = data.split(':');
     let yn = parts.next().unwrap_or("");
     let id: u64 = parts.next().unwrap_or("0").parse().unwrap_or(0);
@@ -2790,6 +3019,112 @@ cli = "/bin/true"
             shared.db.get_task("acme-1").unwrap().unwrap().status,
             "failed"
         );
+    }
+
+    #[test]
+    fn cancel_button_only_for_own_assistant_task() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let key = assistant_task_key(42);
+        shared.db.upsert_task(&key, "/repo", None).unwrap();
+        shared.db.set_status(&key, "waiting").unwrap();
+        let other = json!({"callback_query":{"data":"cx:tg7","message":{"chat":{"id":42}}}});
+        assert!(handle_update(&shared, &other).unwrap()[0]
+            .text
+            .contains("not for this chat"));
+        let stranger =
+            json!({"callback_query":{"data":format!("cx:{key}"),"message":{"chat":{"id":99}}}});
+        assert!(handle_update(&shared, &stranger).unwrap().is_empty());
+        let mine =
+            json!({"callback_query":{"data":format!("cx:{key}"),"message":{"chat":{"id":42}}}});
+        assert!(handle_update(&shared, &mine).unwrap()[0]
+            .text
+            .contains("cancelled"));
+        let m = cancel_markup(&key);
+        assert_eq!(
+            m["inline_keyboard"][0][0]["callback_data"],
+            format!("cx:{key}")
+        );
+        assert!(format!("cx:{key}").len() <= 64);
+    }
+
+    #[test]
+    fn doctor_and_tokens_commands_never_leak_values() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let out = handle_update(
+            &shared,
+            &json!({"message":{"chat":{"id":42},"text":"/tokens"}}),
+        )
+        .unwrap();
+        assert!(out[0].text.contains("GitHub tokens"), "{}", out[0].text);
+        assert!(!out[0].text.contains("tok-secret"));
+        let out = handle_update(
+            &shared,
+            &json!({"message":{"chat":{"id":42},"text":"/doctor"}}),
+        )
+        .unwrap();
+        assert!(out[0].text.starts_with("doctor:"), "{}", out[0].text);
+        assert!(!out[0].text.contains("tok-secret"));
+        let cb = json!({"callback_query":{"data":"doctor","message":{"chat":{"id":42}}}});
+        assert!(handle_update(&shared, &cb).unwrap()[0]
+            .text
+            .starts_with("doctor:"));
+    }
+
+    #[test]
+    fn doctor_problems_text_only_bad_lines() {
+        use crate::doctor::{Check, Report, Status};
+        let mk = |n: &str, s: Status| Check {
+            name: n.into(),
+            status: s,
+            detail: "d".into(),
+            hint: Some("h".into()),
+        };
+        let r = Report {
+            checks: vec![
+                mk("a", Status::Ok),
+                mk("b", Status::Warn),
+                mk("c", Status::Fail),
+            ],
+            problems: 2,
+        };
+        let t = doctor_problems_text(&r);
+        assert!(
+            t.contains("warn b") && t.contains("FAIL c") && !t.contains(" a "),
+            "{t}"
+        );
+        let ok = Report {
+            checks: vec![mk("a", Status::Ok)],
+            problems: 0,
+        };
+        assert!(doctor_problems_text(&ok).contains("all 1 checks ok"));
+    }
+
+    #[test]
+    fn bot_commands_include_new_ones() {
+        let p = bot_commands_payload();
+        let names: Vec<&str> = p["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["command"].as_str().unwrap())
+            .collect();
+        for c in ["status", "doctor", "tokens", "tasks", "cancel", "help"] {
+            assert!(names.contains(&c), "{c}");
+        }
+        assert!(COMMANDS.contains("doctor") && COMMANDS.contains("tokens"));
+        assert_eq!(
+            doctor_markup()["inline_keyboard"][0][0]["callback_data"],
+            "doctor"
+        );
+    }
+
+    #[test]
+    fn sanitize_full_does_not_truncate() {
+        let long = "x".repeat(MAX_TEXT * 3);
+        assert_eq!(sanitize_full(&long, &[]).len(), long.len());
+        assert!(sanitize(&long, &[]).len() <= MAX_TEXT + 20);
     }
 
     #[test]
