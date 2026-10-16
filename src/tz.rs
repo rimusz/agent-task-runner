@@ -76,6 +76,15 @@ impl DisplayTz {
         }
     }
 
+    /// Compact dashboard stamp without the zone name (the page header shows it
+    /// once): always `Mon DD` (date only), e.g. `Oct 16`; the full stamp goes in a hover title.
+    pub fn format_compact(&self, utc: DateTime<Utc>) -> String {
+        match self.named {
+            Some(tz) => utc.with_timezone(&tz).format("%b %d").to_string(),
+            None => utc.with_timezone(&Local).format("%b %d").to_string(),
+        }
+    }
+
     /// Short stamp for usage lines, e.g. `Oct 16 07:36 UTC`.
     pub fn format_short(&self, utc: DateTime<Utc>) -> String {
         let (month, day, hour, minute) = match self.named {
@@ -154,6 +163,11 @@ mod tests {
         assert!(tz.format(t).contains("2026-10-13 23:30"));
         assert!(tz.format(t).contains("UTC"));
         assert_eq!(tz.format_short(t), "Oct 13 23:30 UTC");
+        assert_eq!(tz.format_compact(t), "Oct 13");
+        let far = Utc.with_ymd_and_hms(2026, 11, 3, 3, 0, 0).unwrap();
+        assert_eq!(tz.format_compact(far), "Nov 03");
+        let vil = DisplayTz::parse("Europe/Vilnius").unwrap();
+        assert!(!vil.format_compact(t).contains("Vilnius"));
     }
 
     #[test]

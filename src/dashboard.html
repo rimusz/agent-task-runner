@@ -16,6 +16,7 @@ th, td { text-align: left; padding: .3rem .4rem; border-bottom: 1px solid #ccc3;
 td.wrap, td.wide { white-space: normal; overflow-wrap: break-word; }
 td.wide { min-width: 16rem; }
 td.wrap { min-width: 10rem; }
+.seg { white-space: nowrap; }
 td.num, th.num { min-width: 4.5rem; }
 .scroll { overflow-x: auto; }
 .badge[title] { cursor: help; }
@@ -170,6 +171,17 @@ function shortTime(full, now) {
   const txt = same ? f.slice(11, 16) : f.slice(5, 10) + " " + f.slice(11, 16);
   return '<span title="' + esc(f) + '">' + esc(txt) + '</span>';
 }
+// Provider usage: "5h 0% · resets Oct 16; 7d 4% · resets Oct 17". Each
+// segment is nowrap so the cell wraps only between segments; the full
+// timestamp (with zone) is in the hover title.
+function usageCell(p) {
+  const segs = p.usage_segments || [];
+  if (!segs.length) {
+    return (p.usage && p.usage !== "-") ? esc(p.usage) : '<span class="empty" title="this CLI does not report plan usage">-</span>';
+  }
+  return segs.map(s => '<span class="seg"' + (s.reset_full ? ' title="resets ' + esc(s.reset_full) + '"' : "") + ">" +
+    esc(s.text) + (s.reset ? " · " + esc(s.reset) : "") + "</span>").join("; ");
+}
 // Telegram assistant task keys (tg<chat id>) read as "Telegram".
 function taskKey(k) {
   const m = /^tg(-?\d+)$/.exec(String(k || ""));
@@ -241,7 +253,7 @@ function paint(d) {
   if (ta && ta.enabled) {
     tae.innerHTML = "<b>Telegram assistant</b>: provider " + esc(ta.provider_display || "-") +
       ' · workspace <span title="read-only scratch repo; not a watched repo">' + esc(ta.workspace || "-") + "</span> · " +
-      num(ta.chats_today || 0) + " chats / " + num(ta.runs_today || 0) + " runs today · last activity " + esc(ta.last_activity || "-");
+      num(ta.chats_today || 0) + " chats / " + num(ta.runs_today || 0) + " runs today · last activity " + shortTime(ta.last_activity, d.now);
     tae.hidden = false;
   } else { tae.hidden = true; }
   const run = (d.running || []).filter(t => keep(t, "running", t.started_utc));
@@ -268,7 +280,7 @@ function paint(d) {
     bar(p.tokens_5h, max5) + num(p.runs_5h) + " runs · " + num(p.tokens_5h),
     bar(p.tokens_7d, max7) + num(p.runs_7d) + " runs · " + num(p.tokens_7d),
     shortTime(p.last_success, d.now), p.cooling ? '<span class="warn">cooldown</span>' : "—",
-    (p.usage && p.usage !== "-") ? esc(p.usage) : '<span class="empty" title="this CLI does not report plan usage">-</span>',
+    usageCell(p),
     p.extra_credits ? esc(p.extra_credits) : "-"
   ], null, ["","","","wrap","","","","","","wrap",""]);
   const today = d.today || [];
@@ -281,8 +293,7 @@ function paint(d) {
     esc(r.provider), num(r.runs), num(r.success), num(r.input), num(r.cached), num(r.cache_write), num(r.output), usd(r.cost_usd), esc(r.hit)
   ], tTotal);
   const sav = d.savings || {};
-  let meta = (sav.period || "") + " " + (sav.from || "") + ".." + (sav.to || "") +
-    (sav.timezone ? " (" + sav.timezone + ")" : "");
+  let meta = (sav.period || "") + " " + (sav.from || "") + ".." + (sav.to || "");
   let metaHtml = esc(meta);
   if (sav.headline) {
     const min = sav.headline_min_input != null ? sav.headline_min_input : 40000;
