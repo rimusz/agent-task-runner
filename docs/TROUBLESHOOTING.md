@@ -60,7 +60,8 @@ N chats / M runs today, last activity …`), also in `atr status` and
 `dashboard.json` / `status --json` under `telegram_assistant`; the top-level default repo is hidden while GitHub
 intake is off. Finished rows link to `tasks/<key>/result`, show the finish
 time as `HH:MM` (full date on hover) and `provider / model`. Telegram assistant
-tasks (`tg<chat id>`) show as `Telegram` with the chat id on hover. Today shows
+tasks (`tg<chat id>`) are left out of Finished (they are summarized on the
+Telegram assistant line) but still count in Today and provider totals. Today shows
 uncached input, cached and cache-write tokens separately so totals add up.
 Providers show `-` for usage when the CLI reports none, and Grok extra credits
 in their own column. Token savings shows a per-provider bar table for a single

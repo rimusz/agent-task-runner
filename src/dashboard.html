@@ -12,7 +12,8 @@ h2 { font-size: 1rem; margin: 1.25rem 0 .4rem; }
 .meta { color: #666; font-size: .85rem; }
 table { width: 100%; border-collapse: collapse; font-size: .9rem; }
 th, td { text-align: left; padding: .3rem .4rem; border-bottom: 1px solid #ccc3; vertical-align: top; overflow-wrap: anywhere; word-break: normal; hyphens: none; }
-td.nowrap { white-space: nowrap; }
+td.nowrap, th.nowrap { white-space: nowrap; }
+td.num, th.num { white-space: nowrap; min-width: 4.5rem; }
 td.wide { min-width: 16rem; }
 .badge[title] { cursor: help; }
 th { color: #666; font-weight: 600; }
@@ -250,11 +251,11 @@ function paint(d) {
     taskKey(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.parent || "-"), esc(t.provider), esc(t.model), esc(t.elapsed)
   ]);
   const fin = (d.finished || []).filter(t => keep(t, t.result, t.ended_utc));
-  $("finished").innerHTML = rows("finished", [{t:"finished",tip:"local time; hover for the full date"},"key","prompt","repo","provider / model","elapsed",{t:"tokens",num:true},{t:"cost",num:true,tip:"as reported by the CLI"},"result"], fin, t => [
+  $("finished").innerHTML = rows("finished", [{t:"finished",tip:"local time; hover for the full date"},"key","prompt","repo","provider / model",{t:"elapsed",num:true},{t:"tokens",num:true},{t:"cost",num:true,tip:"as reported by the CLI"},"result"], fin, t => [
     shortTime(t.finished_at, d.now), '<a href="' + esc(t.result_url) + '" title="result / diff">' + taskKey(t.key) + '</a>', esc(t.prompt || t.title || "-"),
     esc(t.repo), provModel(t.provider, t.model), esc(t.elapsed), t.tokens ? num(t.tokens) : "-", usd(t.cost_usd),
     '<span class="'+cls(t.result)+'">'+esc(t.result)+"</span>" + (t.reason && t.reason !== t.result ? ' <span class="meta">' + esc(t.reason) + "</span>" : "")
-  ], null, ["nowrap","nowrap","wide","nowrap","nowrap","nowrap","","","wide"]);
+  ], null, ["nowrap","nowrap","wide","nowrap","nowrap","nowrap","nowrap","nowrap","wide"]);
   const max5 = Math.max(1, ...(d.providers || []).map(p => Number(p.tokens_5h) || 0));
   const max7 = Math.max(1, ...(d.providers || []).map(p => Number(p.tokens_7d) || 0));
   const bar = (v, m) => '<span class="bar" style="width:' + Math.round((Number(v) || 0) / m * 60) + 'px"></span>';

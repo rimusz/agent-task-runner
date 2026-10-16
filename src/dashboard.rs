@@ -116,6 +116,10 @@ pub fn snapshot_period(
         if open.contains(r.task_key.as_str()) {
             continue;
         }
+        // Telegram assistant runs are summarized on their own line, not here.
+        if crate::telegram::is_assistant_key(&r.task_key) {
+            continue;
+        }
         let task = tasks.iter().find(|t| t.key == r.task_key);
         if let Some(f) = repo {
             match task {
@@ -846,6 +850,25 @@ kind = "claude"
     }
 
     #[test]
+    fn finished_excludes_telegram_assistant_runs() {
+        let (shared, _dir) = harness();
+        for key in ["tg873752741", "job-1"] {
+            shared.db.upsert_task(key, "/tmp/my-repo", None).unwrap();
+            let run = shared.db.start_run(key, "claude", "opus").unwrap();
+            shared.db.finish_run(run, "success", Some(0)).unwrap();
+            shared.db.set_status(key, "waiting").unwrap();
+        }
+        let v = snapshot(&shared);
+        let keys: Vec<&str> = v["finished"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys, ["job-1"], "{v}");
+    }
+
+    #[test]
     fn snapshot_redacts_secrets_and_lists_tasks() {
         std::env::set_var("ATR_TEST_DASH_TOKEN", "tok-secret");
         let (shared, _dir) = harness();
@@ -1033,6 +1056,12 @@ kind = "claude"
             "{line}"
         );
         assert!(line.contains("0 chats / 0 runs today"), "{line}");
+    }
+
+    #[test]
+    fn page_numeric_columns_do_not_wrap() {
+        assert!(PAGE.contains("td.num, th.num { white-space: nowrap;"));
+        assert!(PAGE.contains("{t:\"elapsed\",num:true}"));
     }
 
     #[test]
