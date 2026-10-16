@@ -52,6 +52,7 @@ a { color: inherit; }
 <h2>Repos</h2>
 <div id="repos"></div>
 
+<p class="meta" id="tgAssistant" hidden></p>
 <h2>Running</h2>
 <div id="running"></div>
 <h2>Queued</h2>
@@ -232,6 +233,13 @@ function paint(d) {
   $("repos").innerHTML = rows("repos", ["name","mode","github","label",{t:"token env",tip:"env var used for GitHub (name only, never the value)"},"path"], d.repos, r => [
     esc(r.name) + (r.enabled ? "" : ' <span class="warn">(disabled)</span>'), esc(r.mode), esc(r.github || "-"), esc(r.label || "-"), esc(r.token_env || "-"), esc(r.path || "-")
   ]);
+  const ta = d.telegram_assistant, tae = $("tgAssistant");
+  if (ta && ta.enabled) {
+    tae.innerHTML = "<b>Telegram assistant</b>: provider " + esc(ta.provider_display || "-") +
+      ' · workspace <span title="read-only scratch repo; not a watched repo">' + esc(ta.workspace || "-") + "</span> · " +
+      num(ta.chats_today || 0) + " chats / " + num(ta.runs_today || 0) + " runs today · last activity " + esc(ta.last_activity || "-");
+    tae.hidden = false;
+  } else { tae.hidden = true; }
   const run = (d.running || []).filter(t => keep(t, "running", t.started_utc));
   $("running").innerHTML = rows("running", ["key","repo","role","provider / model","elapsed","progress"], run, t => [
     taskKey(t.key), esc(t.repo), esc(t.role || "worker"), provModel(t.provider, t.model),
