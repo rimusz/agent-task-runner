@@ -259,6 +259,113 @@ fn send_one(cfg: &TelegramConfig, chat_id: i64, text: &str, markup: Option<Value
     let _ = send_message(cfg, &token, chat_id, &body, markup);
 }
 
+/// Send assistant Markdown as Telegram HTML; fall back to plain text if Telegram rejects it.
+fn send_one_markdown(cfg: &TelegramConfig, chat_id: i64, text: &str, markup: Option<Value>) {
+    let Some(token) = bot_token(cfg) else {
+        return;
+    };
+    let body = sanitize(text, &[&token]);
+    let html = markdown_to_telegram_html(&body);
+    match send_message_mode(cfg, &token, chat_id, &html, markup.clone(), Some("HTML")) {
+        Err(e) if e.starts_with("HTTP 400") => {
+            tracing::warn!("telegram rejected HTML formatting; resending as plain text");
+            let _ = send_message_mode(cfg, &token, chat_id, &body, markup, None);
+        }
+        _ => {}
+    }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Convert common assistant Markdown (fenced code, `code`, **bold**, # headings,
+/// [text](url)) into Telegram HTML. Everything else is escaped verbatim.
+pub(crate) fn markdown_to_telegram_html(md: &str) -> String {
+    let mut out = String::new();
+    let mut in_fence = false;
+    for line in md.split('\n') {
+        if line.trim_start().starts_with("```") {
+            out.push_str(if in_fence { "</pre>" } else { "<pre>" });
+            in_fence = !in_fence;
+            out.push('\n');
+            continue;
+        }
+        if in_fence {
+            out.push_str(&html_escape(line));
+            out.push('\n');
+            continue;
+        }
+        let t = line.trim_start();
+        let hashes = t.chars().take_while(|c| *c == '#').count();
+        if (1..=6).contains(&hashes) && t[hashes..].starts_with(' ') {
+            out.push_str("<b>");
+            out.push_str(&inline_md(t[hashes..].trim()));
+            out.push_str("</b>");
+        } else {
+            out.push_str(&inline_md(line));
+        }
+        out.push('\n');
+    }
+    if in_fence {
+        out.push_str("</pre>\n");
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn inline_md(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix('`') {
+            if let Some(end) = r.find('`') {
+                out.push_str("<code>");
+                out.push_str(&html_escape(&r[..end]));
+                out.push_str("</code>");
+                rest = &r[end + 1..];
+                continue;
+            }
+        }
+        if let Some(r) = rest.strip_prefix("**") {
+            if let Some(end) = r.find("**") {
+                if end > 0 {
+                    out.push_str("<b>");
+                    out.push_str(&inline_md(&r[..end]));
+                    out.push_str("</b>");
+                    rest = &r[end + 2..];
+                    continue;
+                }
+            }
+        }
+        if let Some(r) = rest.strip_prefix('[') {
+            if let Some(close) = r.find("](") {
+                if let Some(end) = r[close + 2..].find(')') {
+                    let label = &r[..close];
+                    let url = &r[close + 2..close + 2 + end];
+                    if url.starts_with("http://") || url.starts_with("https://") {
+                        out.push_str(&format!(
+                            "<a href=\"{}\">{}</a>",
+                            html_escape(url).replace('"', "&quot;"),
+                            html_escape(label)
+                        ));
+                        rest = &r[close + 3 + end..];
+                        continue;
+                    }
+                }
+            }
+        }
+        let c = rest.chars().next().unwrap();
+        out.push_str(&html_escape(&c.to_string()));
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
 fn send_message(
     cfg: &TelegramConfig,
     token: &str,
@@ -266,6 +373,18 @@ fn send_message(
     text: &str,
     markup: Option<Value>,
 ) -> Result<()> {
+    let _ = send_message_mode(cfg, token, chat_id, text, markup, None);
+    Ok(())
+}
+
+fn send_message_mode(
+    cfg: &TelegramConfig,
+    token: &str,
+    chat_id: i64,
+    text: &str,
+    markup: Option<Value>,
+    parse_mode: Option<&str>,
+) -> std::result::Result<u32, String> {
     let url = format!("{}/bot{}/sendMessage", api_base(cfg), token);
     let mut payload = json!({
         "chat_id": chat_id,
@@ -275,13 +394,144 @@ fn send_message(
     if let Some(m) = markup {
         payload["reply_markup"] = m;
     }
-    let send = crate::util::ureq_agent(Duration::from_secs(10))
-        .post(&url)
-        .send_json(payload);
-    if let Err(e) = send {
-        tracing::warn!("telegram send failed: {}", redact(&e.to_string(), token));
+    if let Some(pm) = parse_mode {
+        payload["parse_mode"] = json!(pm);
     }
-    Ok(())
+    let agent = crate::util::ureq_agent(SEND_HTTP_TIMEOUT);
+    retry_send(
+        &SendPolicy::default(),
+        token,
+        || classify_send(agent.post(&url).send_json(payload.clone())),
+        std::thread::sleep,
+    )
+}
+
+/// Per-attempt HTTP timeout for sendMessage. Generous because a read timeout is
+/// ambiguous (the message may already be posted) and is never retried.
+const SEND_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Retry policy for Telegram sends: a few attempts, exponential backoff, bounded total time.
+#[derive(Debug, Clone)]
+pub(crate) struct SendPolicy {
+    pub max_attempts: u32,
+    pub base_delay: Duration,
+    pub max_delay: Duration,
+    /// Upper bound on time spent sleeping between attempts.
+    pub max_total_sleep: Duration,
+}
+
+impl Default for SendPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 4,
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(8),
+            max_total_sleep: Duration::from_secs(30),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum SendOutcome {
+    Sent,
+    /// Not delivered: DNS/connect error, 5xx, 429 (optional retry_after).
+    Retry {
+        msg: String,
+        after: Option<Duration>,
+    },
+    /// Permanent or ambiguous (4xx, read timeout after send): do not retry.
+    Fatal(String),
+}
+
+pub(crate) fn classify_send(r: std::result::Result<ureq::Response, ureq::Error>) -> SendOutcome {
+    match r {
+        Ok(_) => SendOutcome::Sent,
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            classify_status(code, &body)
+        }
+        Err(ureq::Error::Transport(t)) => classify_transport(t.kind(), t.to_string()),
+    }
+}
+
+/// Retry only when the request clearly never reached Telegram (DNS / connect).
+/// I/O errors such as "timed out reading response" may follow a delivered
+/// message, so retrying them would double-post.
+pub(crate) fn classify_transport(kind: ureq::ErrorKind, msg: String) -> SendOutcome {
+    match kind {
+        ureq::ErrorKind::Dns | ureq::ErrorKind::ConnectionFailed => {
+            SendOutcome::Retry { msg, after: None }
+        }
+        _ => SendOutcome::Fatal(format!("{msg} (delivery unknown; not retried)")),
+    }
+}
+
+pub(crate) fn classify_status(code: u16, body: &str) -> SendOutcome {
+    let msg = format!(
+        "HTTP {code}: {}",
+        body.chars().take(300).collect::<String>()
+    );
+    if code == 429 {
+        let after = serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|v| {
+                v.pointer("/parameters/retry_after")
+                    .and_then(|n| n.as_u64())
+            })
+            .map(Duration::from_secs);
+        SendOutcome::Retry { msg, after }
+    } else if (500..600).contains(&code) {
+        SendOutcome::Retry { msg, after: None }
+    } else {
+        SendOutcome::Fatal(msg)
+    }
+}
+
+/// Run `attempt` until it succeeds, fails permanently, or the policy is exhausted.
+/// Returns the number of attempts on success, or the last error (redacted).
+pub(crate) fn retry_send(
+    policy: &SendPolicy,
+    token: &str,
+    mut attempt: impl FnMut() -> SendOutcome,
+    mut sleep: impl FnMut(Duration),
+) -> std::result::Result<u32, String> {
+    let mut slept = Duration::ZERO;
+    let mut n = 0u32;
+    loop {
+        n += 1;
+        match attempt() {
+            SendOutcome::Sent => {
+                if n > 1 {
+                    tracing::info!("telegram send succeeded on attempt {n}");
+                }
+                return Ok(n);
+            }
+            SendOutcome::Fatal(m) => {
+                let m = redact(&m, token);
+                tracing::warn!("telegram send failed (not retryable): {m}");
+                return Err(m);
+            }
+            SendOutcome::Retry { msg, after } => {
+                let m = redact(&msg, token);
+                let backoff = policy
+                    .base_delay
+                    .saturating_mul(1u32 << (n - 1).min(16))
+                    .min(policy.max_delay);
+                let delay = after.unwrap_or(backoff);
+                if n >= policy.max_attempts || slept + delay > policy.max_total_sleep {
+                    tracing::warn!("telegram send failed after {n} attempt(s): {m}");
+                    return Err(m);
+                }
+                tracing::warn!(
+                    "telegram send attempt {n}/{} failed: {m}; retrying in {:?}",
+                    policy.max_attempts,
+                    delay
+                );
+                sleep(delay);
+                slept += delay;
+            }
+        }
+    }
 }
 
 fn redact(s: &str, secret: &str) -> String {
@@ -322,6 +572,14 @@ pub async fn bot_loop(shared: Arc<Shared>) {
     }
 }
 
+/// Telegram long-poll timeout (seconds) passed to getUpdates.
+const LONG_POLL_SECS: u64 = 25;
+
+/// Client timeout for getUpdates: must exceed the long poll so an idle poll is not a "timeout".
+pub(crate) fn poll_http_timeout() -> Duration {
+    Duration::from_secs(LONG_POLL_SECS + 15)
+}
+
 fn poll_once(shared: &Shared) {
     let cfg = shared.config.read().unwrap().telegram.clone();
     let Some(token) = bot_token(&cfg) else {
@@ -335,12 +593,13 @@ fn poll_once(shared: &Shared) {
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(0);
     let url = format!(
-        "{}/bot{}/getUpdates?timeout=25&offset={}",
+        "{}/bot{}/getUpdates?timeout={}&offset={}",
         api_base(&cfg),
         token,
+        LONG_POLL_SECS,
         offset
     );
-    let agent = crate::util::ureq_agent(Duration::from_secs(40));
+    let agent = crate::util::ureq_agent(poll_http_timeout());
     let resp = match agent.get(&url).call() {
         Ok(r) => r,
         Err(e) => {
@@ -859,8 +1118,15 @@ pub fn assistant_reply(shared: &Shared, key: &str, run_id: i64, outcome: &str) -
 
 pub fn deliver_assistant_result(shared: &Shared, key: &str, run_id: i64, outcome: &str) {
     let cfg = shared.config.read().unwrap().telegram.clone();
-    for o in assistant_reply(shared, key, run_id, outcome) {
-        send_one(&cfg, o.chat_id, &o.text, o.markup);
+    for (i, o) in assistant_reply(shared, key, run_id, outcome)
+        .into_iter()
+        .enumerate()
+    {
+        if i == 0 && outcome == "success" {
+            send_one_markdown(&cfg, o.chat_id, &o.text, o.markup);
+        } else {
+            send_one(&cfg, o.chat_id, &o.text, o.markup);
+        }
     }
 }
 
@@ -2667,5 +2933,185 @@ cli = "/bin/true"
         assert_eq!(chat_from_assistant_key("tg-100"), Some(-100));
         assert!(is_assistant_key("tg42"));
         assert!(!is_assistant_key("acme-1"));
+    }
+
+    mod send_retry {
+        use super::super::*;
+        use std::time::Duration;
+
+        fn fast() -> SendPolicy {
+            SendPolicy::default()
+        }
+
+        #[test]
+        fn success_first_try_sends_once() {
+            let mut calls = 0;
+            let mut sleeps = vec![];
+            let r = retry_send(
+                &fast(),
+                "tok",
+                || {
+                    calls += 1;
+                    SendOutcome::Sent
+                },
+                |d| sleeps.push(d),
+            );
+            assert_eq!(r, Ok(1));
+            assert_eq!(calls, 1);
+            assert!(sleeps.is_empty());
+        }
+
+        #[test]
+        fn transient_then_success_with_backoff() {
+            let mut calls = 0;
+            let mut sleeps = vec![];
+            let r = retry_send(
+                &fast(),
+                "tok",
+                || {
+                    calls += 1;
+                    if calls < 3 {
+                        SendOutcome::Retry {
+                            msg: "timed out".into(),
+                            after: None,
+                        }
+                    } else {
+                        SendOutcome::Sent
+                    }
+                },
+                |d| sleeps.push(d),
+            );
+            assert_eq!(r, Ok(3));
+            assert_eq!(sleeps, vec![Duration::from_secs(1), Duration::from_secs(2)]);
+        }
+
+        #[test]
+        fn gives_up_after_max_attempts_and_redacts_token() {
+            let mut calls = 0;
+            let r = retry_send(
+                &fast(),
+                "SECRET",
+                || {
+                    calls += 1;
+                    SendOutcome::Retry {
+                        msg: "https://x/botSECRET/sendMessage timed out".into(),
+                        after: None,
+                    }
+                },
+                |_| {},
+            );
+            assert_eq!(calls, 4);
+            let e = r.unwrap_err();
+            assert!(!e.contains("SECRET"), "{e}");
+        }
+
+        #[test]
+        fn fatal_not_retried() {
+            let mut calls = 0;
+            let r = retry_send(
+                &fast(),
+                "t",
+                || {
+                    calls += 1;
+                    classify_status(400, r#"{"ok":false}"#)
+                },
+                |_| {},
+            );
+            assert!(r.is_err());
+            assert_eq!(calls, 1);
+        }
+
+        #[test]
+        fn honors_retry_after_and_total_bound() {
+            let o = classify_status(429, r#"{"ok":false,"parameters":{"retry_after":7}}"#);
+            assert!(
+                matches!(o, SendOutcome::Retry { after: Some(d), .. } if d == Duration::from_secs(7))
+            );
+            let mut sleeps = vec![];
+            let mut calls = 0;
+            let r = retry_send(
+                &fast(),
+                "t",
+                || {
+                    calls += 1;
+                    if calls == 1 {
+                        classify_status(429, r#"{"parameters":{"retry_after":7}}"#)
+                    } else {
+                        SendOutcome::Sent
+                    }
+                },
+                |d| sleeps.push(d),
+            );
+            assert_eq!(r, Ok(2));
+            assert_eq!(sleeps, vec![Duration::from_secs(7)]);
+            // retry_after beyond the total budget: give up without sleeping
+            let mut slept = false;
+            let r = retry_send(
+                &fast(),
+                "t",
+                || classify_status(429, r#"{"parameters":{"retry_after":120}}"#),
+                |_| slept = true,
+            );
+            assert!(r.is_err());
+            assert!(!slept);
+        }
+
+        #[test]
+        fn five_xx_is_retryable() {
+            assert!(matches!(
+                classify_status(502, "bad gateway"),
+                SendOutcome::Retry { .. }
+            ));
+            assert!(matches!(
+                classify_status(403, "forbidden"),
+                SendOutcome::Fatal(_)
+            ));
+        }
+
+        #[test]
+        fn read_timeout_is_not_retried_connect_is() {
+            let o = classify_transport(ureq::ErrorKind::Io, "timed out reading response".into());
+            assert!(matches!(o, SendOutcome::Fatal(_)));
+            let mut calls = 0;
+            let _ = retry_send(
+                &fast(),
+                "t",
+                || {
+                    calls += 1;
+                    classify_transport(ureq::ErrorKind::Io, "timed out reading response".into())
+                },
+                |_| {},
+            );
+            assert_eq!(calls, 1, "ambiguous read timeout must not double-send");
+            assert!(matches!(
+                classify_transport(ureq::ErrorKind::ConnectionFailed, "refused".into()),
+                SendOutcome::Retry { .. }
+            ));
+            assert!(matches!(
+                classify_transport(ureq::ErrorKind::Dns, "dns".into()),
+                SendOutcome::Retry { .. }
+            ));
+        }
+
+        #[test]
+        fn markdown_renders_to_telegram_html() {
+            let h = markdown_to_telegram_html(
+                "# Title\n**bold** and `a<b>` & [x](https://e.com)\n```\nfn x() -> i32 {}\n```",
+            );
+            assert_eq!(h, "<b>Title</b>\n<b>bold</b> and <code>a&lt;b&gt;</code> &amp; <a href=\"https://e.com\">x</a>\n<pre>\nfn x() -&gt; i32 {}\n</pre>");
+            assert_eq!(
+                markdown_to_telegram_html("2 * 3 ** x <tag>"),
+                "2 * 3 ** x &lt;tag&gt;"
+            );
+            assert_eq!(
+                markdown_to_telegram_html("```\nopen"),
+                "<pre>\nopen\n</pre>"
+            );
+        }
+
+        #[test]
+        fn poll_client_timeout_exceeds_long_poll() {
+            assert!(poll_http_timeout() > Duration::from_secs(LONG_POLL_SECS));
+        }
     }
 }
