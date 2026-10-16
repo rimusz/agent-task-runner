@@ -275,6 +275,7 @@ pub fn snapshot_period(
         "github_auth": crate::gh_token::status_json(&shared.config_path, chrono::Utc::now()),
         "telegram_health": crate::telegram_health::status_json(&cfg, &shared.config_path, chrono::Utc::now()),
         "repos": repos,
+        "telegram_assistant": telegram_assistant(&cfg, &shared.db),
         "running": running,
         "queued": queued,
         "finished": finished,
@@ -359,7 +360,8 @@ fn task_json_run(
 }
 
 /// Repos the dashboard lists: watched repos (a disabled-GitHub placeholder
-/// default is hidden), the shadow repo, and the Telegram assistant workspace.
+/// default is hidden) and the shadow repo. The Telegram assistant is reported
+/// separately by [`telegram_assistant`].
 /// `token_env` is the env var NAME that would be used, never its value.
 pub fn repo_rows(cfg: &Config, config_path: &std::path::Path) -> Vec<Value> {
     let token_env = |repo: &str| {
@@ -399,19 +401,60 @@ pub fn repo_rows(cfg: &Config, config_path: &std::path::Path) -> Vec<Value> {
             "token_env": env,
         }));
     }
-    if cfg.telegram.enabled && cfg.telegram.assistant.enabled {
-        out.push(json!({
-            "name": "assistant",
-            "enabled": true,
-            "mode": "assistant",
-            "github": "",
-            "label": "",
-            "path": cfg.worktree_root.join("_src").join("assistant").display().to_string(),
-            "shorthand": false,
-            "token_env": Value::Null,
-        }));
-    }
     out
+}
+
+/// The Telegram assistant as its own read-only block (not a repo): provider,
+/// workspace, chats and runs today, last activity. `null` when disabled.
+pub fn telegram_assistant(cfg: &Config, db: &crate::db::Db) -> Value {
+    if !(cfg.telegram.enabled && cfg.telegram.assistant.enabled) {
+        return Value::Null;
+    }
+    let tz = &cfg.display_timezone;
+    let now = crate::clock::Clock::system().now();
+    let day_start = start_of_local_day(tz, now);
+    let tasks: Vec<crate::db::Task> = db
+        .list_tasks()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| crate::telegram::is_assistant_key(&t.key))
+        .collect();
+    let runs_today: Vec<crate::db::RunRow> = db
+        .list_runs(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| crate::telegram::is_assistant_key(&r.task_key) && r.started >= day_start)
+        .collect();
+    let mut chats: Vec<&str> = runs_today.iter().map(|r| r.task_key.as_str()).collect();
+    chats.sort_unstable();
+    chats.dedup();
+    let last = tasks.iter().map(|t| t.updated.as_str()).max();
+    let provider = cfg.telegram.assistant.provider.trim();
+    json!({
+        "enabled": true,
+        "provider": if provider.is_empty() { None } else { Some(provider) },
+        "provider_display": if provider.is_empty() { "first available" } else { provider },
+        "workspace": cfg.worktree_root.join("_src").join("assistant").display().to_string(),
+        "chats_today": chats.len(),
+        "runs_today": runs_today.len(),
+        "chats_total": tasks.len(),
+        "last_activity": last.map(|e| tz.format_str(e)),
+    })
+}
+
+/// One-line text form shared by `atr status`.
+pub fn telegram_assistant_line(v: &Value) -> Option<String> {
+    if v.is_null() {
+        return None;
+    }
+    Some(format!(
+        "telegram assistant: provider {}, workspace {}, {} chats / {} runs today, last activity {}",
+        v["provider_display"].as_str().unwrap_or("-"),
+        v["workspace"].as_str().unwrap_or("-"),
+        v["chats_today"].as_u64().unwrap_or(0),
+        v["runs_today"].as_u64().unwrap_or(0),
+        v["last_activity"].as_str().unwrap_or("-"),
+    ))
 }
 
 fn health(
@@ -708,7 +751,7 @@ kind = "claude"
         .unwrap();
         let rows = repo_rows(&off, &dir.path().join("c.toml"));
         let modes: Vec<&str> = rows.iter().map(|r| r["mode"].as_str().unwrap()).collect();
-        assert_eq!(modes, ["shadow", "assistant"], "{rows:?}");
+        assert_eq!(modes, ["shadow"], "assistant is not a repo: {rows:?}");
         assert_eq!(rows[0]["github"], "TaskrApps/nixer-app");
         assert_eq!(rows[0]["token_env"], "ATR_SHADOW_GH_TOKEN");
         let on = crate::config::parse_config_toml(&base(
@@ -970,6 +1013,26 @@ kind = "claude"
         assert!(PAGE.contains("cached"));
         assert!(PAGE.contains("Telegram"));
         assert!(PAGE.contains("savingsRuns"));
+    }
+
+    #[test]
+    fn telegram_assistant_block_and_line() {
+        let (shared, _dir) = harness();
+        let mut cfg = shared.config.read().unwrap().clone();
+        assert!(telegram_assistant(&cfg, &shared.db).is_null());
+        assert_eq!(telegram_assistant_line(&Value::Null), None);
+        cfg.telegram.enabled = true;
+        cfg.telegram.assistant.enabled = true;
+        let v = telegram_assistant(&cfg, &shared.db);
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["provider_display"], "first available");
+        assert!(v["workspace"].as_str().unwrap().ends_with("assistant"));
+        let line = telegram_assistant_line(&v).unwrap();
+        assert!(
+            line.starts_with("telegram assistant: provider first available"),
+            "{line}"
+        );
+        assert!(line.contains("0 chats / 0 runs today"), "{line}");
     }
 
     #[test]

@@ -53,9 +53,11 @@ Both read `~/.config/atr/github-auth.json`, which the running service updates.
 The dashboard header shows `atr v<version> (<sha>)`, today's runs and success
 rate, and a compact health strip: `GitHub ok`, `Telegram ok`, `N CLIs ok` and
 uptime, with details (token expiry, CLI versions) on hover. A badge expands to
-show its problem only when it is amber or red (expiring token, missing CLI). Repos lists watched repos (`direct`), the shadow
-repo (`shadow`) and the Telegram assistant workspace (`assistant`), with the
-token env var NAME used; the top-level default repo is hidden while GitHub
+show its problem only when it is amber or red (expiring token, missing CLI). Repos lists watched repos (`direct`) and the shadow
+repo (`shadow`), with the token env var NAME used. The Telegram assistant is
+not a repo: it has its own line (`Telegram assistant: provider …, workspace …,
+N chats / M runs today, last activity …`), also in `atr status` and
+`dashboard.json` / `status --json` under `telegram_assistant`; the top-level default repo is hidden while GitHub
 intake is off. Finished rows link to `tasks/<key>/result`, show the finish
 time as `HH:MM` (full date on hover) and `provider / model`. Telegram assistant
 tasks (`tg<chat id>`) show as `Telegram` with the chat id on hover. Today shows

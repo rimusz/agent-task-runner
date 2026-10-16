@@ -397,6 +397,7 @@ impl Shared {
                 "max_parallel": cfg.shadow.max_parallel,
             },
             "repos": crate::dashboard::repo_rows(&cfg, &self.config_path),
+            "telegram_assistant": crate::dashboard::telegram_assistant(&cfg, &self.db),
             "tasks": tasks.iter().filter(|t| {
                 repo.map(|f| cfg.task_matches_repo(t, f)).unwrap_or(true)
             }).map(|t| json!({
@@ -1024,6 +1025,13 @@ pub fn format_status_table(shared: &Shared, repo: Option<&str>) -> String {
                 out.push_str(&format!("  {name}  en={en}  {gh}  {label}\n"));
             }
         }
+    }
+    if let Some(line) = v
+        .get("telegram_assistant")
+        .and_then(crate::dashboard::telegram_assistant_line)
+    {
+        out.push_str(&line);
+        out.push('\n');
     }
     out.push_str(&format!("running: {running}\n"));
     if let Some(sh) = v.get("shadow") {
