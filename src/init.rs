@@ -452,11 +452,8 @@ fn render_config(
                 "cli = \"{}\"\n",
                 escape(&cli.display().to_string())
             ));
-            if p.kind != "grok" {
-                if let Some(v) = &p.version {
-                    out.push_str(&format!("expected_version = \"{}\"\n", escape(v)));
-                }
-            }
+            // No expected_version: pins are optional (set one by hand only
+            // for a CLI release known to break atr).
         } else if p.kind != "opencode" {
             if let Some(kd) = kind_defaults(&p.kind) {
                 if let Some(name) = kd.cli_names.first() {
@@ -915,9 +912,9 @@ exit 0
         let c = names.iter().position(|n| *n == "claude").unwrap();
         let k = names.iter().position(|n| *n == "kimi").unwrap();
         assert!(c < k, "subscriptions first: {names:?}");
-        assert_eq!(
-            cfg.provider("claude").unwrap().expected_version.as_deref(),
-            Some("9.9.9")
+        assert!(
+            cfg.provider("claude").unwrap().expected_version.is_none(),
+            "init must not write version pins"
         );
         assert!(
             cfg.provider("grok").unwrap().expected_version.is_none(),

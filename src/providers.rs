@@ -959,6 +959,8 @@ pub async fn warn_versions_recorded(providers: &[Provider], config_path: Option<
 pub fn pin_label(v: &VersionCheck) -> &'static str {
     if v.keychain_locked {
         "unverified"
+    } else if v.expected.is_none() {
+        "none"
     } else if v.match_ok {
         "ok"
     } else {
@@ -1817,5 +1819,24 @@ mod tests {
         assert!((cost - 0.1268336).abs() < 1e-9, "cost={cost}");
         assert!(cost < 1.0);
         assert_eq!(GROK_TICKS_PER_USD, 1e10);
+    }
+
+    #[test]
+    fn pin_label_none_when_unpinned() {
+        let mut v = VersionCheck {
+            name: "c".into(),
+            cli: "/bin/true".into(),
+            ok_path: true,
+            version_text: Some("2.0".into()),
+            expected: None,
+            match_ok: true,
+            error: None,
+            keychain_locked: false,
+        };
+        assert_eq!(pin_label(&v), "none");
+        v.expected = Some("2.0".into());
+        assert_eq!(pin_label(&v), "ok");
+        v.match_ok = false;
+        assert_eq!(pin_label(&v), "MISMATCH");
     }
 }

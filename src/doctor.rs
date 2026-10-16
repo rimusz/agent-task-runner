@@ -152,11 +152,20 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
                 &mut checks,
                 &format!("cli {}", p.name),
                 Status::Ok,
-                format!(
-                    "{} pin={pin} {}",
-                    p.cli.display(),
-                    v.version_text.as_deref().unwrap_or("-")
-                ),
+                if v.expected.is_none() {
+                    // No pin configured: informational version only.
+                    format!(
+                        "{} version={}",
+                        p.cli.display(),
+                        v.version_text.as_deref().unwrap_or("-")
+                    )
+                } else {
+                    format!(
+                        "{} pin={pin} {}",
+                        p.cli.display(),
+                        v.version_text.as_deref().unwrap_or("-")
+                    )
+                },
                 None,
             );
         }
@@ -460,6 +469,11 @@ fn locked_pin_verdict(
     recorded: Option<(String, String, String)>,
 ) -> (Status, String, Option<String>) {
     match recorded {
+        Some((pin, ver, at)) if pin == "none" => (
+            Status::Ok,
+            format!("{cli} version={ver} (seen by service at {at})"),
+            None,
+        ),
         Some((pin, ver, at)) if pin == "ok" => (
             Status::Ok,
             format!("{cli} pin=ok {ver} (verified by service at {at})"),
@@ -1385,6 +1399,13 @@ cli = "/bin/true"
             token_api_verdict("ATR_GH_TOKEN", &probe(0, None), &ok, now).0,
             Status::Warn
         );
+    }
+
+    #[test]
+    fn locked_unpinned_shows_version_info() {
+        let (s, d, h) = locked_pin_verdict("/c", Some(("none".into(), "2.0".into(), "t".into())));
+        assert_eq!(s, Status::Ok);
+        assert!(d.contains("version=2.0") && h.is_none(), "{d}");
     }
 
     #[test]
