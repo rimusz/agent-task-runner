@@ -24,7 +24,7 @@ pre { white-space: pre-wrap; font: 12px/1.35 ui-monospace, monospace; background
 </style>
 </head>
 <body>
-<h1>atr</h1>
+<h1>atr <span class="meta" id="ver"></span></h1>
 <p class="meta" id="meta">loading…</p>
 <div id="ghauth" class="banner" hidden></div>
 <div id="tghealth" class="banner" hidden></div>
@@ -108,7 +108,10 @@ function paint(d) {
     tb.textContent = "Telegram: " + (th.message || "");
     tb.hidden = false;
   } else { tb.hidden = true; }
-  $("meta").textContent = (d.timezone || "") + " · " + (d.now || "") +
+  if (d.version) $("ver").textContent = "v" + d.version;
+  const now = d.now || "";
+  const tzPrefix = d.timezone && !now.includes(d.timezone) ? d.timezone + " · " : "";
+  $("meta").textContent = tzPrefix + now +
     " · " + (d.listen || "") + (d.intake_paused ? " · intake paused" : "") +
     (d.driver ? " · driver " + d.driver : "") + " · refresh 5s";
   const sel = $("repoFilter");

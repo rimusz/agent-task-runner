@@ -381,6 +381,7 @@ impl Shared {
             })
             .unwrap_or_else(|| json!({"headline_min_input": cfg.cache.headline_min_input}));
         json!({
+            "version": crate::VERSION,
             "listen": cfg.listen,
             "timezone": cfg.display_timezone.label,
             "quota_reset": top_reset.map(|t| cfg.display_timezone.format(t)),
@@ -1184,6 +1185,7 @@ cli = "/bin/true"
         assert!(line.contains("UTC"), "{line}");
         let status = shared.status_json();
         assert_eq!(status["timezone"], "UTC");
+        assert_eq!(status["version"], crate::VERSION);
         assert!(status["repos"].as_array().is_some_and(|a| !a.is_empty()));
         assert_eq!(status["tasks"][0]["repo"], "repo");
         std::mem::forget(dir);

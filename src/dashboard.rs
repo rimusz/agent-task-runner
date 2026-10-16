@@ -202,6 +202,7 @@ pub fn snapshot_period(
 
     json!({
         "ok": true,
+        "version": crate::VERSION,
         "now": tz.format(chrono::Utc::now()),
         "timezone": tz.label,
         "bind": cfg.dashboard.bind,
@@ -453,6 +454,16 @@ cli = "/bin/true"
             Some("<tailscale-ip>:7420".into())
         );
         assert_eq!(extra_bind("<tailscale-ip>:7420", "<tailscale-ip>"), None);
+    }
+
+    #[test]
+    fn snapshot_has_version_and_tz_once_in_meta() {
+        let (shared, _dir) = harness();
+        let snap = snapshot(&shared);
+        assert_eq!(snap["version"], crate::VERSION);
+        let html = include_str!("dashboard.html");
+        assert!(html.contains("id=\"ver\""));
+        assert!(html.contains("!now.includes(d.timezone)"));
     }
 
     #[test]
