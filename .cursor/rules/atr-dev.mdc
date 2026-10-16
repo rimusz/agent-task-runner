@@ -1,0 +1,5 @@
+---
+description: Developing the atr source (build, test, PR, release rule)
+alwaysApply: true
+---
+When changing this repository, follow `skills/atr-dev/SKILL.md` (also at `.cursor/skills/atr-dev/SKILL.md`) and `AGENTS.md`.
