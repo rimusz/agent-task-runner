@@ -452,8 +452,6 @@ fn render_config(
                 "cli = \"{}\"\n",
                 escape(&cli.display().to_string())
             ));
-            // No expected_version: pins are optional (set one by hand only
-            // for a CLI release known to break atr).
         } else if p.kind != "opencode" {
             if let Some(kd) = kind_defaults(&p.kind) {
                 if let Some(name) = kd.cli_names.first() {
@@ -913,12 +911,10 @@ exit 0
         let k = names.iter().position(|n| *n == "kimi").unwrap();
         assert!(c < k, "subscriptions first: {names:?}");
         assert!(
-            cfg.provider("claude").unwrap().expected_version.is_none(),
-            "init must not write version pins"
-        );
-        assert!(
-            cfg.provider("grok").unwrap().expected_version.is_none(),
-            "grok must not pin a stale expected_version"
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("expected_version"),
+            "init must not write expected_version"
         );
     }
 

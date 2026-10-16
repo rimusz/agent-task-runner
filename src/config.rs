@@ -501,6 +501,8 @@ pub struct RawProvider {
     pub enabled: bool,
     #[serde(default)]
     pub cli: String,
+    /// Removed feature (CLI version pins). Still accepted so old configs
+    /// load; ignored. Doctor prints a one-line note when present.
     #[serde(default)]
     pub expected_version: Option<String>,
     #[serde(default = "default_version_args")]
@@ -752,7 +754,8 @@ pub struct Provider {
     pub preset: String,
     pub enabled: bool,
     pub cli: PathBuf,
-    pub expected_version: Option<String>,
+    /// Old config still has `expected_version` (ignored; safe to delete).
+    pub legacy_expected_version: bool,
     pub version_args: Vec<String>,
     pub model: String,
     pub model_flag: String,
@@ -821,7 +824,7 @@ impl Provider {
             preset: String::new(),
             enabled: true,
             cli: PathBuf::from(name),
-            expected_version: None,
+            legacy_expected_version: false,
             version_args: vec!["--version".into()],
             model: "m".into(),
             model_flag: "--model".into(),
@@ -1827,7 +1830,10 @@ impl Config {
                 preset: p.preset.clone(),
                 enabled: p.enabled,
                 cli: resolve_cli(&p.kind, &p.cli),
-                expected_version: p.expected_version.filter(|s| !s.is_empty()),
+                legacy_expected_version: p
+                    .expected_version
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty()),
                 version_args: p.version_args,
                 model,
                 model_flag: fill_string(

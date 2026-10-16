@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::providers::{check_version, pin_label};
+use crate::providers::check_version;
 use serde::Serialize;
 use std::net::TcpListener;
 use std::path::Path;
@@ -114,7 +114,6 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
 
     for p in &cfg.providers {
         let v = check_version(p).await;
-        let pin = pin_label(&v);
         if !v.ok_path {
             push(
                 &mut checks,
@@ -124,27 +123,22 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
                 Some("install the CLI or set [[provider]] cli".into()),
             );
         } else if v.keychain_locked {
-            let (st, detail, hint) = locked_pin_verdict(
+            let (st, detail, hint) = locked_version_verdict(
                 &p.cli.display().to_string(),
-                crate::providers::recorded_pin(config_path, &p.name),
+                crate::providers::recorded_version(config_path, &p.name),
             );
             push(&mut checks, &format!("cli {}", p.name), st, detail, hint);
-        } else if !v.match_ok {
-            let hint = if v.error.as_deref().is_some_and(looks_like_auth_fail) {
+        } else if let Some(err) = v.error.as_deref() {
+            let hint = if looks_like_auth_fail(err) {
                 crate::presets::auth_login_hint(&p.kind).to_string()
             } else {
-                "update expected_version or the CLI".into()
+                format!("check that `{} --version` runs", p.cli.display())
             };
             push(
                 &mut checks,
                 &format!("cli {}", p.name),
                 Status::Warn,
-                format!(
-                    "{} pin={pin} expected={} found={}",
-                    p.cli.display(),
-                    v.expected.as_deref().unwrap_or("-"),
-                    v.version_text.as_deref().unwrap_or("-")
-                ),
+                format!("{} version unreadable: {err}", p.cli.display()),
                 Some(hint),
             );
         } else {
@@ -152,20 +146,11 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
                 &mut checks,
                 &format!("cli {}", p.name),
                 Status::Ok,
-                if v.expected.is_none() {
-                    // No pin configured: informational version only.
-                    format!(
-                        "{} version={}",
-                        p.cli.display(),
-                        v.version_text.as_deref().unwrap_or("-")
-                    )
-                } else {
-                    format!(
-                        "{} pin={pin} {}",
-                        p.cli.display(),
-                        v.version_text.as_deref().unwrap_or("-")
-                    )
-                },
+                format!(
+                    "{} {}",
+                    p.cli.display(),
+                    v.version_text.as_deref().unwrap_or("-")
+                ),
                 None,
             );
         }
@@ -175,6 +160,25 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
         if p.kind == "grok" && v.ok_path {
             grok_min_version_check(&mut checks, p, &v);
         }
+    }
+
+    let legacy: Vec<&str> = cfg
+        .providers
+        .iter()
+        .filter(|p| p.legacy_expected_version)
+        .map(|p| p.name.as_str())
+        .collect();
+    if !legacy.is_empty() {
+        push(
+            &mut checks,
+            "expected_version",
+            Status::Ok,
+            format!(
+                "ignored (CLI version pins were removed); safe to delete from [[provider]] {}",
+                legacy.join(", ")
+            ),
+            None,
+        );
     }
 
     if cache {
@@ -462,32 +466,22 @@ fn github_auth_checks(checks: &mut Vec<Check>, cfg: &Config, config_path: &Path)
     );
 }
 
-/// Keychain locked (doctor over SSH): use the pin `atr serve` recorded in its
-/// own session; if none, skip instead of warning.
-fn locked_pin_verdict(
+/// Keychain locked (doctor over SSH): show the version `atr serve` saw in
+/// its own session; if none, skip instead of warning.
+fn locked_version_verdict(
     cli: &str,
-    recorded: Option<(String, String, String)>,
+    recorded: Option<(String, String)>,
 ) -> (Status, String, Option<String>) {
     match recorded {
-        Some((pin, ver, at)) if pin == "none" => (
+        Some((ver, at)) if !ver.is_empty() => (
             Status::Ok,
-            format!("{cli} version={ver} (seen by service at {at})"),
+            format!("{cli} {ver} (seen by service at {at})"),
             None,
-        ),
-        Some((pin, ver, at)) if pin == "ok" => (
-            Status::Ok,
-            format!("{cli} pin=ok {ver} (verified by service at {at})"),
-            None,
-        ),
-        Some((pin, ver, at)) if pin == "MISMATCH" => (
-            Status::Warn,
-            format!("{cli} pin=MISMATCH found={ver} (service check at {at})"),
-            Some("update expected_version or the CLI".into()),
         ),
         _ => (
             Status::Ok,
             format!(
-                "{cli} pin skipped over SSH (keychain locked); service session verifies at start"
+                "{cli} version skipped over SSH (keychain locked); service session records it at start"
             ),
             None,
         ),
@@ -1402,39 +1396,51 @@ cli = "/bin/true"
     }
 
     #[test]
-    fn locked_unpinned_shows_version_info() {
-        let (s, d, h) = locked_pin_verdict("/c", Some(("none".into(), "2.0".into(), "t".into())));
+    fn locked_shows_service_version_or_skips() {
+        let (s, d, h) = locked_version_verdict("/c", Some(("2.0".into(), "t".into())));
         assert_eq!(s, Status::Ok);
-        assert!(d.contains("version=2.0") && h.is_none(), "{d}");
-    }
-
-    #[test]
-    fn locked_pin_uses_service_record_or_skips() {
-        let (s, d, _) = locked_pin_verdict("/c", Some(("ok".into(), "1.2".into(), "t".into())));
-        assert_eq!(s, Status::Ok);
-        assert!(d.contains("verified by service"));
-        assert_eq!(
-            locked_pin_verdict("/c", Some(("MISMATCH".into(), "1".into(), "t".into()))).0,
-            Status::Warn
+        assert!(
+            d.contains("/c 2.0 (seen by service at t)") && h.is_none(),
+            "{d}"
         );
-        let (s, d, h) = locked_pin_verdict("/c", None);
+        let (s, d, _) = locked_version_verdict("/c", None);
         assert_eq!(s, Status::Ok);
-        assert!(d.contains("skipped over SSH") && h.is_none());
+        assert!(d.contains("skipped over SSH"), "{d}");
+        assert!(!d.contains("pin"));
     }
 
     #[test]
-    fn recorded_pin_roundtrip() {
+    fn recorded_version_reads_new_then_legacy_file() {
         let dir = tempfile::tempdir().unwrap();
         let cp = dir.path().join("config.toml");
         std::fs::write(
-            crate::providers::pins_path(&cp),
+            dir.path().join("cli-pins.json"),
             r#"{"cursor":{"pin":"ok","version":"v1","checked_at":"t"}}"#,
         )
         .unwrap();
         assert_eq!(
-            crate::providers::recorded_pin(&cp, "cursor").unwrap().0,
-            "ok"
+            crate::providers::recorded_version(&cp, "cursor").unwrap().0,
+            "v1"
         );
-        assert!(crate::providers::recorded_pin(&cp, "x").is_none());
+        std::fs::write(
+            crate::providers::versions_path(&cp),
+            r#"{"cursor":{"version":"v2","checked_at":"t2"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::providers::recorded_version(&cp, "cursor").unwrap().0,
+            "v2"
+        );
+        assert!(crate::providers::recorded_version(&cp, "x").is_none());
+        assert!(crate::providers::versions_path(&cp).ends_with("cli-versions.json"));
+    }
+
+    #[test]
+    fn legacy_expected_version_is_accepted_and_flagged() {
+        let cfg = crate::config::parse_config_toml(
+            "[[provider]]\nname = \"claude\"\nkind = \"claude\"\ncli = \"/bin/true\"\nexpected_version = \"1.2.3\"\n",
+        )
+        .unwrap();
+        assert!(cfg.provider("claude").unwrap().legacy_expected_version);
     }
 }

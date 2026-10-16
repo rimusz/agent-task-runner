@@ -56,7 +56,7 @@ pub mod worktree;
 
 pub use app::{serve, serve_background, Shared, SubmitOpts, SubmitOutcome, EX_TEMPFAIL};
 pub use config::{default_config_path, load_config, Config};
-pub use providers::{new_session_uuid, pin_label};
+pub use providers::new_session_uuid;
 
 /// Release or Cargo version plus short git sha, e.g. `0.1.1 (abc1234)`.
 pub const VERSION: &str = env!("ATR_VERSION_LONG");

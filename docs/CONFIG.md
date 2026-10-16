@@ -130,13 +130,11 @@ atr repos enable website
 atr config migrate
 ```
 
-### CLI version pins (optional)
+### CLI versions
 
-`[[provider]] expected_version` is optional and not written by `atr init`.
-Without it, `atr doctor` shows `ok cli <name> version=<found>` as info. Set it
-only to hold a CLI that is known to break atr at a given release; doctor then
-warns `pin=MISMATCH` when the installed version doesn't contain it. Existing
-pins keep working; delete the line to stop the warnings after CLI auto-updates.
+atr does not pin CLI versions. `atr doctor` shows `ok cli <name> <path>
+<version>`. An old `[[provider]] expected_version` key is still accepted but
+ignored (doctor prints a one-line note); delete it.
 
 ### Notify hook
 

@@ -783,8 +783,6 @@ pub struct VersionCheck {
     pub cli: PathBuf,
     pub ok_path: bool,
     pub version_text: Option<String>,
-    pub expected: Option<String>,
-    pub match_ok: bool,
     pub error: Option<String>,
     pub keychain_locked: bool,
 }
@@ -797,8 +795,6 @@ pub async fn check_version(p: &Provider) -> VersionCheck {
             cli: p.cli.clone(),
             ok_path: false,
             version_text: None,
-            expected: p.expected_version.clone(),
-            match_ok: p.expected_version.is_none(),
             error: Some("cli path does not exist".into()),
             keychain_locked: false,
         };
@@ -817,22 +813,11 @@ pub async fn check_version(p: &Provider) -> VersionCheck {
                 String::from_utf8_lossy(&out.stderr)
             );
             let keychain_locked = looks_like_keychain_lock(&text);
-            // SSH / locked keychain: version is unverifiable, not a pin mismatch.
-            let match_ok = if keychain_locked {
-                true
-            } else {
-                match &p.expected_version {
-                    Some(exp) => text.contains(exp),
-                    None => true,
-                }
-            };
             VersionCheck {
                 name: p.name.clone(),
                 cli: p.cli.clone(),
                 ok_path: true,
                 version_text: Some(text.trim().to_string()),
-                expected: p.expected_version.clone(),
-                match_ok,
                 error: keychain_locked
                     .then(|| "keychain locked (SSH session), run inside the GUI session".into()),
                 keychain_locked,
@@ -845,8 +830,6 @@ pub async fn check_version(p: &Provider) -> VersionCheck {
                 cli: p.cli.clone(),
                 ok_path: true,
                 version_text: None,
-                expected: p.expected_version.clone(),
-                match_ok: keychain_locked,
                 error: Some(if keychain_locked {
                     "keychain locked (SSH session), run inside the GUI session".into()
                 } else {
@@ -860,31 +843,45 @@ pub async fn check_version(p: &Provider) -> VersionCheck {
             cli: p.cli.clone(),
             ok_path: true,
             version_text: None,
-            expected: p.expected_version.clone(),
-            match_ok: false,
             error: Some("version check timed out".into()),
             keychain_locked: false,
         },
     }
 }
 
-/// `cli-pins.json` next to config: pin results recorded by `atr serve` (which
+/// `cli-versions.json` next to config: CLI versions seen by `atr serve` (which
 /// runs in the session that can read the keychain) so `atr doctor` over SSH
-/// can report them instead of "unverified".
-pub fn pins_path(config_path: &std::path::Path) -> PathBuf {
+/// can show them.
+pub fn versions_path(config_path: &std::path::Path) -> PathBuf {
     config_path
         .parent()
-        .map(|d| d.join("cli-pins.json"))
-        .unwrap_or_else(|| PathBuf::from("cli-pins.json"))
+        .map(|d| d.join("cli-versions.json"))
+        .unwrap_or_else(|| PathBuf::from("cli-versions.json"))
 }
 
-/// Recorded service-side pin for `name`: `(pin, version, checked_at)`.
-pub fn recorded_pin(config_path: &std::path::Path, name: &str) -> Option<(String, String, String)> {
-    let v: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(pins_path(config_path)).ok()?).ok()?;
-    let e = v.get(name)?;
-    let s = |k: &str| e.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-    Some((s("pin"), s("version"), s("checked_at")))
+/// Pre-rename file name, still read for compatibility.
+fn legacy_versions_path(config_path: &std::path::Path) -> PathBuf {
+    versions_path(config_path).with_file_name("cli-pins.json")
+}
+
+/// Service-seen version for `name`: `(version, checked_at)`.
+pub fn recorded_version(config_path: &std::path::Path, name: &str) -> Option<(String, String)> {
+    for path in [
+        versions_path(config_path),
+        legacy_versions_path(config_path),
+    ] {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(e) = v.get(name) {
+            let s = |k: &str| e.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+            return Some((s("version"), s("checked_at")));
+        }
+    }
+    None
 }
 
 pub async fn warn_versions(providers: &[Provider]) {
@@ -903,7 +900,6 @@ pub async fn warn_versions_recorded(providers: &[Provider], config_path: Option<
             rec.insert(
                 p.name.clone(),
                 serde_json::json!({
-                    "pin": pin_label(&v),
                     "version": v.version_text.clone().unwrap_or_default(),
                     "checked_at": now,
                 }),
@@ -920,8 +916,7 @@ pub async fn warn_versions_recorded(providers: &[Provider], config_path: Option<
         if v.keychain_locked {
             tracing::warn!(
                 provider = %p.name,
-                expected = ?v.expected,
-                "CLI version unverified (keychain locked over SSH); continuing"
+                "CLI version unreadable (keychain locked over SSH); continuing"
             );
             continue;
         }
@@ -929,42 +924,16 @@ pub async fn warn_versions_recorded(providers: &[Provider], config_path: Option<
             tracing::warn!(provider = %p.name, %err, "could not read CLI version");
             continue;
         }
-        if !v.match_ok {
-            tracing::warn!(
-                provider = %p.name,
-                expected = ?v.expected,
-                found = ?v.version_text,
-                "CLI version does not contain the configured pin (continuing)"
-            );
-        } else {
-            tracing::info!(
-                provider = %p.name,
-                version = ?v.version_text,
-                "CLI version ok"
-            );
-        }
+        tracing::info!(provider = %p.name, version = ?v.version_text, "CLI version");
     }
     if let Some(cp) = config_path {
         if !rec.is_empty() {
-            let path = pins_path(cp);
+            let path = versions_path(cp);
             let tmp = path.with_extension("json.tmp");
             if std::fs::write(&tmp, serde_json::Value::Object(rec).to_string()).is_ok() {
                 let _ = std::fs::rename(&tmp, &path);
             }
         }
-    }
-}
-
-/// Doctor pin column: a locked keychain over SSH is `unverified`, not a failure.
-pub fn pin_label(v: &VersionCheck) -> &'static str {
-    if v.keychain_locked {
-        "unverified"
-    } else if v.expected.is_none() {
-        "none"
-    } else if v.match_ok {
-        "ok"
-    } else {
-        "MISMATCH"
     }
 }
 
@@ -1057,7 +1026,7 @@ mod tests {
             preset: String::new(),
             enabled: true,
             cli: PathBuf::from(kind),
-            expected_version: None,
+            legacy_expected_version: false,
             version_args: vec!["--version".into()],
             model: "m".into(),
             model_flag: if kind == "codex" {
@@ -1376,7 +1345,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_check_keychain_is_not_a_pin_mismatch() {
+    async fn version_check_detects_locked_keychain() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("cursor-agent");
         std::fs::write(
@@ -1391,14 +1360,8 @@ mod tests {
         }
         let mut p = stub("cursor");
         p.cli = script;
-        p.expected_version = Some("2026.10.01".into());
         let v = check_version(&p).await;
         assert!(v.keychain_locked);
-        assert!(
-            v.match_ok,
-            "locked keychain is unverified, not a pin mismatch"
-        );
-        assert_eq!(pin_label(&v), "unverified");
         assert_eq!(
             v.error.as_deref(),
             Some("keychain locked (SSH session), run inside the GUI session")
@@ -1819,24 +1782,5 @@ mod tests {
         assert!((cost - 0.1268336).abs() < 1e-9, "cost={cost}");
         assert!(cost < 1.0);
         assert_eq!(GROK_TICKS_PER_USD, 1e10);
-    }
-
-    #[test]
-    fn pin_label_none_when_unpinned() {
-        let mut v = VersionCheck {
-            name: "c".into(),
-            cli: "/bin/true".into(),
-            ok_path: true,
-            version_text: Some("2.0".into()),
-            expected: None,
-            match_ok: true,
-            error: None,
-            keychain_locked: false,
-        };
-        assert_eq!(pin_label(&v), "none");
-        v.expected = Some("2.0".into());
-        assert_eq!(pin_label(&v), "ok");
-        v.match_ok = false;
-        assert_eq!(pin_label(&v), "MISMATCH");
     }
 }

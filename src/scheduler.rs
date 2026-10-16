@@ -1804,7 +1804,7 @@ mod tests {
             preset: String::new(),
             enabled: true,
             cli: std::path::PathBuf::from(name),
-            expected_version: None,
+            legacy_expected_version: false,
             version_args: vec!["--version".into()],
             model: "m".into(),
             model_flag: "--model".into(),
