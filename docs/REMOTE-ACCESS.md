@@ -8,7 +8,7 @@ atr serves one HTTP listener (`listen`, default `127.0.0.1:7420`):
 
 | Path | Auth |
 |---|---|
-| `GET /`, `/dashboard.json`, `/health` (dashboard) | **None** (read-only) |
+| `GET /`, `/dashboard.json`, `/health`, `/tasks/<key>/result` (dashboard) | **None** (read-only) |
 | `GET /status`, `/tasks/<key>`, `/tasks/<key>/result` | **None** (read-only) |
 | `POST /tasks`, `/tasks/<key>/messages`, `/tasks/<key>/cancel`, `/hooks` | Bearer token |
 | `POST /mcp` | Bearer token |
@@ -72,7 +72,7 @@ enabled = true
 bind = "<tailscale-ip>"
 ```
 
-Or keep `listen` on loopback and set only `[dashboard] bind = "<tailscale-ip>"`: atr then adds a second, read-only listener on `<tailscale-ip>:7420` serving just `/`, `/dashboard.json` and `/health`, so task submit/cancel and `/mcp` stay on loopback.
+Or keep `listen` on loopback and set only `[dashboard] bind = "<tailscale-ip>"`: atr then adds a second, read-only listener on `<tailscale-ip>:7420` serving just `/`, `/dashboard.json`, `/health` and the read-only `/tasks/<key>/result` view, so task submit/cancel and `/mcp` stay on loopback.
 
 Restart with `atr service restart`. Trade-offs versus Serve:
 

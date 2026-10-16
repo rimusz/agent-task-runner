@@ -479,6 +479,7 @@ pub fn dashboard_only(shared: Arc<Shared>) -> Router {
         .route("/", get(dashboard_page))
         .route("/dashboard.json", get(dashboard_json))
         .route("/health", get(health))
+        .route("/tasks/:key/result", get(get_result))
         .with_state(shared)
 }
 
@@ -681,6 +682,14 @@ token_file = "/tmp/atr-mcp-missing.token"
             .send_string("{}")
             .unwrap_err();
         assert_eq!(status(err), 404);
+        let err = ureq::post(&format!("http://{addr}/tasks"))
+            .send_string("{}")
+            .unwrap_err();
+        assert_eq!(status(err), 404, "dashboard bind stays read-only");
+        let err = ureq::get(&format!("http://{addr}/tasks/nope/result"))
+            .call()
+            .unwrap_err();
+        assert_eq!(status(err), 404, "result view exists but task is unknown");
     }
 
     #[tokio::test(flavor = "multi_thread")]

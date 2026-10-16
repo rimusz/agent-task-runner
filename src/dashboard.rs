@@ -9,6 +9,13 @@ use serde_json::{json, Value};
 const PAGE: &str = include_str!("dashboard.html");
 const LOG_LINES: usize = 50;
 
+static STARTED: std::sync::OnceLock<chrono::DateTime<chrono::Utc>> = std::sync::OnceLock::new();
+
+/// Remember process start for the dashboard uptime badge (first call wins).
+pub fn mark_started() {
+    let _ = STARTED.set(chrono::Utc::now());
+}
+
 pub fn extra_bind(listen: &str, bind: &str) -> Option<String> {
     let bind = bind.trim();
     if bind.is_empty() || is_loopback_host(bind) {
@@ -85,7 +92,9 @@ pub fn snapshot_period(
         }
         let live = inflight.contains_key(&t.key) || t.status == "running";
         if live {
-            running.push(task_json(shared, &cfg, t, "running"));
+            let mut j = task_json(shared, &cfg, t, "running");
+            j["progress"] = json!(progress_for(shared, t, &secrets));
+            running.push(j);
         } else if t.status == "queued" {
             queued.push(task_json(shared, &cfg, t, "queued"));
         }
@@ -120,12 +129,40 @@ pub fn snapshot_period(
         } else {
             result.to_string()
         };
-        finished.push(task_json_run(&cfg, task, r, result, &reason));
+        let mut j = task_json_run(&cfg, task, r, result, &reason);
+        let (tokens, cost) = shared.db.run_totals(r.id).unwrap_or((0, None));
+        j["tokens"] = json!(tokens);
+        j["cost_usd"] = json!(cost);
+        j["finished_at"] = json!(r.ended.as_deref().map(|e| tz.format_str(e)));
+        j["ended_utc"] = json!(r.ended);
+        let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
+        j["prompt"] = json!(shared
+            .db
+            .run_prompt(&r.task_key, r.id)
+            .ok()
+            .flatten()
+            .map(|b| redact(&first_line(&b, 90), &refs))
+            .unwrap_or_default());
+        j["result_url"] = json!(format!("tasks/{}/result", r.task_key));
+        finished.push(j);
         if finished.len() >= 20 {
             break;
         }
     }
 
+    let since_5h =
+        (now - chrono::Duration::hours(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let since_7d =
+        (now - chrono::Duration::days(7)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let stats_5h = shared.db.provider_run_stats(&since_5h).unwrap_or_default();
+    let stats_7d = shared.db.provider_run_stats(&since_7d).unwrap_or_default();
+    let last_ok = shared.db.last_success_by_provider().unwrap_or_default();
+    let stat = |v: &[crate::db::ProviderRunStats], n: &str| {
+        v.iter()
+            .find(|s| s.provider == n)
+            .cloned()
+            .unwrap_or_default()
+    };
     let providers: Vec<Value> = cfg
         .providers
         .iter()
@@ -153,52 +190,75 @@ pub fn snapshot_period(
                 "enabled": enabled,
                 "cooling": cooling,
                 "usage": redact(&usage, &refs),
+                "model": p.model,
+                "version": crate::providers::recorded_version(&shared.config_path, &p.name).map(|(v, _)| v),
+                "last_success": last_ok.get(&p.name).map(|e| tz.format_str(e)),
+                "runs_5h": stat(&stats_5h, &p.name).runs,
+                "tokens_5h": stat(&stats_5h, &p.name).tokens,
+                "runs_7d": stat(&stats_7d, &p.name).runs,
+                "tokens_7d": stat(&stats_7d, &p.name).tokens,
             })
         })
         .collect();
 
     let today_day = tz.today();
-    let today: Vec<Value> = shared
+    let day_start = start_of_local_day(tz, now);
+    let usage_today: Vec<crate::db::UsageDay> = shared
         .db
         .usage_by_day_tz(1, tz)
         .unwrap_or_default()
         .into_iter()
         .filter(|row| row.day == today_day)
-        .map(|row| {
+        .collect();
+    let run_stats = shared.db.provider_run_stats(&day_start).unwrap_or_default();
+    let mut names: Vec<String> = run_stats.iter().map(|s| s.provider.clone()).collect();
+    for u in &usage_today {
+        if !names.contains(&u.provider) {
+            names.push(u.provider.clone());
+        }
+    }
+    let (mut runs_today, mut ok_today) = (0i64, 0i64);
+    let today: Vec<Value> = names
+        .iter()
+        .map(|name| {
+            let st = run_stats
+                .iter()
+                .find(|s| &s.provider == name)
+                .cloned()
+                .unwrap_or_default();
+            runs_today += st.runs;
+            ok_today += st.successes;
+            let u = usage_today.iter().find(|u| &u.provider == name);
             let kind = cfg
-                .provider(&row.provider)
+                .provider(name)
                 .map(|p| p.kind.as_str())
-                .unwrap_or(row.provider.as_str());
-            let hit = hit_ratio_from_sums(kind, row.input, row.cache_read, row.cache_write)
+                .unwrap_or(name.as_str());
+            let hit = u
+                .and_then(|u| hit_ratio_from_sums(kind, u.input, u.cache_read, u.cache_write))
                 .map(|h| format!("{:.0}%", h * 100.0))
                 .unwrap_or_else(|| "-".into());
             json!({
-                "provider": row.provider,
-                "day": row.day,
-                "input": row.input,
-                "output": row.output,
+                "provider": name,
+                "day": today_day,
+                "runs": st.runs,
+                "success": st.successes,
+                "cost_usd": st.cost_usd,
+                "input": u.map(|u| u.input).unwrap_or(0),
+                "output": u.map(|u| u.output).unwrap_or(0),
                 "hit": hit,
             })
         })
         .collect();
+    let stats_today = json!({
+        "runs": runs_today,
+        "success": ok_today,
+        "success_rate": (runs_today > 0).then(|| (ok_today as f64 / runs_today as f64 * 100.0).round()),
+    });
 
     let savings = crate::usage::report_filtered(shared, period, repo)
         .map(|r| r.to_json())
         .unwrap_or_else(|_| json!({"period": period.label(), "by_provider": [], "by_day": []}));
-    let repos: Vec<Value> = cfg
-        .effective_repos()
-        .iter()
-        .map(|r| {
-            json!({
-                "name": r.name,
-                "enabled": r.enabled,
-                "github": r.github,
-                "label": r.label,
-                "path": r.path.display().to_string(),
-                "shorthand": r.shorthand,
-            })
-        })
-        .collect();
+    let repos = repo_rows(&cfg, &shared.config_path);
 
     json!({
         "ok": true,
@@ -209,6 +269,8 @@ pub fn snapshot_period(
         "listen": cfg.listen,
         "intake_paused": shared.intake_paused.load(std::sync::atomic::Ordering::Relaxed),
         "driver": cfg.driver_name(),
+        "stats_today": stats_today,
+        "health": health(&cfg, &shared.config_path, now),
         "github_auth": crate::gh_token::status_json(&shared.config_path, chrono::Utc::now()),
         "telegram_health": crate::telegram_health::status_json(&cfg, &shared.config_path, chrono::Utc::now()),
         "repos": repos,
@@ -247,6 +309,7 @@ fn task_json(shared: &Shared, cfg: &Config, t: &crate::db::Task, state: &str) ->
         "provider": t.provider.clone().unwrap_or_else(|| "-".into()),
         "model": if model.is_empty() { "-".into() } else { model },
         "elapsed": format_elapsed(started),
+        "started_utc": started,
         "state": state,
         "result": Value::Null,
         "reason": Value::Null,
@@ -292,6 +355,148 @@ fn task_json_run(
         "role": task.map(|t| t.role.as_str()).unwrap_or("worker"),
         "title": task.map(|t| t.title.as_str()).unwrap_or(""),
     })
+}
+
+/// Repos the dashboard lists: watched repos (a disabled-GitHub placeholder
+/// default is hidden), the shadow repo, and the Telegram assistant workspace.
+/// `token_env` is the env var NAME that would be used, never its value.
+pub fn repo_rows(cfg: &Config, config_path: &std::path::Path) -> Vec<Value> {
+    let token_env = |repo: &str| {
+        crate::gh_token::resolve_for(cfg, Some(config_path), Some(repo)).map(|(k, _)| k)
+    };
+    let github_on = cfg.intake_allows(crate::task::SourceKind::Github);
+    let mut out = Vec::new();
+    for r in cfg.effective_repos() {
+        if r.shorthand && (!github_on || r.github.trim().is_empty()) {
+            continue;
+        }
+        out.push(json!({
+            "name": r.name,
+            "enabled": r.enabled,
+            "mode": "direct",
+            "github": r.github,
+            "label": r.label,
+            "path": r.path.display().to_string(),
+            "shorthand": r.shorthand,
+            "token_env": if r.github.is_empty() { None } else { token_env(&r.github) },
+        }));
+    }
+    if cfg.shadow.enabled && !cfg.shadow.repo.trim().is_empty() {
+        let env = if cfg.shadow.gh_token_env.trim().is_empty() {
+            token_env(&cfg.shadow.repo)
+        } else {
+            Some(cfg.shadow.gh_token_env.trim().to_string())
+        };
+        out.push(json!({
+            "name": cfg.shadow.repo.rsplit('/').next().unwrap_or(&cfg.shadow.repo),
+            "enabled": true,
+            "mode": "shadow",
+            "github": cfg.shadow.repo,
+            "label": "",
+            "path": cfg.shadow.repo_path.display().to_string(),
+            "shorthand": false,
+            "token_env": env,
+        }));
+    }
+    if cfg.telegram.enabled && cfg.telegram.assistant.enabled {
+        out.push(json!({
+            "name": "assistant",
+            "enabled": true,
+            "mode": "assistant",
+            "github": "",
+            "label": "",
+            "path": cfg.worktree_root.join("_src").join("assistant").display().to_string(),
+            "shorthand": false,
+            "token_env": Value::Null,
+        }));
+    }
+    out
+}
+
+fn health(
+    cfg: &Config,
+    config_path: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    let gh = crate::gh_token::status_json(config_path, now);
+    let tg = crate::telegram_health::status_json(cfg, config_path, now);
+    let clis: Vec<Value> = cfg
+        .providers
+        .iter()
+        .filter(|p| p.enabled)
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "version": crate::providers::recorded_version(config_path, &p.name).map(|(v, _)| v),
+                "present": p.cli.exists(),
+            })
+        })
+        .collect();
+    let uptime = STARTED
+        .get()
+        .map(|s| secs_human((now - *s).num_seconds().max(0) as u64));
+    json!({
+        "github": gh,
+        "telegram": {"enabled": cfg.telegram.enabled, "level": tg["level"], "message": tg["message"]},
+        "clis": clis,
+        "uptime": uptime,
+    })
+}
+
+fn start_of_local_day(tz: &crate::tz::DisplayTz, now: chrono::DateTime<chrono::Utc>) -> String {
+    let (h, m) = tz.now_local_hm();
+    let start = now
+        - chrono::Duration::minutes(i64::from(h) * 60 + i64::from(m))
+        - chrono::Duration::seconds(i64::from(chrono::Timelike::second(&now)));
+    start.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn first_line(body: &str, max: usize) -> String {
+    let line = body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if line.chars().count() > max {
+        format!("{}…", line.chars().take(max).collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
+
+/// One-line hint from the latest event of the task's open run.
+fn progress_for(shared: &Shared, t: &crate::db::Task, secrets: &[String]) -> String {
+    let Some(run) = shared
+        .db
+        .list_runs(Some(&t.key))
+        .ok()
+        .and_then(|rs| rs.into_iter().rev().find(|r| r.ended.is_none()))
+    else {
+        return String::new();
+    };
+    let Some(ev) = shared.db.last_event_for_run(run.id).ok().flatten() else {
+        return String::new();
+    };
+    let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
+    redact(&event_line(&ev.kind, &ev.raw), &refs)
+}
+
+fn event_line(kind: &str, raw: &str) -> String {
+    let v: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+    let pick = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| v.get(*k).and_then(Value::as_str))
+            .map(str::to_string)
+    };
+    let label =
+        pick(&["tool", "tool_name", "name", "subtype", "type"]).unwrap_or_else(|| kind.to_string());
+    let text = pick(&["text", "message", "summary", "description", "result"]).unwrap_or_default();
+    let text = first_line(&text, 100);
+    if text.is_empty() {
+        label
+    } else {
+        format!("{label}: {text}")
+    }
 }
 
 fn short_repo(repo: Option<&str>) -> String {
@@ -457,6 +662,83 @@ cli = "/bin/true"
     }
 
     #[test]
+    fn repo_rows_hide_placeholder_and_list_shadow_and_assistant() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = |extra: &str| {
+            format!(
+                r#"
+listen = "127.0.0.1:0"
+worktree_root = "/tmp/w"
+repo_path = "~/atr-scratch"
+task_key_prefix = "scratch"
+system_prompt_file = "/tmp/p.md"
+{extra}
+[[provider]]
+name = "claude"
+kind = "claude"
+"#
+            )
+        };
+        let off = crate::config::parse_config_toml(&base(
+            "[github]\nenabled = false\nrepo = \"owner/nixer\"\n[shadow]\nenabled = true\nrepo = \"TaskrApps/nixer-app\"\nrepo_path = \"/tmp/s\"\ngh_token_env = \"ATR_SHADOW_GH_TOKEN\"\n[telegram]\nenabled = true\n[telegram.assistant]\nenabled = true\n",
+        ))
+        .unwrap();
+        let rows = repo_rows(&off, &dir.path().join("c.toml"));
+        let modes: Vec<&str> = rows.iter().map(|r| r["mode"].as_str().unwrap()).collect();
+        assert_eq!(modes, ["shadow", "assistant"], "{rows:?}");
+        assert_eq!(rows[0]["github"], "TaskrApps/nixer-app");
+        assert_eq!(rows[0]["token_env"], "ATR_SHADOW_GH_TOKEN");
+        let on = crate::config::parse_config_toml(&base(
+            "[github]\nenabled = true\nrepo = \"acme/app\"\nlabel = \"for:atr\"\n",
+        ))
+        .unwrap();
+        let rows = repo_rows(&on, &dir.path().join("c.toml"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["mode"], "direct");
+        assert_eq!(rows[0]["github"], "acme/app");
+        assert!(!rows.iter().any(|r| r.to_string().contains("ghp_")));
+    }
+
+    #[test]
+    fn event_line_and_first_line() {
+        assert_eq!(
+            event_line("tool", r#"{"tool":"bash","text":"cargo test\nmore"}"#),
+            "bash: cargo test"
+        );
+        assert_eq!(event_line("assistant", "not json"), "assistant");
+        assert_eq!(first_line("\n  hello world\nx", 5), "hello…");
+    }
+
+    #[test]
+    fn snapshot_has_stats_health_and_finished_details() {
+        let (shared, _dir) = harness();
+        shared.db.upsert_task("fin-1", "/tmp/r", None).unwrap();
+        let run = shared.db.start_run("fin-1", "claude", "opus").unwrap();
+        shared.db.finish_run(run, "success", Some(0)).unwrap();
+        let snap = snapshot(&shared);
+        assert_eq!(snap["stats_today"]["runs"], 1);
+        assert_eq!(snap["stats_today"]["success_rate"], 100.0);
+        assert!(snap["health"]["clis"].is_array());
+        let f = &snap["finished"][0];
+        assert_eq!(f["result_url"], "tasks/fin-1/result");
+        assert!(f["finished_at"].is_string());
+        assert_eq!(snap["today"][0]["runs"], 1);
+        assert_eq!(snap["providers"][0]["runs_7d"], 1);
+        let html = include_str!("dashboard.html");
+        for needle in [
+            "cache hit %",
+            "no pricing",
+            "statusFilter",
+            "windowFilter",
+            "th.sortable",
+            "tr.total",
+            "<title>",
+        ] {
+            assert!(html.contains(needle), "{needle}");
+        }
+    }
+
+    #[test]
     fn snapshot_has_version_and_tz_once_in_meta() {
         let (shared, _dir) = harness();
         let snap = snapshot(&shared);
@@ -519,7 +801,12 @@ cli = "/bin/true"
         let queued = v["queued"].as_array().unwrap();
         assert!(queued.iter().any(|t| t["key"] == "acme-1"), "{v}");
         assert_eq!(queued[0]["repo"], "my-repo");
-        assert!(v["repos"].as_array().is_some_and(|a| !a.is_empty()), "{v}");
+        assert!(
+            v["repos"]
+                .as_array()
+                .is_some_and(|a| a.iter().all(|r| r["shorthand"] != true)),
+            "{v}"
+        );
         let finished = v["finished"].as_array().unwrap();
         assert!(
             finished

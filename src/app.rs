@@ -63,6 +63,7 @@ impl Shared {
     }
 
     pub fn from_config(config_path: PathBuf, config: Config) -> Result<Arc<Self>> {
+        crate::dashboard::mark_started();
         let db = Db::open(&config.state_db)?;
         let paused = db.meta_get("intake_paused").ok().flatten().as_deref() == Some("1");
         Ok(Arc::new(Shared {
@@ -395,15 +396,7 @@ impl Shared {
                 "inflight": inflight.values().filter(|i| i.shadow).count(),
                 "max_parallel": cfg.shadow.max_parallel,
             },
-            "repos": cfg.effective_repos().iter().map(|r| json!({
-                "name": r.name,
-                "enabled": r.enabled,
-                "github": r.github,
-                "label": r.label,
-                "path": r.path.display().to_string(),
-                "max_parallel": r.max_parallel,
-                "shorthand": r.shorthand,
-            })).collect::<Vec<_>>(),
+            "repos": crate::dashboard::repo_rows(&cfg, &self.config_path),
             "tasks": tasks.iter().filter(|t| {
                 repo.map(|f| cfg.task_matches_repo(t, f)).unwrap_or(true)
             }).map(|t| json!({
@@ -1186,7 +1179,10 @@ cli = "/bin/true"
         let status = shared.status_json();
         assert_eq!(status["timezone"], "UTC");
         assert_eq!(status["version"], crate::VERSION);
-        assert!(status["repos"].as_array().is_some_and(|a| !a.is_empty()));
+        // github intake off: placeholder default repo hidden
+        assert!(status["repos"]
+            .as_array()
+            .is_some_and(|a| a.iter().all(|r| r["shorthand"] != true)));
         assert_eq!(status["tasks"][0]["repo"], "repo");
         std::mem::forget(dir);
     }

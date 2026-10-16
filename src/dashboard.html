@@ -21,19 +21,30 @@ pre { white-space: pre-wrap; font: 12px/1.35 ui-monospace, monospace; background
 .banner { padding: .5rem .75rem; border-radius: 6px; margin: .5rem 0; font-weight: 600; }
 .banner.fail { background: #c443; border: 1px solid #c44; }
 .banner.warn { background: #c803; border: 1px solid #c80; }
+.badges { display: flex; flex-wrap: wrap; gap: .35rem; margin: .4rem 0; }
+.badge { font-size: .8rem; padding: .1rem .5rem; border-radius: 999px; border: 1px solid #8884; }
+.badge.ok { border-color: #2a7; } .badge.warn { border-color: #c80; } .badge.fail { border-color: #c44; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { text-decoration: underline; }
+tr.total td { font-weight: 700; border-top: 2px solid #8886; }
+.bar { display: inline-block; height: .55rem; background: #3a8; border-radius: 2px; vertical-align: middle; margin-right: .3rem; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+abbr { cursor: help; }
+a { color: inherit; }
 </style>
 </head>
 <body>
 <h1>atr <span class="meta" id="ver"></span></h1>
 <p class="meta" id="meta">loading…</p>
+<p class="meta" id="stats"></p>
+<div class="badges" id="health"></div>
 <div id="ghauth" class="banner" hidden></div>
 <div id="tghealth" class="banner" hidden></div>
 <p class="meta">
-  <label>repo
-    <select id="repoFilter">
-      <option value="">all</option>
-    </select>
-  </label>
+  <label>repo <select id="repoFilter"><option value="">all</option></select></label>
+  <label>status <select id="statusFilter"><option value="">all</option><option>success</option><option>failed</option><option>cancelled</option><option>running</option><option>queued</option></select></label>
+  <label>provider <select id="providerFilter"><option value="">all</option></select></label>
+  <label>window <select id="windowFilter"><option value="">all</option><option value="1">1h</option><option value="24">24h</option><option value="168">7d</option></select></label>
 </p>
 <h2>Repos</h2>
 <div id="repos"></div>
@@ -72,28 +83,88 @@ pre { white-space: pre-wrap; font: 12px/1.35 ui-monospace, monospace; background
 
 <script>
 const $ = id => document.getElementById(id);
+const sortState = {};
+let last = null;
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 }
-function rows(headers, items, cells) {
-  if (!items || !items.length) return '<p class="empty">(none)</p>';
-  let h = "<table><thead><tr>" + headers.map(x => "<th>"+esc(x)+"</th>").join("") + "</tr></thead><tbody>";
-  for (const it of items) h += "<tr>" + cells(it).map(x => "<td>"+x+"</td>").join("") + "</tr>";
+function num(n) {
+  if (n === null || n === undefined || n === "" || isNaN(Number(n))) return esc(n ?? "-");
+  return Number(n).toLocaleString("en-US");
+}
+function usd(n) { return n == null ? "-" : "$" + Number(n).toFixed(4); }
+// headers: string or {t: label, tip: tooltip, num: true}
+function rows(id, headers, items, cells, totalRow) {
+  if ((!items || !items.length) && !totalRow) return '<p class="empty">(none)</p>';
+  const hs = headers.map(h => typeof h === "string" ? {t: h} : h);
+  let h = '<table data-id="' + id + '"><thead><tr>' + hs.map((x, i) =>
+    '<th class="sortable' + (x.num ? ' num' : '') + '" data-col="' + i + '"' + (x.tip ? ' title="' + esc(x.tip) + '"' : '') + '>' +
+    (x.tip ? '<abbr>' + esc(x.t) + '</abbr>' : esc(x.t)) + "</th>").join("") + "</tr></thead><tbody>";
+  const cellHtml = (cs) => cs.map((x, i) => '<td' + (hs[i] && hs[i].num ? ' class="num"' : '') + '>' + x + "</td>").join("");
+  const body = (items || []).map(it => ({html: cellHtml(cells(it)), key: cells(it).map(c => String(c).replace(/<[^>]*>/g, ""))}));
+  const st = sortState[id];
+  if (st) {
+    body.sort((a, b) => {
+      const x = a.key[st.col] ?? "", y = b.key[st.col] ?? "";
+      const nx = parseFloat(x.replace(/[$,%]/g, "")), ny = parseFloat(y.replace(/[$,%]/g, ""));
+      const c = (!isNaN(nx) && !isNaN(ny)) ? nx - ny : x.localeCompare(y);
+      return st.dir * c;
+    });
+  }
+  for (const r of body) h += "<tr>" + r.html + "</tr>";
+  if (totalRow) h += '<tr class="total">' + cellHtml(cells(totalRow)) + "</tr>";
   return h + "</tbody></table>";
 }
+document.addEventListener("click", e => {
+  const th = e.target.closest("th.sortable");
+  if (!th) return;
+  const id = th.closest("table").dataset.id, col = Number(th.dataset.col);
+  const cur = sortState[id];
+  sortState[id] = {col, dir: cur && cur.col === col ? -cur.dir : 1};
+  if (last) paint(last);
+});
 function cls(state) {
   const s = String(state || "").toLowerCase();
-  if (s === "success" || s === "waiting") return "ok";
-  if (s === "failed" || s === "cancelled" || s === "verify_failed") return "fail";
+  if (s === "success" || s === "waiting" || s === "ok") return "ok";
+  if (s === "failed" || s === "cancelled" || s === "verify_failed" || s === "fail") return "fail";
   if (s) return "warn";
   return "";
 }
-function taskCells(t) {
-  return [esc(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.parent || "-"),
-    esc(t.provider), esc(t.model), esc(t.elapsed),
-    '<span class="'+cls(t.state)+'">'+esc(t.state)+"</span>"];
+function elapsedSince(iso) {
+  const t = Date.parse(iso || "");
+  if (isNaN(t)) return "-";
+  let s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); s = s % 60;
+  return (h ? h + "h " : "") + (h || m ? m + "m " : "") + s + "s";
 }
+function inWindow(iso) {
+  const w = Number($("windowFilter").value);
+  if (!w) return true;
+  const t = Date.parse(iso || "");
+  return !isNaN(t) && Date.now() - t <= w * 3600 * 1000;
+}
+function keep(t, state, iso) {
+  const sf = $("statusFilter").value, pf = $("providerFilter").value;
+  if (sf && sf !== state) return false;
+  if (pf && pf !== t.provider) return false;
+  return inWindow(iso);
+}
+function badge(level, text, tip) {
+  return '<span class="badge ' + cls(level) + '"' + (tip ? ' title="' + esc(tip) + '"' : '') + '>' + esc(text) + '</span>';
+}
+function setOptions(sel, names) {
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">all</option>' + names.map(n =>
+    '<option value="'+esc(n)+'"'+(n===cur?' selected':'')+'>'+esc(n)+'</option>').join('');
+}
+const SAV_TIPS = {
+  headline: "cache hit % over runs with at least the minimum input tokens (the number to watch)",
+  first: "first run of a task: cold cache expected",
+  resume: "resumed runs (follow-ups, retries): should hit the cache well",
+  short: "short runs below the minimum input; excluded from the headline",
+};
 function paint(d) {
+  last = d;
   const ga = d.github_auth || {};
   const gb = $("ghauth");
   if (ga.level === "fail" || ga.level === "warn") {
@@ -114,48 +185,79 @@ function paint(d) {
   $("meta").textContent = tzPrefix + now +
     " · " + (d.listen || "") + (d.intake_paused ? " · intake paused" : "") +
     (d.driver ? " · driver " + d.driver : "") + " · refresh 5s";
-  const sel = $("repoFilter");
-  const cur = sel.value;
-  const names = (d.repos || []).map(r => r.name).filter(Boolean);
-  sel.innerHTML = '<option value="">all</option>' + names.map(n =>
-    '<option value="'+esc(n)+'"'+(n===cur?' selected':'')+'>'+esc(n)+'</option>').join('');
-  $("repos").innerHTML = rows(["name","enabled","github","label"], d.repos, r => [
-    esc(r.name), r.enabled ? "yes" : "no", esc(r.github || "-"), esc(r.label || "-")
+  const st = d.stats_today || {};
+  $("stats").textContent = "today: " + num(st.runs || 0) + " runs · " +
+    (st.success_rate == null ? "no finished runs" : st.success_rate + "% success (" + num(st.success || 0) + ")");
+  const hl = d.health || {};
+  let hb = "";
+  const toks = (hl.github && hl.github.tokens) || [];
+  if (toks.length) toks.forEach(t => hb += badge(t.level, "GitHub " + (t.owner || t.token_env || "token") + (t.days_left != null ? " " + t.days_left + "d" : ""), t.message));
+  else if (hl.github) hb += badge(hl.github.level, "GitHub " + (hl.github.level || "?"), hl.github.message);
+  if (hl.telegram && hl.telegram.enabled) hb += badge(hl.telegram.level, "Telegram " + (hl.telegram.level || "?"), hl.telegram.message);
+  (hl.clis || []).forEach(c => hb += badge(c.present ? "ok" : "fail", c.name + " " + (c.version || (c.present ? "" : "missing")), c.version || ""));
+  if (hl.uptime) hb += badge("ok", "up " + hl.uptime, "service uptime");
+  $("health").innerHTML = hb;
+  setOptions($("repoFilter"), (d.repos || []).filter(r => r.mode === "direct").map(r => r.name).filter(Boolean));
+  setOptions($("providerFilter"), (d.providers || []).map(p => p.name));
+  $("repos").innerHTML = rows("repos", ["name","mode","github","label",{t:"token env",tip:"env var used for GitHub (name only, never the value)"},"path"], d.repos, r => [
+    esc(r.name) + (r.enabled ? "" : ' <span class="warn">(disabled)</span>'), esc(r.mode), esc(r.github || "-"), esc(r.label || "-"), esc(r.token_env || "-"), esc(r.path || "-")
   ]);
-  $("running").innerHTML = rows(["key","repo","role","parent","provider","model","elapsed","state"], d.running, taskCells);
-  $("queued").innerHTML = rows(["key","repo","role","parent","provider","model","elapsed","state"], d.queued, taskCells);
-  $("finished").innerHTML = rows(["key","repo","role","parent","provider","model","elapsed","result","reason"], d.finished, t => [
-    esc(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.parent || "-"),
-    esc(t.provider), esc(t.model), esc(t.elapsed),
+  const run = (d.running || []).filter(t => keep(t, "running", t.started_utc));
+  $("running").innerHTML = rows("running", ["key","repo","role","provider / model","elapsed","progress"], run, t => [
+    esc(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.provider) + " / " + esc(t.model),
+    '<span class="live" data-since="' + esc(t.started_utc) + '">' + elapsedSince(t.started_utc) + '</span>', esc(t.progress || "-")
+  ]);
+  const q = (d.queued || []).filter(t => keep(t, "queued", t.started_utc));
+  $("queued").innerHTML = rows("queued", ["key","repo","role","parent","provider","model","waiting"], q, t => [
+    esc(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.parent || "-"), esc(t.provider), esc(t.model), esc(t.elapsed)
+  ]);
+  const fin = (d.finished || []).filter(t => keep(t, t.result, t.ended_utc));
+  $("finished").innerHTML = rows("finished", ["finished","key","prompt","repo","provider","model","elapsed",{t:"tokens",num:true},{t:"cost",num:true,tip:"as reported by the CLI"},"result","reason"], fin, t => [
+    esc(t.finished_at || "-"), '<a href="' + esc(t.result_url) + '" title="result / diff">' + esc(t.key) + '</a>', esc(t.prompt || t.title || "-"),
+    esc(t.repo), esc(t.provider), esc(t.model), esc(t.elapsed), t.tokens ? num(t.tokens) : "-", usd(t.cost_usd),
     '<span class="'+cls(t.result)+'">'+esc(t.result)+"</span>", esc(t.reason)
   ]);
-  $("providers").innerHTML = rows(["#","name","enabled","cooldown","usage"], d.providers, p => [
-    esc(p.order), esc(p.name), p.enabled ? "yes" : "no",
-    p.cooling ? '<span class="warn">cooldown</span>' : "—", esc(p.usage)
+  const max5 = Math.max(1, ...(d.providers || []).map(p => Number(p.tokens_5h) || 0));
+  const max7 = Math.max(1, ...(d.providers || []).map(p => Number(p.tokens_7d) || 0));
+  const bar = (v, m) => '<span class="bar" style="width:' + Math.round((Number(v) || 0) / m * 60) + 'px"></span>';
+  $("providers").innerHTML = rows("providers", ["#","name","enabled","version","model",
+    {t:"5h",tip:"atr-side runs / tokens in the last 5 hours"},{t:"7d",tip:"atr-side runs / tokens in the last 7 days"},"last success","cooldown",{t:"usage",tip:"limits reported by the CLI, when it exposes them"}], d.providers, p => [
+    esc(p.order), esc(p.name), p.enabled ? "yes" : "no", esc(p.version || "-"), esc(p.model || "default"),
+    bar(p.tokens_5h, max5) + num(p.runs_5h) + " runs · " + num(p.tokens_5h),
+    bar(p.tokens_7d, max7) + num(p.runs_7d) + " runs · " + num(p.tokens_7d),
+    esc(p.last_success || "-"), p.cooling ? '<span class="warn">cooldown</span>' : "—", esc(p.usage)
   ]);
-  $("today").innerHTML = rows(["provider","day","input","output","hit%"], d.today, r => [
-    esc(r.provider), esc(r.day), esc(r.input), esc(r.output), esc(r.hit)
-  ]);
+  const today = d.today || [];
+  const sum = k => today.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+  const costs = today.filter(r => r.cost_usd != null);
+  const tTotal = today.length ? {provider: "total", runs: sum("runs"), success: sum("success"), input: sum("input"), output: sum("output"),
+    cost_usd: costs.length ? costs.reduce((a, r) => a + r.cost_usd, 0) : null, hit: ""} : null;
+  $("today").innerHTML = rows("today", ["provider",{t:"runs",num:true},{t:"success",num:true},{t:"input",num:true},{t:"output",num:true},{t:"cost",num:true},
+    {t:"cache hit %",tip:"share of input tokens served from the provider's prompt cache today"}], today, r => [
+    esc(r.provider), num(r.runs), num(r.success), num(r.input), num(r.output), usd(r.cost_usd), esc(r.hit)
+  ], tTotal);
   const sav = d.savings || {};
   let meta = (sav.period || "") + " " + (sav.from || "") + ".." + (sav.to || "") +
     (sav.timezone ? " (" + sav.timezone + ")" : "");
+  let metaHtml = esc(meta);
   if (sav.headline) {
     const min = sav.headline_min_input != null ? sav.headline_min_input : 40000;
     const hit = r => (r && r.hit != null) ? r.hit : "-";
     const runs = r => (r && r.runs != null) ? r.runs : 0;
-    meta += " · headline " + hit(sav.headline) + " (" + runs(sav.headline) + " runs ≥ " + min +
-      " tokens) · first-run " + hit(sav.first_run) + " · resume " + hit(sav.resume) +
-      " · short " + hit(sav.short) + " (" + runs(sav.short) + " excluded)";
+    const tip = (k, t) => '<abbr title="' + esc(SAV_TIPS[k]) + '">' + esc(t) + '</abbr>';
+    metaHtml += " · " + tip("headline", "headline") + " " + esc(hit(sav.headline)) + " (" + num(runs(sav.headline)) + " runs ≥ " + num(min) +
+      " tokens) · " + tip("first", "first-run") + " " + esc(hit(sav.first_run)) + " · " + tip("resume", "resume") + " " + esc(hit(sav.resume)) +
+      " · " + tip("short", "short") + " " + esc(hit(sav.short)) + " (" + num(runs(sav.short)) + ' <abbr title="short runs are left out of the headline">excluded</abbr>)';
   }
-  $("savingsMeta").textContent = meta;
-  const items = (sav.by_provider || []).concat(sav.total ? [sav.total] : []);
-  $("savings").innerHTML = rows(
-    ["provider","input","cached","cache write","output","hit%","tokens saved","est. $ saved"],
-    items,
+  $("savingsMeta").innerHTML = metaHtml;
+  $("savings").innerHTML = rows("savings",
+    ["provider",{t:"input",num:true},{t:"cached",num:true},{t:"cache write",num:true},{t:"output",num:true},
+     {t:"cache hit %",tip:"cached / (input + cached + cache write)"},{t:"tokens saved",num:true},{t:"est. $ saved",num:true,tip:"from built-in list prices; 'no pricing' when the model has none"}],
+    sav.by_provider || [],
     r => [
-      esc(r.provider), esc(r.input), esc(r.cached), esc(r.cache_write), esc(r.output),
-      esc(r.hit), esc(r.tokens_saved), r.saved_usd == null ? "—" : "$" + Number(r.saved_usd).toFixed(4)
-    ]
+      esc(r.provider), num(r.input), num(r.cached), num(r.cache_write), num(r.output),
+      esc(r.hit), num(r.tokens_saved), r.saved_usd == null ? '<span class="empty">no pricing</span>' : "$" + Number(r.saved_usd).toFixed(4)
+    ], sav.total || null
   );
   $("chart").innerHTML = bars(sav.by_day || []);
   $("chart").className = (sav.by_day && sav.by_day.length) ? "" : "empty";
@@ -165,20 +267,24 @@ function paint(d) {
 }
 function bars(days) {
   if (!days.length) return '<p class="empty">(none)</p>';
-  const w = 640, h = 88, pad = 18;
+  const w = 640, h = 104, pad = 44, top = 10, bottom = 30;
   const max = Math.max(1, ...days.map(d => Number(d.tokens_saved) || 0));
-  const bw = (w - pad * 2) / days.length;
+  const bw = (w - pad - 8) / days.length;
   let s = '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="' + h +
     '" role="img" aria-label="tokens saved by caching per day">';
+  s += '<text x="2" y="' + (top + 4) + '" font-size="8">' + num(max) + '</text>';
+  s += '<text x="2" y="' + (h - bottom) + '" font-size="8">0</text>';
+  s += '<text x="' + (w / 2) + '" y="' + (h - 2) + '" text-anchor="middle" font-size="8">day · tokens saved by caching</text>';
   days.forEach((d, i) => {
     const v = Number(d.tokens_saved) || 0;
-    const bh = (v / max) * (h - 28);
+    const bh = (v / max) * (h - top - bottom);
     const x = pad + i * bw;
-    const y = h - 16 - bh;
+    const y = h - bottom - bh;
     s += '<rect x="' + (x + 1).toFixed(1) + '" y="' + y.toFixed(1) + '" width="' +
-      Math.max(1, bw - 2).toFixed(1) + '" height="' + Math.max(0, bh).toFixed(1) + '" fill="#3a8"/>';
+      Math.max(1, bw - 2).toFixed(1) + '" height="' + Math.max(0, bh).toFixed(1) + '" fill="#3a8"><title>' +
+      esc(d.day) + ": " + num(v) + ' tokens saved</title></rect>';
     if (days.length <= 14 || i % Math.ceil(days.length / 7) === 0) {
-      s += '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (h - 3) +
+      s += '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (h - bottom + 10) +
         '" text-anchor="middle" font-size="8">' + esc(String(d.day || "").slice(5)) + "</text>";
     }
   });
@@ -206,10 +312,9 @@ async function tick() {
     $("meta").textContent = "dashboard unavailable: " + e;
   }
 }
-$("period").addEventListener("change", tick);
-$("from").addEventListener("change", tick);
-$("to").addEventListener("change", tick);
-$("repoFilter").addEventListener("change", tick);
+["period","from","to","repoFilter"].forEach(id => $(id).addEventListener("change", tick));
+["statusFilter","providerFilter","windowFilter"].forEach(id => $(id).addEventListener("change", () => last && paint(last)));
+setInterval(() => document.querySelectorAll(".live").forEach(el => el.textContent = elapsedSince(el.dataset.since)), 1000);
 tick();
 setInterval(tick, 5000);
 </script>
