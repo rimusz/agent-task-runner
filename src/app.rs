@@ -1,7 +1,7 @@
 use crate::config::{load_config, Config};
 use crate::db::Db;
 use crate::http;
-use crate::providers::{check_version, hit_ratio_from_sums, warn_versions, VersionCheck};
+use crate::providers::{check_version, hit_ratio_from_sums, VersionCheck};
 use crate::runner::terminate_tree_now;
 use crate::scheduler::{self, reconcile};
 use anyhow::{bail, Result};
@@ -385,6 +385,7 @@ impl Shared {
             "timezone": cfg.display_timezone.label,
             "quota_reset": top_reset.map(|t| cfg.display_timezone.format(t)),
             "intake_paused": self.intake_paused.load(Ordering::Relaxed),
+            "github_auth": crate::gh_token::status_json(&self.config_path, chrono::Utc::now()),
             "running": inflight.keys().cloned().collect::<Vec<_>>(),
             "providers": providers,
             "shadow": {
@@ -454,7 +455,7 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
     if !cfg.listen_is_loopback() {
         tracing::warn!(listen = %cfg.listen, "HTTP listen is not loopback");
     }
-    warn_versions(&cfg.providers).await;
+    crate::providers::warn_versions_recorded(&cfg.providers, Some(&shared.config_path)).await;
     crate::reported::refresh_grok_billing_at_start(
         &shared.db,
         &cfg.providers,
@@ -527,7 +528,7 @@ pub async fn serve_background(shared: Arc<Shared>) -> Result<SocketAddr> {
     if cfg.shadow.enabled {
         crate::shadow::validate_github_cli(&cfg.github.cli)?;
     }
-    warn_versions(&cfg.providers).await;
+    crate::providers::warn_versions_recorded(&cfg.providers, Some(&shared.config_path)).await;
     crate::reported::refresh_grok_billing_at_start(
         &shared.db,
         &cfg.providers,
@@ -867,6 +868,20 @@ pub fn format_status_table(shared: &Shared, repo: Option<&str>) -> String {
         "status ({tz})  listen={listen}  intake={}\n",
         if paused { "paused" } else { "on" }
     );
+    if let Some(ga) = v.get("github_auth") {
+        let level = ga
+            .get("level")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown");
+        let msg = ga.get("message").and_then(|x| x.as_str()).unwrap_or("");
+        let tag = match level {
+            "fail" => "FAIL",
+            "warn" => "warn",
+            "ok" => "ok",
+            _ => "?",
+        };
+        out.push_str(&format!("github auth: {tag}  {msg}\n"));
+    }
     let providers = v
         .get("providers")
         .and_then(|p| p.as_array())

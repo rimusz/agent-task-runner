@@ -43,6 +43,13 @@ pub async fn poll_loop(shared: Arc<Shared>) {
                 cfg.github_poll_interval,
             )
         };
+        let (probe, cfg) = {
+            let cfg = shared.config.read().unwrap().clone();
+            (enabled || cfg.shadow.enabled, cfg)
+        };
+        if probe {
+            crate::gh_token::maybe_probe(&cfg, &shared.config_path).await;
+        }
         if enabled {
             if let Err(e) = poll_once(&shared).await {
                 tracing::warn!("github poll failed: {e:#}");
@@ -90,7 +97,9 @@ async fn poll_repo(
     let label = repo.label.as_str();
     let repo_path = repo.path.display().to_string();
 
-    let out = Command::new(gh)
+    let mut cmd = Command::new(gh);
+    crate::gh_token::apply(&mut cmd, cfg, Some(&shared.config_path));
+    let out = cmd
         .args([
             "issue",
             "list",
@@ -107,6 +116,13 @@ async fn poll_repo(
         ])
         .output()
         .await?;
+    crate::gh_token::observe_gh(
+        cfg,
+        Some(&shared.config_path),
+        out.status.success(),
+        &String::from_utf8_lossy(&out.stderr),
+        &format!("issue list {github}"),
+    );
     if !out.status.success() {
         anyhow::bail!(
             "gh issue list failed: {}",
@@ -154,7 +170,7 @@ async fn poll_repo(
         if !names.is_empty() {
             let _ = shared.db.set_task_labels(&key, &names.join(","));
         }
-        if let Err(e) = ingest_comments(shared, gh, github, &key, issue.number).await {
+        if let Err(e) = ingest_comments(shared, cfg, gh, github, &key, issue.number).await {
             tracing::debug!(task = %key, "comment poll: {e:#}");
         }
     }
@@ -163,16 +179,16 @@ async fn poll_repo(
 
 async fn ingest_comments(
     shared: &Shared,
+    cfg: &crate::config::Config,
     gh: &str,
     repo: &str,
     key: &str,
     number: i64,
 ) -> Result<()> {
     let path = format!("repos/{repo}/issues/{number}/comments");
-    let out = Command::new(gh)
-        .args(["api", &path, "--paginate"])
-        .output()
-        .await?;
+    let mut cmd = Command::new(gh);
+    crate::gh_token::apply(&mut cmd, cfg, Some(&shared.config_path));
+    let out = cmd.args(["api", &path, "--paginate"]).output().await?;
     if !out.status.success() {
         return Ok(());
     }

@@ -190,6 +190,7 @@ pub fn sanitize(text: &str, secrets: &[&str]) -> String {
         "GH_TOKEN",
         "GITHUB_TOKEN",
         "ATR_SHADOW_GH_TOKEN",
+        "ATR_GH_TOKEN",
     ] {
         s = s.replace(needle, "***");
     }
@@ -1373,6 +1374,7 @@ fn snapshot_secrets(cfg: &TelegramConfig) -> Vec<String> {
         "GH_TOKEN",
         "GITHUB_TOKEN",
         "ATR_SHADOW_GH_TOKEN",
+        "ATR_GH_TOKEN",
         "MOONSHOT_API_KEY",
         "DASHSCOPE_API_KEY",
         "MIMO_API_KEY",

@@ -173,31 +173,18 @@ pub fn validate_github_cli(cli: &str) -> Result<PathBuf> {
     resolve_github_cli(cli)
 }
 
+/// Token used by shadow `gh` calls: the shared atr GitHub token
+/// (`ATR_GH_TOKEN`, then `[shadow] gh_token_env`, then `GH_TOKEN`).
 pub fn shadow_token(cfg: &Config) -> Option<String> {
-    let name = if cfg.shadow.gh_token_env.is_empty() {
-        "ATR_SHADOW_GH_TOKEN"
-    } else {
-        cfg.shadow.gh_token_env.as_str()
-    };
-    std::env::var(name).ok().filter(|s| !s.is_empty())
+    crate::gh_token::resolve(cfg, None).map(|(_, v)| v)
 }
 
 fn apply_shadow_gh_env(cmd: &mut Command, cfg: &Config) {
-    cmd.env_remove("GH_TOKEN");
-    cmd.env_remove("GITHUB_TOKEN");
-    if let Some(tok) = shadow_token(cfg) {
-        cmd.env("GH_TOKEN", tok.clone());
-        cmd.env("GITHUB_TOKEN", tok);
-    }
+    crate::gh_token::apply(cmd, cfg, None);
 }
 
 fn apply_shadow_gh_env_std(cmd: &mut std::process::Command, cfg: &Config) {
-    cmd.env_remove("GH_TOKEN");
-    cmd.env_remove("GITHUB_TOKEN");
-    if let Some(tok) = shadow_token(cfg) {
-        cmd.env("GH_TOKEN", tok.clone());
-        cmd.env("GITHUB_TOKEN", tok);
-    }
+    crate::gh_token::apply_std(cmd, cfg, None);
 }
 
 pub fn shadow_repo_path(cfg: &Config) -> PathBuf {
@@ -413,6 +400,13 @@ pub async fn poll_once(shared: &Shared) -> Result<()> {
         cmd.args(list_args);
         apply_shadow_gh_env(&mut cmd, &cfg);
         let out = cmd.output().await?;
+        crate::gh_token::observe_gh(
+            &cfg,
+            Some(&shared.config_path),
+            out.status.success(),
+            &String::from_utf8_lossy(&out.stderr),
+            "shadow issue list",
+        );
         if !out.status.success() {
             anyhow::bail!(
                 "gh issue list failed: {}",

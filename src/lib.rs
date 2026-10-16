@@ -12,6 +12,7 @@ pub mod detect;
 pub mod doctor;
 pub mod duration;
 pub mod gc;
+pub mod gh_token;
 pub mod github;
 pub mod github_auth;
 pub mod grok_stdio;

@@ -85,6 +85,7 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
     );
 
     github_auth_checks(&mut checks, cfg, config_path);
+    github_token_api_check(&mut checks, cfg, config_path).await;
     repo_path_check(&mut checks, cfg);
     listen_check(&mut checks, cfg);
     reported_usage_check(&mut checks, cfg);
@@ -123,13 +124,11 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
                 Some("install the CLI or set [[provider]] cli".into()),
             );
         } else if v.keychain_locked {
-            push(
-                &mut checks,
-                &format!("cli {}", p.name),
-                Status::Warn,
-                format!("{} pin={pin} (keychain locked over SSH)", p.cli.display()),
-                Some("run atr doctor from the desktop session".into()),
+            let (st, detail, hint) = locked_pin_verdict(
+                &p.cli.display().to_string(),
+                crate::providers::recorded_pin(config_path, &p.name),
             );
+            push(&mut checks, &format!("cli {}", p.name), st, detail, hint);
         } else if !v.match_ok {
             let hint = if v.error.as_deref().is_some_and(looks_like_auth_fail) {
                 crate::presets::auth_login_hint(&p.kind).to_string()
@@ -452,6 +451,160 @@ fn github_auth_checks(checks: &mut Vec<Check>, cfg: &Config, config_path: &Path)
         cfg.intake_allows(crate::task::SourceKind::Github),
         cfg.shadow.enabled,
     );
+}
+
+/// Keychain locked (doctor over SSH): use the pin `atr serve` recorded in its
+/// own session; if none, skip instead of warning.
+fn locked_pin_verdict(
+    cli: &str,
+    recorded: Option<(String, String, String)>,
+) -> (Status, String, Option<String>) {
+    match recorded {
+        Some((pin, ver, at)) if pin == "ok" => (
+            Status::Ok,
+            format!("{cli} pin=ok {ver} (verified by service at {at})"),
+            None,
+        ),
+        Some((pin, ver, at)) if pin == "MISMATCH" => (
+            Status::Warn,
+            format!("{cli} pin=MISMATCH found={ver} (service check at {at})"),
+            Some("update expected_version or the CLI".into()),
+        ),
+        _ => (
+            Status::Ok,
+            format!(
+                "{cli} pin skipped over SSH (keychain locked); service session verifies at start"
+            ),
+            None,
+        ),
+    }
+}
+
+/// Live check of the shared atr GitHub token (the one the poller and shadow
+/// use): present, valid (GET /user), repo access, days to expiry.
+async fn github_token_api_check(checks: &mut Vec<Check>, cfg: &Config, config_path: &Path) {
+    let need = cfg.intake_allows(crate::task::SourceKind::Github) || cfg.shadow.enabled;
+    if !need {
+        push(
+            checks,
+            "github token api",
+            Status::Ok,
+            "skipped (github/shadow off)".into(),
+            None,
+        );
+        return;
+    }
+    let Some((key, tok)) = crate::gh_token::resolve(cfg, Some(config_path)) else {
+        push(
+            checks,
+            "github token api",
+            Status::Fail,
+            format!("no token in {}", crate::gh_token::token_keys(cfg).join(" / ")),
+            Some("put ATR_GH_TOKEN=<fine-grained PAT> in ~/.config/atr/shadow.env (0600); see docs/GITHUB.md".into()),
+        );
+        return;
+    };
+    let mut repos: Vec<String> = cfg
+        .enabled_watch_repos()
+        .into_iter()
+        .map(|r| r.github.clone())
+        .filter(|g| !g.is_empty())
+        .collect();
+    if cfg.shadow.enabled {
+        let r = crate::shadow::shadow_repo(cfg);
+        if !r.is_empty() && !repos.contains(&r) {
+            repos.push(r);
+        }
+    }
+    let res = tokio::task::spawn_blocking(move || {
+        let user = crate::gh_token::get(&tok, "user");
+        let repo_res: Vec<(String, u16)> = repos
+            .iter()
+            .map(|r| {
+                (
+                    r.clone(),
+                    crate::gh_token::get(&tok, &format!("repos/{r}")).status,
+                )
+            })
+            .collect();
+        (user, repo_res)
+    })
+    .await;
+    let Ok((user, repo_res)) = res else {
+        push(
+            checks,
+            "github token api",
+            Status::Warn,
+            "probe panicked".into(),
+            None,
+        );
+        return;
+    };
+    let (st, detail, hint) = token_api_verdict(&key, &user, &repo_res, chrono::Utc::now());
+    push(checks, "github token api", st, detail, hint);
+}
+
+fn token_api_verdict(
+    key: &str,
+    user: &crate::gh_token::Probe,
+    repos: &[(String, u16)],
+    now: chrono::DateTime<chrono::Utc>,
+) -> (Status, String, Option<String>) {
+    let rotate = Some(format!(
+        "create a new fine-grained PAT and set {key} in ~/.config/atr/shadow.env, then restart atr"
+    ));
+    match user.status {
+        0 => {
+            return (
+                Status::Warn,
+                format!(
+                    "{key} set; api.github.com unreachable ({})",
+                    user.error.clone().unwrap_or_default()
+                ),
+                None,
+            )
+        }
+        401 => {
+            return (
+                Status::Fail,
+                format!("{key} rejected: 401 (revoked/expired)"),
+                rotate,
+            )
+        }
+        200..=299 => {}
+        s => return (Status::Fail, format!("{key}: GET /user -> {s}"), rotate),
+    }
+    let mut detail = format!("{key} ok, login={}", user.login.as_deref().unwrap_or("?"));
+    let mut status = Status::Ok;
+    let mut hint = None;
+    match user.expires_at {
+        Some(exp) => {
+            let d = crate::gh_token::days_left(exp, now);
+            detail.push_str(&format!("; expires in {d}d"));
+            if d < crate::gh_token::EXPIRY_WARN_DAYS {
+                status = Status::Warn;
+                hint = rotate.clone();
+            }
+        }
+        None => detail.push_str("; no expiry"),
+    }
+    let bad: Vec<String> = repos
+        .iter()
+        .filter(|(_, s)| !(200..300).contains(s))
+        .map(|(r, s)| format!("{r}={s}"))
+        .collect();
+    if !repos.is_empty() {
+        if bad.is_empty() {
+            detail.push_str(&format!("; repo access {}/{}", repos.len(), repos.len()));
+        } else {
+            detail.push_str(&format!("; no access: {}", bad.join(", ")));
+            status = Status::Fail;
+            hint = Some(
+                "grant the PAT these repos (Contents/Issues/Pull requests RW, Metadata R)".into(),
+            );
+        }
+    }
+    (status, detail, hint)
 }
 
 fn push_github_auth_checks(
@@ -1181,5 +1334,72 @@ cli = "/bin/true"
         assert!(mcp.detail.contains("token file"), "{}", mcp.detail);
         assert!(!report.format().contains("doctor-mcp-file-token"));
         assert!(!report.to_json().contains("doctor-mcp-file-token"));
+    }
+
+    fn probe(status: u16, days: Option<i64>) -> crate::gh_token::Probe {
+        crate::gh_token::Probe {
+            status,
+            login: Some("me".into()),
+            expires_at: days.map(|d| {
+                chrono::Utc::now() + chrono::Duration::days(d) + chrono::Duration::hours(1)
+            }),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn token_api_verdicts() {
+        let now = chrono::Utc::now();
+        let ok = vec![("o/r".to_string(), 200)];
+        assert_eq!(
+            token_api_verdict("ATR_GH_TOKEN", &probe(200, Some(60)), &ok, now).0,
+            Status::Ok
+        );
+        let (s, d, _) = token_api_verdict("ATR_GH_TOKEN", &probe(200, Some(5)), &ok, now);
+        assert_eq!(s, Status::Warn);
+        assert!(d.contains("expires in 5d"), "{d}");
+        assert_eq!(
+            token_api_verdict("ATR_GH_TOKEN", &probe(401, None), &ok, now).0,
+            Status::Fail
+        );
+        let bad = vec![("o/r".to_string(), 404)];
+        assert_eq!(
+            token_api_verdict("ATR_GH_TOKEN", &probe(200, None), &bad, now).0,
+            Status::Fail
+        );
+        assert_eq!(
+            token_api_verdict("ATR_GH_TOKEN", &probe(0, None), &ok, now).0,
+            Status::Warn
+        );
+    }
+
+    #[test]
+    fn locked_pin_uses_service_record_or_skips() {
+        let (s, d, _) = locked_pin_verdict("/c", Some(("ok".into(), "1.2".into(), "t".into())));
+        assert_eq!(s, Status::Ok);
+        assert!(d.contains("verified by service"));
+        assert_eq!(
+            locked_pin_verdict("/c", Some(("MISMATCH".into(), "1".into(), "t".into()))).0,
+            Status::Warn
+        );
+        let (s, d, h) = locked_pin_verdict("/c", None);
+        assert_eq!(s, Status::Ok);
+        assert!(d.contains("skipped over SSH") && h.is_none());
+    }
+
+    #[test]
+    fn recorded_pin_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cp = dir.path().join("config.toml");
+        std::fs::write(
+            crate::providers::pins_path(&cp),
+            r#"{"cursor":{"pin":"ok","version":"v1","checked_at":"t"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::providers::recorded_pin(&cp, "cursor").unwrap().0,
+            "ok"
+        );
+        assert!(crate::providers::recorded_pin(&cp, "x").is_none());
     }
 }

@@ -18,11 +18,15 @@ th { color: #666; font-weight: 600; }
 .fail { color: #c44; }
 pre { white-space: pre-wrap; font: 12px/1.35 ui-monospace, monospace; background: #1111; padding: .5rem; overflow: auto; max-height: 18rem; }
 .empty { color: #888; }
+.banner { padding: .5rem .75rem; border-radius: 6px; margin: .5rem 0; font-weight: 600; }
+.banner.fail { background: #c443; border: 1px solid #c44; }
+.banner.warn { background: #c803; border: 1px solid #c80; }
 </style>
 </head>
 <body>
 <h1>atr</h1>
 <p class="meta" id="meta">loading…</p>
+<div id="ghauth" class="banner" hidden></div>
 <p class="meta">
   <label>repo
     <select id="repoFilter">
@@ -89,6 +93,13 @@ function taskCells(t) {
     '<span class="'+cls(t.state)+'">'+esc(t.state)+"</span>"];
 }
 function paint(d) {
+  const ga = d.github_auth || {};
+  const gb = $("ghauth");
+  if (ga.level === "fail" || ga.level === "warn") {
+    gb.className = "banner " + ga.level;
+    gb.textContent = (ga.level === "fail" ? "GitHub auth failing: " : "GitHub token: ") + (ga.message || "");
+    gb.hidden = false;
+  } else { gb.hidden = true; }
   $("meta").textContent = (d.timezone || "") + " · " + (d.now || "") +
     " · " + (d.listen || "") + (d.intake_paused ? " · intake paused" : "") +
     (d.driver ? " · driver " + d.driver : "") + " · refresh 5s";
