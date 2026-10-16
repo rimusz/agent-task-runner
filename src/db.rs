@@ -684,6 +684,18 @@ impl Db {
         Ok(())
     }
 
+    /// Queue a task unless it is running, in one statement. A separate read
+    /// then `set_status` races the scheduler's `claim_task` and can flip a
+    /// task it just claimed back to `queued` while its run is live.
+    pub fn queue_unless_running(&self, key: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE tasks SET status = 'queued', updated = ?1 WHERE key = ?2 AND status != 'running'",
+            params![now_rfc3339(), key],
+        )?;
+        Ok(n == 1)
+    }
+
     pub fn set_parent_key(&self, key: &str, parent: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(
@@ -2539,6 +2551,19 @@ pub fn ts_in_future(s: Option<&str>, now: chrono::DateTime<Utc>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn queue_unless_running_never_overwrites_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        db.upsert_task("q-1", "/tmp/r", None).unwrap();
+        assert!(db.claim_task("q-1").unwrap());
+        assert!(!db.queue_unless_running("q-1").unwrap());
+        assert_eq!(db.get_task("q-1").unwrap().unwrap().status, "running");
+        db.set_status("q-1", "waiting").unwrap();
+        assert!(db.queue_unless_running("q-1").unwrap());
+        assert_eq!(db.get_task("q-1").unwrap().unwrap().status, "queued");
+    }
+
     use super::*;
     use chrono::Duration as ChronoDuration;
 

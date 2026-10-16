@@ -54,7 +54,13 @@ shellcheck -s sh -S error install.sh contrib/*.sh tests/*.sh
 cargo deny check                  # licenses/advisories (CI: deny job)
 ```
 
-Known flaky: `shadow::tests::wrapper_nested_guard_and_self_real` (spawns a real gh wrapper; can time out under load). Re-run it alone (`cargo test wrapper_nested_guard_and_self_real`) or re-run the failed CI job; do not mark green CI on other failures as flaky.
+Known flaky: none. Root-caused and fixed (do not reintroduce):
+- `ETXTBSY` ("Text file busy") when a test writes a script and execs it while another thread forks: spawn scripts through `util::retry_exec_busy` / `util::output_retry_busy` (production does too).
+- Read-then-write status races with the scheduler: use atomic conditional updates (`Db::queue_unless_running`, `claim_task`), never `get_task` + `set_status`.
+- HTTP handlers that reject before reading the request body must drain it first, or the client can get RST and lose the response body.
+- Tests use their own temp dir for every path (no shared `/tmp/...` files), `127.0.0.1:0` ports, and wait on conditions (`Harness::wait_until`) rather than fixed sleeps.
+
+If a test fails intermittently, find the cause; do not add sleeps, bump timeouts or `#[ignore]` it.
 
 CI (`.github/workflows/ci.yml`): docs-only diffs (`docs/`, `*.md`, LICENSE) skip the Rust jobs and run just the readme test; code diffs run fmt, clippy, tests on Linux + macOS, deny, coverage, cross builds. gitleaks and release-rule always run.
 

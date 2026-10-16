@@ -223,7 +223,18 @@ impl Harness {
                     .flatten()
                     .map(|t| t.status)
                     .unwrap_or_else(|| "missing".into());
-                panic!("timeout waiting for {key} predicate, last={st}");
+                let runs = self.shared.db.list_runs(Some(key)).unwrap_or_default();
+                let runs: Vec<String> = runs
+                    .iter()
+                    .map(|r| format!("{}:{:?}", r.provider, r.outcome))
+                    .collect();
+                let task = self.shared.db.get_task(key).ok().flatten();
+                panic!(
+                    "timeout waiting for {key} predicate, last={st}, runs={runs:?}, provider={:?}, tried={:?}, inflight={:?}",
+                    task.as_ref().and_then(|t| t.provider.clone()),
+                    task.as_ref().and_then(|t| t.tried.clone()),
+                    self.shared.inflight.lock().unwrap().keys().collect::<Vec<_>>()
+                );
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }

@@ -207,14 +207,9 @@ impl Shared {
             self.kick.notify_waiters();
             return Ok(SubmitOutcome::Queued);
         }
-        let status = self
-            .db
-            .get_task(key)?
-            .map(|t| t.status)
-            .unwrap_or_else(|| "queued".into());
-        if status != "running" {
-            self.db.set_status(key, "queued")?;
-        }
+        // Atomic: the scheduler may claim the task between the check above
+        // and here; never overwrite its `running` with `queued`.
+        self.db.queue_unless_running(key)?;
         self.kick.notify_waiters();
         Ok(SubmitOutcome::Accepted)
     }

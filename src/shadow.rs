@@ -224,7 +224,9 @@ fn clone_shadow_repo(cfg: &Config, repo: &str, dest: &Path) -> Result<()> {
         let mut cmd = std::process::Command::new(&gh);
         cmd.args(["repo", "clone", repo, &dest_s]);
         apply_shadow_gh_env_std(&mut cmd, cfg, repo);
-        if cmd.status().map(|s| s.success()).unwrap_or(false)
+        if crate::util::retry_exec_busy(|| cmd.status())
+            .map(|s| s.success())
+            .unwrap_or(false)
             && (dest.join(".git").exists() || dest.join(".git").is_file())
         {
             return Ok(());
@@ -399,7 +401,7 @@ pub async fn poll_once(shared: &Shared) -> Result<()> {
         let mut cmd = Command::new(&gh);
         cmd.args(list_args);
         apply_shadow_gh_env(&mut cmd, &cfg, &repo);
-        let out = cmd.output().await?;
+        let out = crate::util::output_retry_busy(&mut cmd).await?;
         crate::gh_token::observe_gh(
             &cfg,
             Some(&shared.config_path),
@@ -471,7 +473,7 @@ async fn ingest_comments(
     let mut cmd = Command::new(gh);
     cmd.args(args);
     apply_shadow_gh_env(&mut cmd, cfg, repo);
-    let out = cmd.output().await?;
+    let out = crate::util::output_retry_busy(&mut cmd).await?;
     if !out.status.success() {
         return Ok(());
     }
@@ -930,13 +932,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gh = write_gh_wrapper(dir.path()).unwrap();
         let log = dir.path().join("gh.log");
-        let st = std::process::Command::new(&gh)
-            .args(["issue", "comment", "1", "--body", "nope"])
-            .env("ATR_SHADOW_GH_LOG", &log)
-            .env("ATR_SHADOW_GH_REAL", "/bin/true")
-            .env_remove("ATR_SHADOW_GH_NESTED")
-            .status()
-            .unwrap();
+        let st = crate::util::retry_exec_busy(|| {
+            std::process::Command::new(&gh)
+                .args(["issue", "comment", "1", "--body", "nope"])
+                .env("ATR_SHADOW_GH_LOG", &log)
+                .env("ATR_SHADOW_GH_REAL", "/bin/true")
+                .env_remove("ATR_SHADOW_GH_NESTED")
+                .status()
+        })
+        .unwrap();
         assert!(!st.success());
         let logged = std::fs::read_to_string(&log).unwrap();
         assert!(logged.contains("issue comment"), "{logged}");
@@ -950,12 +954,14 @@ mod tests {
             vec!["auth", "token"],
             vec!["auth", "status", "--show-token"],
         ] {
-            let st = std::process::Command::new(&gh)
-                .args(&args)
-                .env("ATR_SHADOW_GH_REAL", "/bin/true")
-                .env_remove("ATR_SHADOW_GH_NESTED")
-                .output()
-                .unwrap();
+            let st = crate::util::retry_exec_busy(|| {
+                std::process::Command::new(&gh)
+                    .args(&args)
+                    .env("ATR_SHADOW_GH_REAL", "/bin/true")
+                    .env_remove("ATR_SHADOW_GH_NESTED")
+                    .output()
+            })
+            .unwrap();
             assert!(!st.status.success(), "{args:?}");
             let err = String::from_utf8_lossy(&st.stderr);
             assert!(err.contains("token") || err.contains("refusing"), "{err}");
@@ -966,12 +972,14 @@ mod tests {
     fn wrapper_nested_guard_and_self_real() {
         let dir = tempfile::tempdir().unwrap();
         let gh = write_gh_wrapper(dir.path()).unwrap();
-        let nested = std::process::Command::new(&gh)
-            .args(["issue", "list"])
-            .env("ATR_SHADOW_GH_REAL", "/bin/true")
-            .env("ATR_SHADOW_GH_NESTED", "1")
-            .output()
-            .unwrap();
+        let nested = crate::util::retry_exec_busy(|| {
+            std::process::Command::new(&gh)
+                .args(["issue", "list"])
+                .env("ATR_SHADOW_GH_REAL", "/bin/true")
+                .env("ATR_SHADOW_GH_NESTED", "1")
+                .output()
+        })
+        .unwrap();
         assert!(!nested.status.success());
         assert!(
             String::from_utf8_lossy(&nested.stderr).contains("NESTED"),
@@ -979,21 +987,25 @@ mod tests {
             String::from_utf8_lossy(&nested.stderr)
         );
 
-        let self_real = std::process::Command::new(&gh)
-            .args(["issue", "list"])
-            .env("ATR_SHADOW_GH_REAL", gh.display().to_string())
-            .env_remove("ATR_SHADOW_GH_NESTED")
-            .output()
-            .unwrap();
+        let self_real = crate::util::retry_exec_busy(|| {
+            std::process::Command::new(&gh)
+                .args(["issue", "list"])
+                .env("ATR_SHADOW_GH_REAL", gh.display().to_string())
+                .env_remove("ATR_SHADOW_GH_NESTED")
+                .output()
+        })
+        .unwrap();
         assert!(!self_real.status.success());
 
-        let relative = std::process::Command::new(&gh)
-            .args(["issue", "list"])
-            .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
-            .env("ATR_SHADOW_GH_REAL", "gh")
-            .env_remove("ATR_SHADOW_GH_NESTED")
-            .output()
-            .unwrap();
+        let relative = crate::util::retry_exec_busy(|| {
+            std::process::Command::new(&gh)
+                .args(["issue", "list"])
+                .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
+                .env("ATR_SHADOW_GH_REAL", "gh")
+                .env_remove("ATR_SHADOW_GH_NESTED")
+                .output()
+        })
+        .unwrap();
         assert!(
             !relative.status.success(),
             "relative REAL=gh must not recurse"

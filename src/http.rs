@@ -38,6 +38,9 @@ fn write_routes(shared: Arc<Shared>) -> Router<Arc<Shared>> {
         ))
 }
 
+/// Max request body read (and discarded) before an auth denial.
+const DENY_DRAIN_LIMIT: usize = 64 * 1024;
+
 async fn require_write_auth(
     State(shared): State<Arc<Shared>>,
     req: axum::extract::Request,
@@ -45,6 +48,10 @@ async fn require_write_auth(
 ) -> Response {
     let cfg = shared.config.read().unwrap().clone();
     if let Some(deny) = auth_failure(&cfg, req.headers()) {
+        // Read the (small) request body before replying. Closing a socket
+        // with unread request bytes makes the kernel send RST, and the client
+        // can lose the response body (seen as a 503 with an empty body).
+        let _ = axum::body::to_bytes(req.into_body(), DENY_DRAIN_LIMIT).await;
         return deny;
     }
     next.run(req).await
@@ -572,7 +579,9 @@ cli = "/bin/true"
 
     fn status_body(err: ureq::Error) -> (u16, String) {
         match err {
-            ureq::Error::Status(code, resp) => (code, resp.into_string().unwrap_or_default()),
+            ureq::Error::Status(code, resp) => {
+                (code, resp.into_string().expect("read response body"))
+            }
             other => panic!("{other}"),
         }
     }
@@ -651,12 +660,10 @@ token_file = "{token}"
         let dir = tempfile::tempdir().unwrap();
         let off = shared(
             dir.path(),
-            r#"
-[mcp]
-enabled = false
-token_env = "ATR_MCP_HTTP_TEST_UNSET"
-token_file = "/tmp/atr-mcp-missing.token"
-"#,
+            &format!(
+                "\n[mcp]\nenabled = false\ntoken_env = \"ATR_MCP_HTTP_TEST_UNSET\"\ntoken_file = \"{}\"\n",
+                dir.path().join("missing.token").display()
+            ),
         );
         let base = listen(off).await;
         let disabled = ureq::post(&format!("{base}/mcp"))
@@ -669,12 +676,10 @@ token_file = "/tmp/atr-mcp-missing.token"
         let dir2 = tempfile::tempdir().unwrap();
         let on = shared(
             dir2.path(),
-            r#"
-[mcp]
-enabled = true
-token_env = "ATR_MCP_HTTP_TEST_UNSET"
-token_file = "/tmp/atr-mcp-missing.token"
-"#,
+            &format!(
+                "\n[mcp]\nenabled = true\ntoken_env = \"ATR_MCP_HTTP_TEST_UNSET\"\ntoken_file = \"{}\"\n",
+                dir2.path().join("missing.token").display()
+            ),
         );
         let base = listen(on).await;
         let missing = ureq::post(&format!("{base}/mcp"))
@@ -1014,15 +1019,12 @@ token_file = "/tmp/atr-mcp-missing.token"
     #[tokio::test(flavor = "multi_thread")]
     async fn write_routes_503_without_token() {
         let dir = tempfile::tempdir().unwrap();
-        let s = shared(
-            dir.path(),
-            r#"
-[mcp]
-enabled = false
-token_env = "ATR_HTTP_WRITE_TEST_UNSET"
-token_file = "/tmp/atr-write-missing.token"
-"#,
+        // Missing token file inside this test's own temp dir (no shared /tmp path).
+        let cfg = format!(
+            "\n[mcp]\nenabled = false\ntoken_env = \"ATR_HTTP_WRITE_TEST_UNSET\"\ntoken_file = \"{}\"\n",
+            dir.path().join("missing.token").display()
         );
+        let s = shared(dir.path(), &cfg);
         let base = listen(s).await;
         for path in WRITE_ROUTES {
             let err = ureq::post(&format!("{base}/{path}"))

@@ -245,8 +245,7 @@ pub async fn run_cli(
         });
     }
 
-    let mut child = cmd
-        .spawn()
+    let mut child = crate::util::retry_exec_busy(|| cmd.spawn())
         .with_context(|| format!("spawn {} ({})", spec.program.display(), provider.name))?;
     let pid = child.id().unwrap_or(0);
     let mut seen_descendants = HashSet::new();
