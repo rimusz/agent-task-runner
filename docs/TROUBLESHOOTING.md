@@ -61,7 +61,10 @@ N chats / M runs today, last activity …`), also in `atr status` and
 intake is off. Finished rows link to `tasks/<key>/result`, show the finish
 time as `HH:MM` (full date on hover) and `provider / model`. Telegram assistant
 tasks (`tg<chat id>`) are left out of Finished (they are summarized on the
-Telegram assistant line) but still count in Today and provider totals. Today shows
+Telegram assistant line) but still count in Today and provider totals. Table headers, names, numbers
+and times never wrap; only long text (prompt, result, usage, version, path,
+progress) wraps at word boundaries, and wide tables scroll sideways on narrow
+screens. Providers `last success` uses the same short time as Finished. Today shows
 uncached input, cached and cache-write tokens separately so totals add up.
 Providers show `-` for usage when the CLI reports none, and Grok extra credits
 in their own column. Token savings shows a per-provider bar table for a single

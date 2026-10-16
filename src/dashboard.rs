@@ -1060,7 +1060,10 @@ kind = "claude"
 
     #[test]
     fn page_numeric_columns_do_not_wrap() {
-        assert!(PAGE.contains("td.num, th.num { white-space: nowrap;"));
+        assert!(PAGE.contains("white-space: nowrap; word-break: normal"));
+        assert!(PAGE.contains("td.wrap, td.wide { white-space: normal;"));
+        assert!(PAGE.contains("class=\"scroll\""));
+        assert!(PAGE.contains("shortTime(p.last_success"));
         assert!(PAGE.contains("{t:\"elapsed\",num:true}"));
     }
 
