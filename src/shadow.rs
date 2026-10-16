@@ -176,15 +176,15 @@ pub fn validate_github_cli(cli: &str) -> Result<PathBuf> {
 /// Token used by shadow `gh` calls: the shared atr GitHub token
 /// (`ATR_GH_TOKEN`, then `[shadow] gh_token_env`, then `GH_TOKEN`).
 pub fn shadow_token(cfg: &Config) -> Option<String> {
-    crate::gh_token::resolve(cfg, None).map(|(_, v)| v)
+    crate::gh_token::resolve_for(cfg, None, Some(&shadow_repo(cfg))).map(|(_, v)| v)
 }
 
-fn apply_shadow_gh_env(cmd: &mut Command, cfg: &Config) {
-    crate::gh_token::apply(cmd, cfg, None);
+fn apply_shadow_gh_env(cmd: &mut Command, cfg: &Config, repo: &str) {
+    crate::gh_token::apply(cmd, cfg, None, Some(repo));
 }
 
-fn apply_shadow_gh_env_std(cmd: &mut std::process::Command, cfg: &Config) {
-    crate::gh_token::apply_std(cmd, cfg, None);
+fn apply_shadow_gh_env_std(cmd: &mut std::process::Command, cfg: &Config, repo: &str) {
+    crate::gh_token::apply_std(cmd, cfg, None, Some(repo));
 }
 
 pub fn shadow_repo_path(cfg: &Config) -> PathBuf {
@@ -223,7 +223,7 @@ fn clone_shadow_repo(cfg: &Config, repo: &str, dest: &Path) -> Result<()> {
         let dest_s = dest.display().to_string();
         let mut cmd = std::process::Command::new(&gh);
         cmd.args(["repo", "clone", repo, &dest_s]);
-        apply_shadow_gh_env_std(&mut cmd, cfg);
+        apply_shadow_gh_env_std(&mut cmd, cfg, repo);
         if cmd.status().map(|s| s.success()).unwrap_or(false)
             && (dest.join(".git").exists() || dest.join(".git").is_file())
         {
@@ -398,11 +398,12 @@ pub async fn poll_once(shared: &Shared) -> Result<()> {
         }
         let mut cmd = Command::new(&gh);
         cmd.args(list_args);
-        apply_shadow_gh_env(&mut cmd, &cfg);
+        apply_shadow_gh_env(&mut cmd, &cfg, &repo);
         let out = cmd.output().await?;
         crate::gh_token::observe_gh(
             &cfg,
             Some(&shared.config_path),
+            Some(&repo),
             out.status.success(),
             &String::from_utf8_lossy(&out.stderr),
             "shadow issue list",
@@ -469,7 +470,7 @@ async fn ingest_comments(
     }
     let mut cmd = Command::new(gh);
     cmd.args(args);
-    apply_shadow_gh_env(&mut cmd, cfg);
+    apply_shadow_gh_env(&mut cmd, cfg, repo);
     let out = cmd.output().await?;
     if !out.status.success() {
         return Ok(());

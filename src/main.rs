@@ -234,6 +234,11 @@ enum Cmd {
         #[arg(long)]
         task: Option<String>,
     },
+    /// GitHub helpers (per-owner tokens).
+    Github {
+        #[command(subcommand)]
+        cmd: GithubCmd,
+    },
     /// Store the bot token, discover chat id, or send a test message.
     Telegram {
         #[command(subcommand)]
@@ -350,6 +355,30 @@ enum ServiceCmd {
     },
     Uninstall,
     Restart,
+}
+
+#[derive(Subcommand, Debug)]
+enum GithubCmd {
+    /// Per-owner GitHub tokens (values live only in shadow.env).
+    Token {
+        #[command(subcommand)]
+        cmd: GithubTokenCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GithubTokenCmd {
+    /// Store a token for <owner> (hidden prompt, or stdin when piped), map it in [github.tokens], validate.
+    Set {
+        owner: String,
+        /// Env var name (default ATR_GH_TOKEN_<OWNER>).
+        #[arg(long)]
+        env_var: Option<String>,
+    },
+    /// Owners, env var names, status and days left (never values).
+    List,
+    /// Remove <owner>'s mapping and its value from shadow.env.
+    Remove { owner: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -874,6 +903,21 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Logs { follow, task } => {
             let cfg = load_config(&path)?;
             atr::upgrade::follow_logs(&cfg, follow, task.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Github {
+            cmd: GithubCmd::Token { cmd },
+        } => {
+            let text = match cmd {
+                GithubTokenCmd::Set { owner, env_var } => {
+                    let tok =
+                        atr::gh_token_cli::read_secret(&format!("GitHub token for {owner}: "))?;
+                    atr::gh_token_cli::set(&path, &owner, env_var.as_deref(), &tok)?
+                }
+                GithubTokenCmd::List => atr::gh_token_cli::list(&path)?,
+                GithubTokenCmd::Remove { owner } => atr::gh_token_cli::remove(&path, &owner)?,
+            };
+            print!("{text}");
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Telegram { cmd } => {

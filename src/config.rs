@@ -382,6 +382,11 @@ pub struct GithubConfig {
     pub label: String,
     #[serde(default = "default_poll")]
     pub poll_interval: String,
+    /// `[github.tokens]`: owner -> env var NAME holding that owner's token
+    /// (fine-grained PATs are single-owner). Case-insensitive owner match;
+    /// unmapped owners use the default token chain.
+    #[serde(default)]
+    pub tokens: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for GithubConfig {
@@ -392,6 +397,7 @@ impl Default for GithubConfig {
             repo: String::new(),
             label: default_gh_label(),
             poll_interval: default_poll(),
+            tokens: Default::default(),
         }
     }
 }
@@ -1574,6 +1580,22 @@ pub fn valid_repo_name(name: &str) -> bool {
 }
 
 /// `owner/name` from a slug, HTTPS URL, or `git@github.com:` URL.
+#[cfg(test)]
+mod github_tokens_tests {
+    #[test]
+    fn parses_github_tokens_table() {
+        let cfg = super::parse_config_toml(
+            "[github]\nenabled = false\n[github.tokens]\nrimusz = \"ATR_GH_TOKEN_RIMUSZ\"\nTaskrApps = \"ATR_GH_TOKEN_TASKRAPPS\"\n\n[[provider]]\nname = \"claude\"\nkind = \"claude\"\ncli = \"/bin/true\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.github.tokens.len(), 2);
+        assert_eq!(
+            crate::gh_token::owner_key(&cfg.github.tokens, "taskrapps"),
+            Some("ATR_GH_TOKEN_TASKRAPPS")
+        );
+    }
+}
+
 pub fn parse_github_slug(raw: &str) -> Result<String> {
     let s = raw.trim();
     let s = s.trim_end_matches('/');

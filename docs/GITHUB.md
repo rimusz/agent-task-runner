@@ -93,6 +93,43 @@ Health monitoring:
 
 More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#5-github-token).
 
+## Per-owner tokens
+
+Fine-grained PATs belong to **one resource owner** (a user or one org). A
+token made for `your-user` cannot see `your-org/app`, so watching repos from
+several owners needs one token per owner. Map each owner to an env var
+**name** in config; the values stay in `shadow.env`:
+
+```toml
+[github.tokens]
+your-user = "ATR_GH_TOKEN_YOUR_USER"
+YourOrg   = "ATR_GH_TOKEN_YOURORG"
+```
+
+Every GitHub call (issue poller, shadow, doctor) picks the token by the repo's
+owner (case-insensitive). Owners without a mapping, or whose variable is unset,
+use the default chain (`ATR_GH_TOKEN` → shadow token → `GH_TOKEN` →
+`GITHUB_TOKEN`). Values are read from the process env, then `shadow.env`.
+
+Manage them with the CLI (values are never echoed or printed):
+
+```bash
+atr github token set YourOrg            # hidden prompt; or: pass-cmd | atr github token set YourOrg
+atr github token set YourOrg --env-var MY_ORG_TOKEN
+atr github token list                   # owner, env var, ok/warn/fail, days left, repos
+atr github token remove YourOrg         # drops mapping + value; owner falls back to default
+```
+
+`set` writes `ATR_GH_TOKEN_<OWNER>` to `shadow.env` atomically (0600, replaces
+an existing value), adds `[github.tokens]` in `config.toml` keeping comments,
+checks the token (login, access to that owner's watched repos, expiry), and
+sends SIGHUP to a running `atr serve`. If serve was started with that variable
+already in its environment, run `atr service restart` after rotating it.
+
+Auth alerts, recovery notices, expiry warnings, `github-auth.json`,
+`atr status`, the dashboard banner and `atr doctor` (`github token api <owner>`)
+are all per token and name the owner and env var, never the value.
+
 ## 2. Token in `shadow.env`
 
 **When:** LaunchAgent / systemd, a Mini you only reach over SSH, or any host
