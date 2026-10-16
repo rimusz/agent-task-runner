@@ -11,7 +11,10 @@ h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
 h2 { font-size: 1rem; margin: 1.25rem 0 .4rem; }
 .meta { color: #666; font-size: .85rem; }
 table { width: 100%; border-collapse: collapse; font-size: .9rem; }
-th, td { text-align: left; padding: .3rem .4rem; border-bottom: 1px solid #ccc3; vertical-align: top; word-break: break-word; }
+th, td { text-align: left; padding: .3rem .4rem; border-bottom: 1px solid #ccc3; vertical-align: top; overflow-wrap: anywhere; word-break: normal; hyphens: none; }
+td.nowrap { white-space: nowrap; }
+td.wide { min-width: 16rem; }
+.badge[title] { cursor: help; }
 th { color: #666; font-weight: 600; }
 .ok { color: #2a7; }
 .warn { color: #c80; }
@@ -94,13 +97,16 @@ function num(n) {
 }
 function usd(n) { return n == null ? "-" : "$" + Number(n).toFixed(4); }
 // headers: string or {t: label, tip: tooltip, num: true}
-function rows(id, headers, items, cells, totalRow) {
+function rows(id, headers, items, cells, totalRow, colCls) {
   if ((!items || !items.length) && !totalRow) return '<p class="empty">(none)</p>';
   const hs = headers.map(h => typeof h === "string" ? {t: h} : h);
   let h = '<table data-id="' + id + '"><thead><tr>' + hs.map((x, i) =>
     '<th class="sortable' + (x.num ? ' num' : '') + '" data-col="' + i + '"' + (x.tip ? ' title="' + esc(x.tip) + '"' : '') + '>' +
     (x.tip ? '<abbr>' + esc(x.t) + '</abbr>' : esc(x.t)) + "</th>").join("") + "</tr></thead><tbody>";
-  const cellHtml = (cs) => cs.map((x, i) => '<td' + (hs[i] && hs[i].num ? ' class="num"' : '') + '>' + x + "</td>").join("");
+  const cellHtml = (cs) => cs.map((x, i) => {
+    const c = [(hs[i] && hs[i].num) ? "num" : "", (colCls && colCls[i]) || ""].filter(Boolean).join(" ");
+    return '<td' + (c ? ' class="' + c + '"' : '') + '>' + x + "</td>";
+  }).join("");
   const body = (items || []).map(it => ({html: cellHtml(cells(it)), key: cells(it).map(c => String(c).replace(/<[^>]*>/g, ""))}));
   const st = sortState[id];
   if (st) {
@@ -152,6 +158,21 @@ function keep(t, state, iso) {
 function badge(level, text, tip) {
   return '<span class="badge ' + cls(level) + '"' + (tip ? ' title="' + esc(tip) + '"' : '') + '>' + esc(text) + '</span>';
 }
+function shortTime(full, now) {
+  const f = String(full || "");
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(f)) return esc(f || "-");
+  const same = String(now || "").slice(0, 10) === f.slice(0, 10);
+  const txt = same ? f.slice(11, 16) : f.slice(5, 10) + " " + f.slice(11, 16);
+  return '<span title="' + esc(f) + '">' + esc(txt) + '</span>';
+}
+// Telegram assistant task keys (tg<chat id>) read as "Telegram".
+function taskKey(k) {
+  const m = /^tg(-?\d+)$/.exec(String(k || ""));
+  return m ? '<span title="Telegram chat ' + esc(m[1]) + '">Telegram</span>' : esc(k);
+}
+function provModel(p, m) {
+  return esc(p || "-") + (m && m !== "-" ? ' <span class="meta">/ ' + esc(m) + '</span>' : "");
+}
 function setOptions(sel, names) {
   const cur = sel.value;
   sel.innerHTML = '<option value="">all</option>' + names.map(n =>
@@ -191,10 +212,19 @@ function paint(d) {
   const hl = d.health || {};
   let hb = "";
   const toks = (hl.github && hl.github.tokens) || [];
-  if (toks.length) toks.forEach(t => hb += badge(t.level, "GitHub " + (t.owner || t.token_env || "token") + (t.days_left != null ? " " + t.days_left + "d" : ""), t.message));
-  else if (hl.github) hb += badge(hl.github.level, "GitHub " + (hl.github.level || "?"), hl.github.message);
-  if (hl.telegram && hl.telegram.enabled) hb += badge(hl.telegram.level, "Telegram " + (hl.telegram.level || "?"), hl.telegram.message);
-  (hl.clis || []).forEach(c => hb += badge(c.present ? "ok" : "fail", c.name + " " + (c.version || (c.present ? "" : "missing")), c.version || ""));
+  // Healthy items stay compact (details on hover); amber/red ones expand.
+  const bad = l => cls(l) === "warn" || cls(l) === "fail";
+  const tokTip = t => (t.owner || t.token_env || "token") + (t.days_left != null ? " " + t.days_left + "d" : "") + (t.message ? ": " + t.message : "");
+  const badToks = toks.filter(t => bad(t.level)), okToks = toks.filter(t => !bad(t.level));
+  if (okToks.length) hb += badge("ok", "GitHub ok", okToks.map(tokTip).join("\n"));
+  badToks.forEach(t => hb += badge(t.level, "GitHub " + tokTip(t), t.message));
+  if (!toks.length && hl.github) hb += bad(hl.github.level) ? badge(hl.github.level, "GitHub: " + (hl.github.message || hl.github.level), hl.github.message) : badge(hl.github.level, "GitHub ok", hl.github.message);
+  if (hl.telegram && hl.telegram.enabled) hb += bad(hl.telegram.level) ? badge(hl.telegram.level, "Telegram: " + (hl.telegram.message || hl.telegram.level), hl.telegram.message) : badge(hl.telegram.level, "Telegram ok", hl.telegram.message);
+  // CLIs collapse to one badge; only missing ones get their own (red) badge.
+  const clis = hl.clis || [];
+  const okClis = clis.filter(c => c.present), badClis = clis.filter(c => !c.present);
+  if (okClis.length) hb += badge("ok", okClis.length + " CLIs ok", okClis.map(c => c.name + " " + (c.version || "?")).join("\n"));
+  badClis.forEach(c => hb += badge("fail", c.name + " missing", "CLI binary not found"));
   if (hl.uptime) hb += badge("ok", "up " + hl.uptime, "service uptime");
   $("health").innerHTML = hb;
   setOptions($("repoFilter"), (d.repos || []).filter(r => r.mode === "direct").map(r => r.name).filter(Boolean));
@@ -204,37 +234,39 @@ function paint(d) {
   ]);
   const run = (d.running || []).filter(t => keep(t, "running", t.started_utc));
   $("running").innerHTML = rows("running", ["key","repo","role","provider / model","elapsed","progress"], run, t => [
-    esc(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.provider) + " / " + esc(t.model),
+    taskKey(t.key), esc(t.repo), esc(t.role || "worker"), provModel(t.provider, t.model),
     '<span class="live" data-since="' + esc(t.started_utc) + '">' + elapsedSince(t.started_utc) + '</span>', esc(t.progress || "-")
   ]);
   const q = (d.queued || []).filter(t => keep(t, "queued", t.started_utc));
   $("queued").innerHTML = rows("queued", ["key","repo","role","parent","provider","model","waiting"], q, t => [
-    esc(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.parent || "-"), esc(t.provider), esc(t.model), esc(t.elapsed)
+    taskKey(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.parent || "-"), esc(t.provider), esc(t.model), esc(t.elapsed)
   ]);
   const fin = (d.finished || []).filter(t => keep(t, t.result, t.ended_utc));
-  $("finished").innerHTML = rows("finished", ["finished","key","prompt","repo","provider","model","elapsed",{t:"tokens",num:true},{t:"cost",num:true,tip:"as reported by the CLI"},"result","reason"], fin, t => [
-    esc(t.finished_at || "-"), '<a href="' + esc(t.result_url) + '" title="result / diff">' + esc(t.key) + '</a>', esc(t.prompt || t.title || "-"),
-    esc(t.repo), esc(t.provider), esc(t.model), esc(t.elapsed), t.tokens ? num(t.tokens) : "-", usd(t.cost_usd),
-    '<span class="'+cls(t.result)+'">'+esc(t.result)+"</span>", esc(t.reason)
-  ]);
+  $("finished").innerHTML = rows("finished", [{t:"finished",tip:"local time; hover for the full date"},"key","prompt","repo","provider / model","elapsed",{t:"tokens",num:true},{t:"cost",num:true,tip:"as reported by the CLI"},"result"], fin, t => [
+    shortTime(t.finished_at, d.now), '<a href="' + esc(t.result_url) + '" title="result / diff">' + taskKey(t.key) + '</a>', esc(t.prompt || t.title || "-"),
+    esc(t.repo), provModel(t.provider, t.model), esc(t.elapsed), t.tokens ? num(t.tokens) : "-", usd(t.cost_usd),
+    '<span class="'+cls(t.result)+'">'+esc(t.result)+"</span>" + (t.reason && t.reason !== t.result ? ' <span class="meta">' + esc(t.reason) + "</span>" : "")
+  ], null, ["nowrap","nowrap","wide","nowrap","nowrap","nowrap","","","wide"]);
   const max5 = Math.max(1, ...(d.providers || []).map(p => Number(p.tokens_5h) || 0));
   const max7 = Math.max(1, ...(d.providers || []).map(p => Number(p.tokens_7d) || 0));
   const bar = (v, m) => '<span class="bar" style="width:' + Math.round((Number(v) || 0) / m * 60) + 'px"></span>';
   $("providers").innerHTML = rows("providers", ["#","name","enabled","version","model",
-    {t:"5h",tip:"atr-side runs / tokens in the last 5 hours"},{t:"7d",tip:"atr-side runs / tokens in the last 7 days"},"last success","cooldown",{t:"usage",tip:"limits reported by the CLI, when it exposes them"}], d.providers, p => [
+    {t:"5h",tip:"atr-side runs / tokens in the last 5 hours"},{t:"7d",tip:"atr-side runs / tokens in the last 7 days"},"last success","cooldown",{t:"usage",tip:"plan limits reported by the CLI, when it exposes them"},{t:"extra credits",tip:"paid extra credits (Grok); display only, never spent by atr"}], d.providers, p => [
     esc(p.order), esc(p.name), p.enabled ? "yes" : "no", esc(p.version || "-"), esc(p.model || "default"),
     bar(p.tokens_5h, max5) + num(p.runs_5h) + " runs · " + num(p.tokens_5h),
     bar(p.tokens_7d, max7) + num(p.runs_7d) + " runs · " + num(p.tokens_7d),
-    esc(p.last_success || "-"), p.cooling ? '<span class="warn">cooldown</span>' : "—", esc(p.usage)
+    esc(p.last_success || "-"), p.cooling ? '<span class="warn">cooldown</span>' : "—",
+    (p.usage && p.usage !== "-") ? esc(p.usage) : '<span class="empty" title="this CLI does not report plan usage">-</span>',
+    p.extra_credits ? esc(p.extra_credits) : "-"
   ]);
   const today = d.today || [];
   const sum = k => today.reduce((a, r) => a + (Number(r[k]) || 0), 0);
   const costs = today.filter(r => r.cost_usd != null);
-  const tTotal = today.length ? {provider: "total", runs: sum("runs"), success: sum("success"), input: sum("input"), output: sum("output"),
+  const tTotal = today.length ? {provider: "total", runs: sum("runs"), success: sum("success"), input: sum("input"), cached: sum("cached"), cache_write: sum("cache_write"), output: sum("output"),
     cost_usd: costs.length ? costs.reduce((a, r) => a + r.cost_usd, 0) : null, hit: ""} : null;
-  $("today").innerHTML = rows("today", ["provider",{t:"runs",num:true},{t:"success",num:true},{t:"input",num:true},{t:"output",num:true},{t:"cost",num:true},
+  $("today").innerHTML = rows("today", ["provider",{t:"runs",num:true},{t:"success",num:true},{t:"input",num:true,tip:"uncached input tokens"},{t:"cached",num:true,tip:"input tokens served from the prompt cache"},{t:"cache write",num:true},{t:"output",num:true},{t:"cost",num:true},
     {t:"cache hit %",tip:"share of input tokens served from the provider's prompt cache today"}], today, r => [
-    esc(r.provider), num(r.runs), num(r.success), num(r.input), num(r.output), usd(r.cost_usd), esc(r.hit)
+    esc(r.provider), num(r.runs), num(r.success), num(r.input), num(r.cached), num(r.cache_write), num(r.output), usd(r.cost_usd), esc(r.hit)
   ], tTotal);
   const sav = d.savings || {};
   let meta = (sav.period || "") + " " + (sav.from || "") + ".." + (sav.to || "") +
@@ -259,11 +291,21 @@ function paint(d) {
       esc(r.hit), num(r.tokens_saved), r.saved_usd == null ? '<span class="empty">no pricing</span>' : "$" + Number(r.saved_usd).toFixed(4)
     ], sav.total || null
   );
-  $("chart").innerHTML = bars(sav.by_day || []);
-  $("chart").className = (sav.by_day && sav.by_day.length) ? "" : "empty";
+  const days = sav.by_day || [];
+  // One day: a bar per provider reads better than a single-bar chart.
+  $("chart").innerHTML = days.length > 1 ? bars(days) : savingsRuns(sav.by_provider || []);
+  $("chart").className = days.length ? "" : "empty";
   const logs = (d.logs || []).join("\n");
   $("logs").textContent = logs || "(none)";
   $("logs").className = logs ? "" : "empty";
+}
+function savingsRuns(list) {
+  const items = list.filter(r => Number(r.tokens_saved) > 0 || Number(r.cached) > 0);
+  if (!items.length) return '<p class="empty">(no cache savings in this period)</p>';
+  const max = Math.max(1, ...items.map(r => Number(r.tokens_saved) || 0));
+  return rows("savingsRuns", ["provider", {t:"tokens saved", tip:"tokens served from cache instead of re-sent"}, {t:"cache hit %"}], items, r => [
+    esc(r.provider), '<span class="bar" style="width:' + Math.round((Number(r.tokens_saved) || 0) / max * 160) + 'px"></span>' + num(r.tokens_saved), esc(r.hit)
+  ]);
 }
 function bars(days) {
   if (!days.length) return '<p class="empty">(none)</p>';

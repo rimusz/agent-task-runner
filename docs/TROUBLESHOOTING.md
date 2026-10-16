@@ -51,11 +51,18 @@ is failing and an **amber banner** when the token expires within 14 days.
 Both read `~/.config/atr/github-auth.json`, which the running service updates.
 
 The dashboard header shows `atr v<version> (<sha>)`, today's runs and success
-rate, and a health strip (GitHub token(s), Telegram, each CLI with the version
-the service recorded, uptime). Repos lists watched repos (`direct`), the shadow
+rate, and a compact health strip: `GitHub ok`, `Telegram ok`, `N CLIs ok` and
+uptime, with details (token expiry, CLI versions) on hover. A badge expands to
+show its problem only when it is amber or red (expiring token, missing CLI). Repos lists watched repos (`direct`), the shadow
 repo (`shadow`) and the Telegram assistant workspace (`assistant`), with the
 token env var NAME used; the top-level default repo is hidden while GitHub
-intake is off. Finished rows link to `tasks/<key>/result`. Filters (repo,
+intake is off. Finished rows link to `tasks/<key>/result`, show the finish
+time as `HH:MM` (full date on hover) and `provider / model`. Telegram assistant
+tasks (`tg<chat id>`) show as `Telegram` with the chat id on hover. Today shows
+uncached input, cached and cache-write tokens separately so totals add up.
+Providers show `-` for usage when the CLI reports none, and Grok extra credits
+in their own column. Token savings shows a per-provider bar table for a single
+day and the daily chart for longer periods. Filters (repo,
 status, provider, time window) and column sorting are read-only.
 
 Wrong provider planning or answering? `atr driver` shows the driver; see
