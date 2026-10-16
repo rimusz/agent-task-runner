@@ -11,9 +11,13 @@ h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
 h2 { font-size: 1rem; margin: 1.25rem 0 .4rem; }
 .meta { color: #666; font-size: .85rem; }
 table { width: 100%; border-collapse: collapse; font-size: .9rem; }
-th, td { text-align: left; padding: .3rem .4rem; border-bottom: 1px solid #ccc3; vertical-align: top; overflow-wrap: anywhere; word-break: normal; hyphens: none; }
-td.nowrap { white-space: nowrap; }
+th, td { text-align: left; padding: .3rem .4rem; border-bottom: 1px solid #ccc3; vertical-align: top; white-space: nowrap; word-break: normal; overflow-wrap: normal; hyphens: none; }
+/* Only long free text wraps, at word boundaries; everything else stays on one line. */
+td.wrap, td.wide { white-space: normal; overflow-wrap: break-word; }
 td.wide { min-width: 16rem; }
+td.wrap { min-width: 10rem; }
+td.num, th.num { min-width: 4.5rem; }
+.scroll { overflow-x: auto; }
 .badge[title] { cursor: help; }
 th { color: #666; font-weight: 600; }
 .ok { color: #2a7; }
@@ -101,7 +105,7 @@ function usd(n) { return n == null ? "-" : "$" + Number(n).toFixed(4); }
 function rows(id, headers, items, cells, totalRow, colCls) {
   if ((!items || !items.length) && !totalRow) return '<p class="empty">(none)</p>';
   const hs = headers.map(h => typeof h === "string" ? {t: h} : h);
-  let h = '<table data-id="' + id + '"><thead><tr>' + hs.map((x, i) =>
+  let h = '<div class="scroll"><table data-id="' + id + '"><thead><tr>' + hs.map((x, i) =>
     '<th class="sortable' + (x.num ? ' num' : '') + '" data-col="' + i + '"' + (x.tip ? ' title="' + esc(x.tip) + '"' : '') + '>' +
     (x.tip ? '<abbr>' + esc(x.t) + '</abbr>' : esc(x.t)) + "</th>").join("") + "</tr></thead><tbody>";
   const cellHtml = (cs) => cs.map((x, i) => {
@@ -120,7 +124,7 @@ function rows(id, headers, items, cells, totalRow, colCls) {
   }
   for (const r of body) h += "<tr>" + r.html + "</tr>";
   if (totalRow) h += '<tr class="total">' + cellHtml(cells(totalRow)) + "</tr>";
-  return h + "</tbody></table>";
+  return h + "</tbody></table></div>";
 }
 document.addEventListener("click", e => {
   const th = e.target.closest("th.sortable");
@@ -232,7 +236,7 @@ function paint(d) {
   setOptions($("providerFilter"), (d.providers || []).map(p => p.name));
   $("repos").innerHTML = rows("repos", ["name","mode","github","label",{t:"token env",tip:"env var used for GitHub (name only, never the value)"},"path"], d.repos, r => [
     esc(r.name) + (r.enabled ? "" : ' <span class="warn">(disabled)</span>'), esc(r.mode), esc(r.github || "-"), esc(r.label || "-"), esc(r.token_env || "-"), esc(r.path || "-")
-  ]);
+  ], null, ["","","","","","wrap"]);
   const ta = d.telegram_assistant, tae = $("tgAssistant");
   if (ta && ta.enabled) {
     tae.innerHTML = "<b>Telegram assistant</b>: provider " + esc(ta.provider_display || "-") +
@@ -244,17 +248,17 @@ function paint(d) {
   $("running").innerHTML = rows("running", ["key","repo","role","provider / model","elapsed","progress"], run, t => [
     taskKey(t.key), esc(t.repo), esc(t.role || "worker"), provModel(t.provider, t.model),
     '<span class="live" data-since="' + esc(t.started_utc) + '">' + elapsedSince(t.started_utc) + '</span>', esc(t.progress || "-")
-  ]);
+  ], null, ["","","","","","wrap"]);
   const q = (d.queued || []).filter(t => keep(t, "queued", t.started_utc));
   $("queued").innerHTML = rows("queued", ["key","repo","role","parent","provider","model","waiting"], q, t => [
     taskKey(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.parent || "-"), esc(t.provider), esc(t.model), esc(t.elapsed)
   ]);
   const fin = (d.finished || []).filter(t => keep(t, t.result, t.ended_utc));
-  $("finished").innerHTML = rows("finished", [{t:"finished",tip:"local time; hover for the full date"},"key","prompt","repo","provider / model","elapsed",{t:"tokens",num:true},{t:"cost",num:true,tip:"as reported by the CLI"},"result"], fin, t => [
+  $("finished").innerHTML = rows("finished", [{t:"finished",tip:"local time; hover for the full date"},"key","prompt","repo","provider / model",{t:"elapsed",num:true},{t:"tokens",num:true},{t:"cost",num:true,tip:"as reported by the CLI"},"result"], fin, t => [
     shortTime(t.finished_at, d.now), '<a href="' + esc(t.result_url) + '" title="result / diff">' + taskKey(t.key) + '</a>', esc(t.prompt || t.title || "-"),
     esc(t.repo), provModel(t.provider, t.model), esc(t.elapsed), t.tokens ? num(t.tokens) : "-", usd(t.cost_usd),
     '<span class="'+cls(t.result)+'">'+esc(t.result)+"</span>" + (t.reason && t.reason !== t.result ? ' <span class="meta">' + esc(t.reason) + "</span>" : "")
-  ], null, ["nowrap","nowrap","wide","nowrap","nowrap","nowrap","","","wide"]);
+  ], null, ["nowrap","nowrap","wide","nowrap","nowrap","nowrap","nowrap","nowrap","wide"]);
   const max5 = Math.max(1, ...(d.providers || []).map(p => Number(p.tokens_5h) || 0));
   const max7 = Math.max(1, ...(d.providers || []).map(p => Number(p.tokens_7d) || 0));
   const bar = (v, m) => '<span class="bar" style="width:' + Math.round((Number(v) || 0) / m * 60) + 'px"></span>';
@@ -263,10 +267,10 @@ function paint(d) {
     esc(p.order), esc(p.name), p.enabled ? "yes" : "no", esc(p.version || "-"), esc(p.model || "default"),
     bar(p.tokens_5h, max5) + num(p.runs_5h) + " runs · " + num(p.tokens_5h),
     bar(p.tokens_7d, max7) + num(p.runs_7d) + " runs · " + num(p.tokens_7d),
-    esc(p.last_success || "-"), p.cooling ? '<span class="warn">cooldown</span>' : "—",
+    shortTime(p.last_success, d.now), p.cooling ? '<span class="warn">cooldown</span>' : "—",
     (p.usage && p.usage !== "-") ? esc(p.usage) : '<span class="empty" title="this CLI does not report plan usage">-</span>',
     p.extra_credits ? esc(p.extra_credits) : "-"
-  ]);
+  ], null, ["","","","wrap","","","","","","wrap",""]);
   const today = d.today || [];
   const sum = k => today.reduce((a, r) => a + (Number(r[k]) || 0), 0);
   const costs = today.filter(r => r.cost_usd != null);
