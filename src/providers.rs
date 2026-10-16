@@ -868,12 +868,47 @@ pub async fn check_version(p: &Provider) -> VersionCheck {
     }
 }
 
+/// `cli-pins.json` next to config: pin results recorded by `atr serve` (which
+/// runs in the session that can read the keychain) so `atr doctor` over SSH
+/// can report them instead of "unverified".
+pub fn pins_path(config_path: &std::path::Path) -> PathBuf {
+    config_path
+        .parent()
+        .map(|d| d.join("cli-pins.json"))
+        .unwrap_or_else(|| PathBuf::from("cli-pins.json"))
+}
+
+/// Recorded service-side pin for `name`: `(pin, version, checked_at)`.
+pub fn recorded_pin(config_path: &std::path::Path, name: &str) -> Option<(String, String, String)> {
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(pins_path(config_path)).ok()?).ok()?;
+    let e = v.get(name)?;
+    let s = |k: &str| e.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    Some((s("pin"), s("version"), s("checked_at")))
+}
+
 pub async fn warn_versions(providers: &[Provider]) {
+    warn_versions_recorded(providers, None).await
+}
+
+pub async fn warn_versions_recorded(providers: &[Provider], config_path: Option<&std::path::Path>) {
+    let mut rec = serde_json::Map::new();
+    let now = chrono::Utc::now().to_rfc3339();
     for p in providers {
         if !p.enabled {
             continue;
         }
         let v = check_version(p).await;
+        if v.ok_path && !v.keychain_locked {
+            rec.insert(
+                p.name.clone(),
+                serde_json::json!({
+                    "pin": pin_label(&v),
+                    "version": v.version_text.clone().unwrap_or_default(),
+                    "checked_at": now,
+                }),
+            );
+        }
         if !v.ok_path {
             tracing::warn!(
                 provider = %p.name,
@@ -907,6 +942,15 @@ pub async fn warn_versions(providers: &[Provider]) {
                 version = ?v.version_text,
                 "CLI version ok"
             );
+        }
+    }
+    if let Some(cp) = config_path {
+        if !rec.is_empty() {
+            let path = pins_path(cp);
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, serde_json::Value::Object(rec).to_string()).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
         }
     }
 }

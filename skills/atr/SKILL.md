@@ -144,7 +144,10 @@ Full guide: `docs/REMOTE-ACCESS.md` in the atr repo.
 atr doctor [--json] [--cache]
 ```
 
-One `ok` / `warn` / `FAIL` line per check, then `N problems`. Checks CLIs, pins, Telegram token + `allowed_chat_ids`, OpenCode preset keys/URLs, repo, listen.
+One `ok` / `warn` / `FAIL` line per check, then `N problems`. Checks CLIs, pins, GitHub token (`github token api`: valid, repo access, days to expiry), Telegram token + `allowed_chat_ids`, OpenCode preset keys/URLs, repo, listen. Start every diagnosis here, then `atr status` (has a `github auth:` line) and `atr logs -f`. Full guide: `docs/TROUBLESHOOTING.md` in the atr repo.
+
+- GitHub: atr uses one env token (`ATR_GH_TOKEN`, then `ATR_SHADOW_GH_TOKEN`, then `GH_TOKEN`) from `~/.config/atr/shadow.env`, never `gh auth login`. A failing `gh auth status` over SSH on macOS is the locked keychain, not an expired login. 401 → Telegram + `[notify] command` alert (every 6h until recovered); expiry <14 days → daily warning.
+- `cli cursor pin skipped over SSH` is fine: serve records pins in `cli-pins.json` from the desktop session.
 
 ## Upgrade
 

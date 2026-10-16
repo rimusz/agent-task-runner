@@ -130,6 +130,24 @@ atr repos enable website
 atr config migrate
 ```
 
+### Notify hook
+
+```toml
+[notify]
+command = "~/bin/atr-alert.sh"  # sh -c; empty = off
+timeout = "10s"
+```
+
+Runs for operator alerts (GitHub auth failed / recovered / token expiring)
+with `ATR_ALERT_KIND`, `ATR_ALERT_MESSAGE`, `ATR_ALERT_SOURCE`,
+`ATR_ALERT_DAYS_LEFT`. Telegram still fires too. See
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md#7-notify-hook).
+
+### GitHub token
+
+Put `ATR_GH_TOKEN=<fine-grained PAT>` in `~/.config/atr/shadow.env` (0600),
+never in config. See [GITHUB.md](GITHUB.md#one-token-for-atr).
+
 ## Sources
 
 Omit `[[source]]` to keep current defaults: GitHub follows `[github].enabled`,

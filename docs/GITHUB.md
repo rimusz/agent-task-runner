@@ -59,6 +59,40 @@ gh auth status          # must succeed; atr doctor runs this
 Required access is whatever `gh` granted. Prefer the `repo` scope (classic) or
 the fine-grained permissions below.
 
+## One token for atr
+
+atr itself (issue poller, shadow poller, `atr doctor`) uses **one** token from
+the environment and hands it to `gh` as `GH_TOKEN`, so it never relies on the
+keychain-backed `gh auth login` (which is locked over SSH / in daemons on
+macOS). Lookup order, process env first then `shadow.env`:
+
+1. `ATR_GH_TOKEN` (recommended)
+2. `[shadow] gh_token_env` (default `ATR_SHADOW_GH_TOKEN`) — existing setups keep working
+3. `GH_TOKEN`, then `GITHUB_TOKEN`
+
+Use a **fine-grained PAT** scoped to the target repos with **Contents**,
+**Issues**, **Pull requests**: Read and write, and **Metadata**: Read.
+
+```bash
+umask 077
+printf 'ATR_GH_TOKEN=%s\n' 'paste-the-token-here' >> ~/.config/atr/shadow.env
+chmod 600 ~/.config/atr/shadow.env
+atr service restart && atr doctor
+```
+
+Health monitoring:
+
+- A 401 (or non-rate-limit 403) logs `ERROR` and sends a Telegram alert to the
+  owner chat (first `allowed_chat_ids`) and the `[notify] command` hook. At
+  most once per 6h while failing, plus a "recovered" notice.
+- atr probes `GET /user` hourly and reads `Github-Authentication-Token-Expiration`;
+  within 14 days of expiry it warns once a day.
+- `atr doctor` → `github token api`: token present, valid (login), access to
+  each watched repo, days to expiry (warn under 14, FAIL on 401).
+- `atr status` and the dashboard show the state (red = failing, amber = expiring).
+
+More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#5-github-token).
+
 ## 2. Token in `shadow.env`
 
 **When:** LaunchAgent / systemd, a Mini you only reach over SSH, or any host
@@ -168,6 +202,7 @@ PRs. atr itself never logs the value.
 | `gh auth` | `gh auth status` | logged in, or skipped if GitHub intake is off |
 | `gh token` | env + `shadow.env` (name only) and scopes from `gh auth status` / `gh api -i /user` headers | `GH_TOKEN` set, or unset because `gh auth login` works; warns if Contents/Issues/PRs/Metadata (or classic `repo`) are missing |
 | `ssh github` | `ssh -T git@github.com` | authenticated; **warn** (not fail) if remotes are HTTPS |
+| `github token api` | `GET /user` + `GET /repos/<repo>` with the atr token | valid, repo access, ≥14 days to expiry (warn <14d, FAIL on 401 / no access) |
 | `shadow token` | configured env name in env or `shadow.env` | set when `[shadow] enabled` |
 | `shadow.env mode` | file bits | `0600` (warns if group/other can read) |
 

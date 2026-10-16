@@ -56,6 +56,8 @@ pub struct RawConfig {
     pub gc: RawGc,
     #[serde(default)]
     pub update: RawUpdate,
+    #[serde(default)]
+    pub notify: RawNotify,
     /// Optional custom name → kind + model. Built-ins live in `presets.rs`.
     /// Never holds API keys.
     #[serde(rename = "preset", default)]
@@ -261,6 +263,17 @@ pub struct RawPreset {
 pub struct RawUpdate {
     #[serde(default = "default_update_repo")]
     pub github_repo: String,
+}
+
+/// `[notify]`: optional shell hook run for operator alerts (GitHub auth
+/// failing / recovered / token expiring). Telegram stays built in.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RawNotify {
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub timeout: String,
 }
 
 impl Default for RawUpdate {
@@ -614,6 +627,7 @@ pub struct Config {
     pub log: LogConfig,
     pub gc: GcConfig,
     pub update: UpdateConfig,
+    pub notify: NotifyConfig,
     pub presets: Vec<Preset>,
     pub providers: Vec<Provider>,
     /// Explicit `[[repo]]` entries only. Use [`Config::effective_repos`] for the
@@ -711,6 +725,13 @@ pub struct Preset {
     pub kind: String,
     pub model: String,
     pub cli: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NotifyConfig {
+    /// `sh -c` command; empty = off.
+    pub command: String,
+    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -2046,6 +2067,14 @@ impl Config {
                     default_update_repo()
                 } else {
                     raw.update.github_repo
+                },
+            },
+            notify: NotifyConfig {
+                command: raw.notify.command.trim().to_string(),
+                timeout: if raw.notify.timeout.trim().is_empty() {
+                    Duration::from_secs(10)
+                } else {
+                    parse_duration(&raw.notify.timeout)?
                 },
             },
             repos: {
