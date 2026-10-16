@@ -202,6 +202,11 @@ pub fn enqueue_notify(cfg: &TelegramConfig, body: &str) {
     b.lines.push(line);
 }
 
+#[cfg(test)]
+pub(crate) fn pending_notify_lines() -> Vec<String> {
+    batch().lock().unwrap().lines.clone()
+}
+
 pub fn flush_due(shared: &Shared) {
     let cfg = shared.config.read().unwrap().telegram.clone();
     if !cfg.enabled && bot_token(&cfg).is_none() {
@@ -384,7 +389,7 @@ fn send_message_mode(
     text: &str,
     markup: Option<Value>,
     parse_mode: Option<&str>,
-) -> std::result::Result<u32, String> {
+) -> std::result::Result<Option<i64>, String> {
     let url = format!("{}/bot{}/sendMessage", api_base(cfg), token);
     let mut payload = json!({
         "chat_id": chat_id,
@@ -398,12 +403,171 @@ fn send_message_mode(
         payload["parse_mode"] = json!(pm);
     }
     let agent = crate::util::ureq_agent(SEND_HTTP_TIMEOUT);
+    let mut message_id = None;
     retry_send(
         &SendPolicy::default(),
         token,
-        || classify_send(agent.post(&url).send_json(payload.clone())),
+        || match agent.post(&url).send_json(payload.clone()) {
+            Ok(resp) => {
+                message_id = resp
+                    .into_json::<Value>()
+                    .ok()
+                    .and_then(|v| v.pointer("/result/message_id").and_then(|n| n.as_i64()));
+                SendOutcome::Sent
+            }
+            Err(e) => classify_send(Err(e)),
+        },
         std::thread::sleep,
-    )
+    )?;
+    Ok(message_id)
+}
+
+/// Edit a previously sent message's text (single attempt; best effort).
+fn edit_message(
+    cfg: &TelegramConfig,
+    token: &str,
+    chat_id: i64,
+    message_id: i64,
+    text: &str,
+) -> bool {
+    let url = format!("{}/bot{}/editMessageText", api_base(cfg), token);
+    let payload = json!({"chat_id": chat_id, "message_id": message_id, "text": text});
+    match crate::util::ureq_agent(SEND_HTTP_TIMEOUT)
+        .post(&url)
+        .send_json(payload)
+    {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!("telegram edit failed: {}", redact(&e.to_string(), token));
+            false
+        }
+    }
+}
+
+/// Prefix marking the assistant's interim "on it" message.
+pub const INTERIM_PREFIX: &str = "⏳";
+
+fn interim_meta_key(chat: i64) -> String {
+    format!("telegram_interim:{chat}")
+}
+
+/// Short label for a provider: `claude (opus)` or just `claude`.
+pub fn provider_label(name: &str, model: &str) -> String {
+    let m = model.trim();
+    if m.is_empty() || m == name {
+        name.to_string()
+    } else {
+        format!("{name} ({m})")
+    }
+}
+
+pub fn interim_working_text(label: Option<&str>) -> String {
+    match label {
+        Some(l) => format!("{INTERIM_PREFIX} {l} is on it…"),
+        None => format!("{INTERIM_PREFIX} on it…"),
+    }
+}
+
+pub const INTERIM_QUEUED_TEXT: &str = "⏳ queued behind the current reply…";
+
+pub fn interim_done_text(provider: &str, secs: u64, ok: bool) -> String {
+    if ok {
+        format!("✓ {provider} · {secs}s")
+    } else {
+        format!("✗ {provider} · {secs}s")
+    }
+}
+
+fn provider_label_for(shared: &Shared, name: &str) -> String {
+    let cfg = shared.config.read().unwrap();
+    let model = cfg
+        .provider(name)
+        .map(|p| p.model.clone())
+        .unwrap_or_default();
+    provider_label(name, &model)
+}
+
+fn inflight_provider(shared: &Shared, key: &str) -> Option<String> {
+    shared
+        .inflight
+        .lock()
+        .unwrap()
+        .get(key)
+        .map(|f| f.provider.clone())
+        .filter(|p| !p.is_empty())
+}
+
+/// Send an outgoing message; interim assistant messages are tracked so they
+/// can be edited when a provider is chosen and when the reply arrives.
+fn send_outgoing(shared: &Shared, cfg: &TelegramConfig, o: Outgoing) {
+    let Some(token) = bot_token(cfg) else {
+        return;
+    };
+    let mut text = o.text;
+    let interim = text.starts_with(INTERIM_PREFIX);
+    if interim && text != INTERIM_QUEUED_TEXT {
+        // Provider may already be picked by the time we send.
+        if let Some(p) = inflight_provider(shared, &assistant_task_key(o.chat_id)) {
+            text = interim_working_text(Some(&provider_label_for(shared, &p)));
+        }
+    }
+    let body = sanitize(&text, &[&token]);
+    let mid = send_message_mode(cfg, &token, o.chat_id, &body, o.markup, None);
+    if interim {
+        if let Ok(Some(id)) = mid {
+            let now = chrono::Utc::now().timestamp();
+            let _ = shared
+                .db
+                .meta_set(&interim_meta_key(o.chat_id), &format!("{id}:{now}:{body}"));
+        }
+    }
+}
+
+fn interim_get(shared: &Shared, chat: i64) -> Option<(i64, i64, String)> {
+    let v = shared.db.meta_get(&interim_meta_key(chat)).ok().flatten()?;
+    let mut it = v.splitn(3, ':');
+    let id = it.next()?.parse().ok()?;
+    let t = it.next()?.parse().ok()?;
+    Some((id, t, it.next().unwrap_or("").to_string()))
+}
+
+/// Called by the scheduler once a provider is picked for an assistant turn.
+pub fn assistant_started(shared: &Shared, key: &str, provider: &str) {
+    let Some(chat) = chat_from_assistant_key(key) else {
+        return;
+    };
+    let cfg = shared.config.read().unwrap().telegram.clone();
+    let Some(token) = bot_token(&cfg) else {
+        return;
+    };
+    let Some((id, t, old)) = interim_get(shared, chat) else {
+        return;
+    };
+    let text = interim_working_text(Some(&provider_label_for(shared, provider)));
+    if old != text && edit_message(&cfg, &token, chat, id, &text) {
+        let _ = shared
+            .db
+            .meta_set(&interim_meta_key(chat), &format!("{id}:{t}:{text}"));
+    }
+}
+
+fn finish_interim(
+    shared: &Shared,
+    cfg: &TelegramConfig,
+    chat: i64,
+    provider: Option<&str>,
+    ok: bool,
+) {
+    let Some((id, t, _)) = interim_get(shared, chat) else {
+        return;
+    };
+    let _ = shared.db.meta_set(&interim_meta_key(chat), "");
+    let Some(token) = bot_token(cfg) else {
+        return;
+    };
+    let secs = (chrono::Utc::now().timestamp() - t).max(0) as u64;
+    let text = interim_done_text(provider.unwrap_or("assistant"), secs, ok);
+    edit_message(cfg, &token, chat, id, &text);
 }
 
 /// Per-attempt HTTP timeout for sendMessage. Generous because a read timeout is
@@ -625,7 +789,7 @@ fn poll_once(shared: &Shared) {
         }
         if let Ok(outs) = handle_update(shared, upd) {
             for o in outs {
-                send_one(&cfg, o.chat_id, &o.text, o.markup);
+                send_outgoing(shared, &cfg, o);
             }
         }
     }
@@ -993,16 +1157,12 @@ fn handle_assistant(shared: &Shared, chat: i64, text: &str) -> Outgoing {
                     .db
                     .set_provider_session(&key, Some(&pin), existing_sid.as_deref());
             }
-            let who = if pin.is_empty() {
-                "first available provider"
-            } else {
-                pin.as_str()
-            };
+            let label = (!pin.is_empty()).then(|| provider_label_for(shared, &pin));
             Outgoing {
                 chat_id: chat,
                 text: match outcome {
-                    SubmitOutcome::Accepted => format!("working… ({who})"),
-                    SubmitOutcome::Queued => format!("queued on the live assistant turn ({who})"),
+                    SubmitOutcome::Accepted => interim_working_text(label.as_deref()),
+                    SubmitOutcome::Queued => INTERIM_QUEUED_TEXT.to_string(),
                 },
                 markup: None,
             }
@@ -1118,6 +1278,16 @@ pub fn assistant_reply(shared: &Shared, key: &str, run_id: i64, outcome: &str) -
 
 pub fn deliver_assistant_result(shared: &Shared, key: &str, run_id: i64, outcome: &str) {
     let cfg = shared.config.read().unwrap().telegram.clone();
+    if let Some(chat) = chat_from_assistant_key(key) {
+        let provider = inflight_provider(shared, key);
+        finish_interim(
+            shared,
+            &cfg,
+            chat,
+            provider.as_deref(),
+            outcome == "success",
+        );
+    }
     for (i, o) in assistant_reply(shared, key, run_id, outcome)
         .into_iter()
         .enumerate()
@@ -2860,7 +3030,7 @@ cli = "/bin/true"
         shared.config.write().unwrap().telegram.assistant.enabled = true;
         let upd = json!({"message":{"chat":{"id":42},"text":"how do I add kimi?"}});
         let out = handle_update(&shared, &upd).unwrap();
-        assert!(out[0].text.contains("working"), "{}", out[0].text);
+        assert_eq!(out[0].text, "⏳ on it…");
         let task = shared.db.get_task("tg42").unwrap().unwrap();
         assert_eq!(task.status, "queued");
         let pending = shared.db.pending_messages("tg42").unwrap();
@@ -3107,6 +3277,19 @@ cli = "/bin/true"
                 markdown_to_telegram_html("```\nopen"),
                 "<pre>\nopen\n</pre>"
             );
+        }
+
+        #[test]
+        fn interim_texts_are_short() {
+            assert_eq!(provider_label("claude", "opus"), "claude (opus)");
+            assert_eq!(provider_label("claude", ""), "claude");
+            assert_eq!(
+                interim_working_text(Some("claude (opus)")),
+                "⏳ claude (opus) is on it…"
+            );
+            assert_eq!(interim_working_text(None), "⏳ on it…");
+            assert_eq!(interim_done_text("claude", 6, true), "✓ claude · 6s");
+            assert!(INTERIM_QUEUED_TEXT.starts_with(INTERIM_PREFIX));
         }
 
         #[test]

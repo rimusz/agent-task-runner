@@ -1914,7 +1914,11 @@ async fn telegram_assistant_uses_fake_cli_and_counts_usage() {
     }
     let upd = serde_json::json!({"message":{"chat":{"id":42},"text":"how do I add kimi?"}});
     let out = atr::telegram::handle_update(&h.shared, &upd).unwrap();
-    assert!(out[0].text.contains("working"), "{}", out[0].text);
+    assert!(
+        out[0].text.starts_with(atr::telegram::INTERIM_PREFIX),
+        "{}",
+        out[0].text
+    );
     h.wait_status("tg42", &["waiting"], 12000).await;
     let task = h.shared.db.get_task("tg42").unwrap().unwrap();
     assert_eq!(task.provider.as_deref(), Some("claude"));
@@ -1959,7 +1963,7 @@ async fn telegram_assistant_uses_fake_cli_and_counts_usage() {
     let follow = serde_json::json!({"message":{"chat":{"id":42},"text":"why did smoke fail?"}});
     let out = atr::telegram::handle_update(&h.shared, &follow).unwrap();
     assert!(
-        out[0].text.contains("working") || out[0].text.contains("queued"),
+        out[0].text.starts_with(atr::telegram::INTERIM_PREFIX),
         "{}",
         out[0].text
     );

@@ -113,6 +113,11 @@ fn deliver_reply(shared: &Shared, task: &Task, source: SourceKind, payload: &Val
     match source {
         SourceKind::Github => Ok(()),
         SourceKind::Telegram => {
+            // Assistant chat turns are delivered (formatted) by
+            // telegram::deliver_assistant_result; posting here too duplicated them.
+            if crate::telegram::is_assistant_key(&task.key) {
+                return Ok(());
+            }
             let cfg = shared.config.read().unwrap().telegram.clone();
             let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let body = if text.trim().is_empty() {
@@ -392,6 +397,26 @@ cli = "/bin/true"
 
     fn gh_calls(e: &Env) -> String {
         std::fs::read_to_string(&e.gh_log).unwrap_or_default()
+    }
+
+    #[test]
+    fn assistant_telegram_reply_not_reposted_as_notification() {
+        let e = env();
+        e.shared.config.write().unwrap().telegram.enabled = true;
+        let payload = json!({"text": "UNIQ-ASSISTANT-`x`"});
+        task(&e, "tg873752741", "reply", "", "telegram", "hi");
+        let at = e.shared.db.get_task("tg873752741").unwrap().unwrap();
+        deliver_reply(&e.shared, &at, SourceKind::Telegram, &payload).unwrap();
+        assert!(!crate::telegram::pending_notify_lines()
+            .iter()
+            .any(|l| l.contains("UNIQ-ASSISTANT")));
+        task(&e, "o-tg", "reply", "", "telegram", "hi");
+        let ot = e.shared.db.get_task("o-tg").unwrap().unwrap();
+        let payload = json!({"text": "UNIQ-OTHER"});
+        deliver_reply(&e.shared, &ot, SourceKind::Telegram, &payload).unwrap();
+        assert!(crate::telegram::pending_notify_lines()
+            .iter()
+            .any(|l| l.contains("UNIQ-OTHER")));
     }
 
     #[test]
