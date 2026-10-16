@@ -254,6 +254,61 @@ To keep it running after logout or reboot without logging in, run
 `atr tasks rm` and `atr gc --tasks` delete finished, failed, or cancelled
 task rows only. Running tasks are refused.
 
+## Choosing the driver provider and model
+
+atr picks providers in three separate places:
+
+| What | Config | Default when empty |
+|------|--------|--------------------|
+| **Driver** (planning + review) | top-level `driver = "<provider name>"` | `grok` if that provider is enabled, else the first enabled `[[provider]]` |
+| **Workers** (normal tasks) | `[[provider]]` order + `enabled` | first available provider in order |
+| **Telegram assistant** (free-text chat) | `[telegram.assistant] provider` | first available provider in order (it does **not** use `driver`) |
+
+The model is always per provider: `[[provider]] model` (empty = the CLI's own
+default). There is no per-task model override; to run a task on another model,
+add a second `[[provider]]` with that model and send the task to it.
+
+```toml
+driver = "claude"            # or "grok", "cursor", "codex", or any [[provider]] name
+
+[[provider]]                 # order = worker preference
+name = "claude"
+kind = "claude"
+model = "opus"
+
+[[provider]]
+name = "grok"
+kind = "grok"
+
+[telegram.assistant]
+enabled = true
+provider = "grok"            # optional; empty = first available in order
+```
+
+Set or change it:
+
+- CLI: `atr driver` (show), `atr driver set claude --model opus`,
+  `atr driver set grok`, `atr driver clear` (back to the default). Order and
+  models: `atr providers move <name> --to 1`, `atr providers model <name> <model>`.
+- Telegram: `/config set driver codex`, `/providers model cursor <model>`,
+  `/providers move <name> <n>`, `/config set telegram.assistant.provider claude`.
+- Per task (provider only): `atr add --provider claude "…"`, `"provider"` in
+  `POST /tasks` JSON, or `provider` on the MCP `add_task` tool. It's a
+  preference; the provider still needs the task's capabilities.
+
+Examples: `atr driver set grok` (recommended; enables Grok extras),
+`atr driver set claude --model opus`, `atr driver set cursor`,
+`atr driver set codex --model gpt-5-codex`.
+
+Fallback: a preferred provider (driver, or a per-task `provider`) that is
+disabled or has no CLI is skipped and the next provider in order is used; if
+it's busy (`max_parallel`) the task waits. Quota or rate-limit failures during
+a run fail over to the next provider like any worker.
+
+Verify: `atr driver`, `atr providers` (order + models), the dashboard meta
+line (`driver <name>`), `atr status --json | jq .driver`, and `atr doctor`
+(each `cli` line shows path and version).
+
 ## Other commands
 
 `atr gc --dry-run`, `atr shadow report --since 7d`, `atr tasks rm`,

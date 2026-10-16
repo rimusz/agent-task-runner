@@ -180,6 +180,55 @@ pub fn set_model(path: &Path, name: &str, model: &str) -> Result<()> {
     Ok(())
 }
 
+/// Set top-level `driver` (planning/review provider), optionally its model.
+/// `None` clears it (back to grok-if-enabled, else first enabled).
+pub fn set_driver(path: &Path, name: Option<&str>, model: Option<&str>) -> Result<()> {
+    let cfg = crate::config::load_config(path)?;
+    match name {
+        Some(n) => {
+            let Some(p) = cfg.provider(n) else {
+                bail!("unknown provider {n} (see `atr providers`)");
+            };
+            if !p.enabled {
+                eprintln!(
+                    "note: provider {n} is disabled; enable it with `atr providers enable {n}`"
+                );
+            }
+            if let Some(m) = model.filter(|m| !m.trim().is_empty()) {
+                set_model(path, n, m)?;
+            }
+            crate::config_edit::apply_set(path, "driver", n)?;
+        }
+        None => {
+            if model.is_some() {
+                bail!("--model needs a provider");
+            }
+            crate::config_edit::apply_set(path, "driver", "\"\"")?;
+        }
+    }
+    Ok(())
+}
+
+/// One line: effective driver, model, and whether it was set explicitly.
+pub fn driver_text(cfg: &Config) -> String {
+    match cfg.driver() {
+        Some(p) => format!(
+            "driver {} model={} ({})\n",
+            p.name,
+            display_model(p),
+            if cfg.driver.trim().is_empty() {
+                "default: grok if enabled, else first enabled"
+            } else {
+                "set in config"
+            }
+        ),
+        None => match cfg.driver_name() {
+            Some(n) => format!("driver {n} (not a configured provider)\n"),
+            None => "driver none (no enabled provider)\n".into(),
+        },
+    }
+}
+
 /// Store a preset key / URL after init already wrote the `[[provider]]` block.
 pub fn ensure_preset_setup(path: &Path, name: &str, yes: bool) -> Result<()> {
     let Some(bp) = crate::presets::builtin(name) else {
@@ -608,6 +657,23 @@ fn sighup_ok(path: &Path) {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn driver_set_model_and_clear() {
+        let (_d, path) = seed();
+        assert!(set_driver(&path, Some("nope"), None).is_err());
+        set_driver(&path, Some("claude"), Some("opus")).unwrap();
+        let cfg = crate::config::load_config(&path).unwrap();
+        assert_eq!(cfg.driver, "claude");
+        assert_eq!(cfg.provider("claude").unwrap().model, "opus");
+        assert!(driver_text(&cfg).contains("driver claude model=opus (set in config)"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep this comment"));
+        set_driver(&path, None, None).unwrap();
+        let cfg = crate::config::load_config(&path).unwrap();
+        assert!(cfg.driver.is_empty());
+        assert!(driver_text(&cfg).contains("default"));
+    }
 
     fn seed() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();

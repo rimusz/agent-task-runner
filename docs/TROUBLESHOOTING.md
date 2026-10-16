@@ -50,6 +50,9 @@ still read):
 is failing and an **amber banner** when the token expires within 14 days.
 Both read `~/.config/atr/github-auth.json`, which the running service updates.
 
+Wrong provider planning or answering? `atr driver` shows the driver; see
+[Choosing the driver provider and model](CONFIG.md#choosing-the-driver-provider-and-model).
+
 ## 3. Logs
 
 | OS | Where |
