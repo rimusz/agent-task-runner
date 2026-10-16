@@ -138,9 +138,12 @@ command = "~/bin/atr-alert.sh"  # sh -c; empty = off
 timeout = "10s"
 ```
 
-Runs for operator alerts (GitHub auth failed / recovered / token expiring)
+Runs for operator alerts (GitHub auth failed / recovered / token expiring,
+Telegram unreachable 15+ min / recovered)
 with `ATR_ALERT_KIND`, `ATR_ALERT_MESSAGE`, `ATR_ALERT_SOURCE`,
-`ATR_ALERT_DAYS_LEFT`. Telegram still fires too. See
+`ATR_ALERT_DAYS_LEFT`, `ATR_ALERT_TOKEN_ENV`, `ATR_ALERT_OWNER`
+(`telegram_unreachable` / `telegram_recovered` for Telegram health). Telegram
+still fires too for GitHub alerts. See
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md#7-notify-hook).
 
 ### GitHub token

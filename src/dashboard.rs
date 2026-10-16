@@ -209,6 +209,7 @@ pub fn snapshot_period(
         "intake_paused": shared.intake_paused.load(std::sync::atomic::Ordering::Relaxed),
         "driver": cfg.driver_name(),
         "github_auth": crate::gh_token::status_json(&shared.config_path, chrono::Utc::now()),
+        "telegram_health": crate::telegram_health::status_json(&cfg, &shared.config_path, chrono::Utc::now()),
         "repos": repos,
         "running": running,
         "queued": queued,

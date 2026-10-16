@@ -386,6 +386,7 @@ impl Shared {
             "quota_reset": top_reset.map(|t| cfg.display_timezone.format(t)),
             "intake_paused": self.intake_paused.load(Ordering::Relaxed),
             "github_auth": crate::gh_token::status_json(&self.config_path, chrono::Utc::now()),
+            "telegram_health": crate::telegram_health::status_json(&cfg, &self.config_path, chrono::Utc::now()),
             "running": inflight.keys().cloned().collect::<Vec<_>>(),
             "providers": providers,
             "shadow": {
@@ -868,6 +869,22 @@ pub fn format_status_table(shared: &Shared, repo: Option<&str>) -> String {
         "status ({tz})  listen={listen}  intake={}\n",
         if paused { "paused" } else { "on" }
     );
+    if let Some(th) = v.get("telegram_health") {
+        let level = th
+            .get("level")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown");
+        if level != "off" {
+            let msg = th.get("message").and_then(|x| x.as_str()).unwrap_or("");
+            let tag = match level {
+                "fail" => "FAIL",
+                "warn" => "warn",
+                "ok" => "ok",
+                _ => "?",
+            };
+            out.push_str(&format!("telegram: {tag}  {msg}\n"));
+        }
+    }
     if let Some(ga) = v.get("github_auth") {
         let tag = |level: &str| match level {
             "fail" => "FAIL",

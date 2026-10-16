@@ -24,6 +24,7 @@ broken. Each non-ok line prints a `fix:` hint.
 | `shadow.env mode` | group/other can read it | — | `chmod 600 ~/.config/atr/shadow.env` |
 | `cli <name>` | version doesn't contain `expected_version` | CLI path missing | Update the CLI or the pin; install it or set `cli` |
 | `repo_path`, `listen`, `system_prompt` | — | path missing / port busy | Fix the path, or stop whatever holds the port |
+| `telegram reachability` | 3+ failed polls | unreachable 15+ min | network/DNS/proxy to api.telegram.org |
 | `telegram`, `telegram token`, `telegram chat` | config incomplete | token set but unusable / no chat | `atr telegram setup`, then `atr telegram test` |
 | `mcp token`, `mcp http` | — | MCP on but no token | create `~/.config/atr/mcp.token` (0600) |
 | `atr on PATH` | `atr` not on PATH | — | re-run `install.sh` or add `~/.local/bin` to PATH |
@@ -100,6 +101,16 @@ owner's env var, ok/warn/fail and days left without printing values.
 - No alerts arriving: `[telegram] enabled = true` and `allowed_chat_ids` set;
   first id is the owner chat that gets alerts. Logs show `telegram notify failed`.
 - Free text not answered: `[telegram.assistant] enabled = true`.
+- `telegram reachability` / `telegram:` status line / dashboard banner:
+  `warn` = 3+ getUpdates failures in a row; `FAIL` = unreachable 15+ min
+  (the `[notify]` hook got `telegram_unreachable`). Check the host's network,
+  DNS, proxy or VPN path to `api.telegram.org`. Single timeouts are normal and
+  only logged at debug. State file: `~/.config/atr/telegram-health.json`.
+- From the chat: `/doctor` (warn/FAIL only), `/tokens` (GitHub token state, no
+  values), `/status`, `/tasks`. Alerts have a **Run doctor** button.
+- Commands missing from the `/` menu: atr registers them with setMyCommands at
+  start; restart atr (`atr service restart`) and reopen the chat.
+- Very long replies arrive as `reply.md` (more than 4 message parts).
 
 ## 7. Notify hook
 
@@ -112,7 +123,7 @@ timeout = "10s"                   # killed after this
 ```
 
 Env: `ATR_ALERT_KIND` (`github_auth_failed`, `github_auth_recovered`,
-`github_token_expiring`), `ATR_ALERT_MESSAGE`, `ATR_ALERT_SOURCE=github`,
+`github_token_expiring`, `telegram_unreachable`, `telegram_recovered`), `ATR_ALERT_MESSAGE`, `ATR_ALERT_SOURCE=github`,
 `ATR_ALERT_DAYS_LEFT` (expiry only). GitHub token vars are removed from the
 hook's environment. Test the script by hand:
 
