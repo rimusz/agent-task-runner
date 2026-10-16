@@ -416,6 +416,12 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         shared.kick.notify_waiters();
         return Ok(());
     }
+    if assistant {
+        let (s2, k2, p2) = (shared.clone(), key.clone(), provider.name.clone());
+        let _ =
+            tokio::task::spawn_blocking(move || crate::telegram::assistant_started(&s2, &k2, &p2))
+                .await;
+    }
 
     let entry = cfg.repo_for_task(&task);
     let ws_kind = crate::task::WorkspaceKind::parse(&task.workspace_kind)

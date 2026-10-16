@@ -362,7 +362,10 @@ async fn plugin_hook(
         let raw = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
         let _ = shared.db.insert_event(id, kind, &raw);
     }
-    if matches!(kind, "Stop" | "StopFailure" | "SubagentStop") && !task.is_empty() {
+    if matches!(kind, "Stop" | "StopFailure" | "SubagentStop")
+        && !task.is_empty()
+        && !crate::telegram::is_assistant_key(&task)
+    {
         let cfg = shared.config.read().unwrap().clone();
         crate::notify::notify_unless_shadow(&cfg.telegram, &format!("hook {kind} {task}"), false);
     }
