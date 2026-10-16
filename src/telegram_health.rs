@@ -201,6 +201,14 @@ pub fn status_json(
     summarize(&raw, now)
 }
 
+/// Telegram answers getUpdates with 409 when another getUpdates long-poll or a
+/// webhook holds the same bot token.
+pub fn is_conflict(err: &str) -> bool {
+    err.contains("status code 409")
+        || err.contains("409 Conflict")
+        || err.contains("terminated by other getUpdates")
+}
+
 pub fn summarize(raw: &serde_json::Value, now: DateTime<Utc>) -> serde_json::Value {
     if raw.is_null() {
         return serde_json::json!({"level": "unknown", "message": "no Telegram poll recorded yet (is atr serve running?)"});
@@ -211,7 +219,16 @@ pub fn summarize(raw: &serde_json::Value, now: DateTime<Utc>) -> serde_json::Val
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|d| d.with_timezone(&Utc));
     let mins = since.map(|s| (now - s).num_minutes()).unwrap_or(0);
-    let err = raw["last_error"].as_str().unwrap_or("");
+    let raw_err = raw["last_error"].as_str().unwrap_or("");
+    let conflict;
+    let err = if is_conflict(raw_err) {
+        conflict = format!(
+            "409 Conflict: another poller (second `atr serve`, test run, or other bot) is using this bot token, or a webhook is set ({raw_err})"
+        );
+        conflict.as_str()
+    } else {
+        raw_err
+    };
     let (level, message) = if n == 0 {
         ("ok", "Telegram reachable".to_string())
     } else if mins >= (ALERT_AFTER.as_secs() / 60) as i64 {
@@ -526,5 +543,14 @@ mod tests {
                 && s.contains("filename=\"reply.md\"")
                 && s.contains("# hi")
         );
+    }
+
+    #[test]
+    fn conflict_409_explained() {
+        let now = chrono::Utc::now();
+        let raw = serde_json::json!({"consecutive_failures": 3, "failing_since": now.to_rfc3339(), "last_error": "https://api.telegram.org/bot***/getUpdates: status code 409"});
+        let v = summarize(&raw, now);
+        assert!(v["message"].as_str().unwrap().contains("another poller"));
+        assert!(!is_conflict("timed out"));
     }
 }

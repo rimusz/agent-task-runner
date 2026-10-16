@@ -224,7 +224,7 @@ function paint(d) {
   if (okToks.length) hb += badge("ok", "GitHub ok", okToks.map(tokTip).join("\n"));
   badToks.forEach(t => hb += badge(t.level, "GitHub " + tokTip(t), t.message));
   if (!toks.length && hl.github) hb += bad(hl.github.level) ? badge(hl.github.level, "GitHub: " + (hl.github.message || hl.github.level), hl.github.message) : badge(hl.github.level, "GitHub ok", hl.github.message);
-  if (hl.telegram && hl.telegram.enabled) hb += bad(hl.telegram.level) ? badge(hl.telegram.level, "Telegram: " + (hl.telegram.message || hl.telegram.level), hl.telegram.message) : badge(hl.telegram.level, "Telegram ok", hl.telegram.message);
+  if (hl.telegram && hl.telegram.enabled) hb += bad(hl.telegram.level) ? badge(hl.telegram.level, "Telegram failing", "details in the banner above") : badge(hl.telegram.level, "Telegram ok", hl.telegram.message);
   // CLIs collapse to one badge; only missing ones get their own (red) badge.
   const clis = hl.clis || [];
   const okClis = clis.filter(c => c.present), badClis = clis.filter(c => !c.present);
