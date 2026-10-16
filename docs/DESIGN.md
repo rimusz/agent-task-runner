@@ -150,9 +150,9 @@ status / diffstat / truncated diff (including untracked via
 output. Stored per run; `atr tasks <id> --verbose` prints it.
 `[handoff] max_bytes` / `include_diff` are TOML.
 
-Startup version check warns on mismatch and does not block. Over SSH a locked
-login keychain prints the configured pin as `unverified` and does not fail
-`atr doctor`.
+At startup serve logs each CLI's version and records it in
+`cli-versions.json`; nothing is pinned or blocked. Over SSH a locked login
+keychain makes doctor show that recorded version instead.
 
 ## 5. Caching
 
