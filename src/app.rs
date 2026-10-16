@@ -869,18 +869,30 @@ pub fn format_status_table(shared: &Shared, repo: Option<&str>) -> String {
         if paused { "paused" } else { "on" }
     );
     if let Some(ga) = v.get("github_auth") {
-        let level = ga
-            .get("level")
-            .and_then(|x| x.as_str())
-            .unwrap_or("unknown");
-        let msg = ga.get("message").and_then(|x| x.as_str()).unwrap_or("");
-        let tag = match level {
+        let tag = |level: &str| match level {
             "fail" => "FAIL",
             "warn" => "warn",
             "ok" => "ok",
             _ => "?",
         };
-        out.push_str(&format!("github auth: {tag}  {msg}\n"));
+        let toks = ga
+            .get("tokens")
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if toks.is_empty() {
+            let level = ga
+                .get("level")
+                .and_then(|x| x.as_str())
+                .unwrap_or("unknown");
+            let msg = ga.get("message").and_then(|x| x.as_str()).unwrap_or("");
+            out.push_str(&format!("github auth: {}  {msg}\n", tag(level)));
+        }
+        for t in toks {
+            let level = t.get("level").and_then(|x| x.as_str()).unwrap_or("unknown");
+            let msg = t.get("message").and_then(|x| x.as_str()).unwrap_or("");
+            out.push_str(&format!("github auth: {}  {msg}\n", tag(level)));
+        }
     }
     let providers = v
         .get("providers")

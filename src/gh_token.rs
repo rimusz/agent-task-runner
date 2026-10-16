@@ -45,9 +45,61 @@ pub fn keys_for(shadow: &str) -> Vec<String> {
     keys
 }
 
-/// `(env name, value)` of the token atr will use. Never log the value.
+/// `(env name, value)` of the default token (single-token chain). Never log the value.
 pub fn resolve(cfg: &Config, config_path: Option<&Path>) -> Option<(String, String)> {
-    resolve_with(&token_keys(cfg), config_path, |k| std::env::var(k).ok())
+    let def = default_cfg_path(config_path);
+    resolve_with(&token_keys(cfg), Some(&def), |k| std::env::var(k).ok())
+}
+
+fn default_cfg_path(config_path: Option<&Path>) -> std::path::PathBuf {
+    config_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(crate::config::default_config_path)
+}
+
+/// Owner part of `owner/repo` (empty when not a slug).
+pub fn repo_owner(repo: &str) -> &str {
+    repo.split('/').next().unwrap_or("").trim()
+}
+
+/// Env var NAME mapped for `owner` in `[github.tokens]` (case-insensitive).
+pub fn owner_key<'a>(
+    tokens: &'a std::collections::BTreeMap<String, String>,
+    owner: &str,
+) -> Option<&'a str> {
+    if owner.is_empty() {
+        return None;
+    }
+    tokens
+        .iter()
+        .find(|(o, k)| o.eq_ignore_ascii_case(owner) && !k.trim().is_empty())
+        .map(|(_, k)| k.trim())
+}
+
+/// Keys to try for `repo`: the owner's mapped env name first, then the
+/// single-token chain.
+pub fn keys_for_repo(cfg: &Config, repo: Option<&str>) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(k) = repo.and_then(|r| owner_key(&cfg.github.tokens, repo_owner(r))) {
+        keys.push(k.to_string());
+    }
+    for k in token_keys(cfg) {
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    keys
+}
+
+/// Token for `repo` (per-owner `[github.tokens]`, else the default chain).
+pub fn resolve_for(
+    cfg: &Config,
+    config_path: Option<&Path>,
+    repo: Option<&str>,
+) -> Option<(String, String)> {
+    resolve_with(&keys_for_repo(cfg, repo), config_path, |k| {
+        std::env::var(k).ok()
+    })
 }
 
 pub fn resolve_with(
@@ -82,8 +134,13 @@ fn scrub_and_set(set: &mut dyn FnMut(&str, Option<&str>), token: Option<&str>) {
     }
 }
 
-pub fn apply(cmd: &mut tokio::process::Command, cfg: &Config, config_path: Option<&Path>) {
-    let tok = resolve(cfg, config_path).map(|(_, v)| v);
+pub fn apply(
+    cmd: &mut tokio::process::Command,
+    cfg: &Config,
+    config_path: Option<&Path>,
+    repo: Option<&str>,
+) {
+    let tok = resolve_for(cfg, config_path, repo).map(|(_, v)| v);
     scrub_and_set(
         &mut |k, v| match v {
             Some(v) => {
@@ -97,8 +154,13 @@ pub fn apply(cmd: &mut tokio::process::Command, cfg: &Config, config_path: Optio
     );
 }
 
-pub fn apply_std(cmd: &mut std::process::Command, cfg: &Config, config_path: Option<&Path>) {
-    let tok = resolve(cfg, config_path).map(|(_, v)| v);
+pub fn apply_std(
+    cmd: &mut std::process::Command,
+    cfg: &Config,
+    config_path: Option<&Path>,
+    repo: Option<&str>,
+) {
+    let tok = resolve_for(cfg, config_path, repo).map(|(_, v)| v);
     scrub_and_set(
         &mut |k, v| match v {
             Some(v) => {
@@ -222,22 +284,37 @@ impl AuthState {
     }
 }
 
-static STATE: Mutex<Option<AuthState>> = Mutex::new(None);
+static STATE: Mutex<Option<std::collections::BTreeMap<String, AuthState>>> = Mutex::new(None);
 
-fn with_state<T>(f: impl FnOnce(&mut AuthState) -> T) -> T {
+/// Per-token state, keyed by the token's env var NAME.
+fn with_state<T>(key: &str, f: impl FnOnce(&mut AuthState) -> T) -> T {
     let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    f(g.get_or_insert_with(AuthState::default))
+    f(g.get_or_insert_with(Default::default)
+        .entry(key.to_string())
+        .or_default())
+}
+
+/// Human label for a token: `owner (ENV)` or just `ENV`.
+pub fn token_label(key: &str, owner: Option<&str>) -> String {
+    match owner.filter(|o| !o.is_empty()) {
+        Some(o) => format!("{key} (owner {o})"),
+        None => key.to_string(),
+    }
 }
 
 pub fn alert_text(a: &Alert, key: Option<&str>) -> String {
-    let key = key.unwrap_or(PRIMARY_KEY);
+    alert_text_for(a, key.unwrap_or(PRIMARY_KEY), None)
+}
+
+pub fn alert_text_for(a: &Alert, key: &str, owner: Option<&str>) -> String {
+    let label = token_label(key, owner);
     match a {
         Alert::Failing(what) => format!(
-            "GitHub auth failing ({what}). Token {key} rejected (401/403); GitHub intake is stalled. Rotate the fine-grained PAT in ~/.config/atr/shadow.env and restart atr. Next reminder in 6h."
+            "GitHub auth failing ({what}). Token {label} rejected (401/403); GitHub intake for it is stalled. Rotate the fine-grained PAT in ~/.config/atr/shadow.env and restart atr. Next reminder in 6h."
         ),
-        Alert::Recovered => "GitHub auth recovered; intake is running again.".into(),
+        Alert::Recovered => format!("GitHub auth recovered for {label}; intake is running again."),
         Alert::Expiring(d) => format!(
-            "GitHub token {key} expires in {d} day(s). Create a new fine-grained PAT and update ~/.config/atr/shadow.env."
+            "GitHub token {label} expires in {d} day(s). Create a new fine-grained PAT and update ~/.config/atr/shadow.env."
         ),
     }
 }
@@ -252,8 +329,13 @@ impl Alert {
     }
 }
 
+fn is_token_var(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    n.contains("GH_TOKEN") || n.contains("GITHUB_TOKEN")
+}
+
 /// Run `[notify] command` via `sh -c` with ATR_ALERT_* env, killed after
-/// `timeout`. Token env vars are scrubbed from the hook's environment.
+/// `timeout`. GitHub token env vars are scrubbed from the hook's environment.
 pub fn run_hook(
     hook: &crate::config::NotifyConfig,
     kind: &str,
@@ -265,6 +347,13 @@ pub fn run_hook(
     }
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c").arg(&hook.command);
+    for (k, _) in std::env::vars_os() {
+        if let Some(k) = k.to_str() {
+            if is_token_var(k) {
+                cmd.env_remove(k);
+            }
+        }
+    }
     for k in keys_for("ATR_SHADOW_GH_TOKEN") {
         cmd.env_remove(k);
     }
@@ -304,13 +393,17 @@ pub fn run_hook(
     }
 }
 
-fn send(cfg: &Config, a: &Alert, key: Option<&str>) {
-    let text = alert_text(a, key);
+fn send(cfg: &Config, a: &Alert, key: &str, owner: Option<&str>) {
+    let text = alert_text_for(a, key, owner);
     if !cfg.notify.command.is_empty() {
         let hook = cfg.notify.clone();
         let kind = a.kind();
         let msg = text.clone();
-        let mut extra = vec![("ATR_ALERT_SOURCE", "github".to_string())];
+        let mut extra = vec![
+            ("ATR_ALERT_SOURCE", "github".to_string()),
+            ("ATR_ALERT_TOKEN_ENV", key.to_string()),
+            ("ATR_ALERT_OWNER", owner.unwrap_or("").to_string()),
+        ];
         if let Alert::Expiring(d) = a {
             extra.push(("ATR_ALERT_DAYS_LEFT", d.to_string()));
         }
@@ -336,60 +429,72 @@ pub fn state_path(config_path: &Path) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("github-auth.json"))
 }
 
-fn persist(config_path: Option<&Path>, key: Option<&str>, last_error: Option<&str>) {
+fn read_state_file(config_path: &Path) -> serde_json::Value {
+    std::fs::read_to_string(state_path(config_path))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Update this token's entry in `github-auth.json` (`{"tokens": {ENV: {...}}}`).
+fn persist(config_path: Option<&Path>, key: &str, owner: Option<&str>, last_error: Option<&str>) {
     let Some(cp) = config_path else { return };
-    let st = with_state(|s| s.clone());
-    let v = serde_json::json!({
+    let st = with_state(key, |s| s.clone());
+    let mut root = read_state_file(cp);
+    if root.get("tokens").and_then(|t| t.as_object()).is_none() {
+        root = serde_json::json!({"tokens": {}});
+    }
+    let entry = serde_json::json!({
         "state": if st.failing_since.is_some() { "failing" } else { "ok" },
         "failing_since": st.failing_since.map(|t| t.to_rfc3339()),
         "expires_at": st.expires_at.map(|t| t.to_rfc3339()),
         "token_env": key,
+        "owner": owner,
         "last_error": last_error.map(crate::github_auth::redact_secrets),
         "checked_at": Utc::now().to_rfc3339(),
     });
+    root["tokens"][key] = entry;
     let path = state_path(cp);
     let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, v.to_string()).is_ok() {
+    if std::fs::write(&tmp, root.to_string()).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
     }
 }
 
-/// GitHub auth summary for `atr status` / dashboard. `level`: ok|warn|fail|unknown.
+/// GitHub auth summary for `atr status` / dashboard. Overall `level` is the
+/// worst token (fail > warn > ok > unknown); `tokens` lists each one.
 pub fn status_json(config_path: &Path, now: DateTime<Utc>) -> serde_json::Value {
-    let raw: serde_json::Value = std::fs::read_to_string(state_path(config_path))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or(serde_json::Value::Null);
-    summarize(&raw, now)
+    summarize(&read_state_file(config_path), now)
 }
 
-pub fn summarize(raw: &serde_json::Value, now: DateTime<Utc>) -> serde_json::Value {
-    if raw.is_null() {
-        return serde_json::json!({"level": "unknown", "message": "no GitHub auth check yet"});
-    }
+fn summarize_one(raw: &serde_json::Value, now: DateTime<Utc>) -> serde_json::Value {
     let s = |k: &str| raw.get(k).and_then(|v| v.as_str()).map(String::from);
     let exp = s("expires_at")
         .and_then(|v| DateTime::parse_from_rfc3339(&v).ok())
         .map(|d| d.with_timezone(&Utc));
     let days = exp.map(|e| days_left(e, now));
+    let label = token_label(
+        &s("token_env").unwrap_or_else(|| "token".into()),
+        s("owner").as_deref(),
+    );
     let failing = s("state").as_deref() == Some("failing");
     let (level, message) = if failing {
         (
             "fail",
             format!(
-                "GitHub auth failing since {} ({})",
+                "{label}: auth failing since {} ({})",
                 s("failing_since").unwrap_or_default(),
                 s("last_error").unwrap_or_else(|| "401/403".into())
             ),
         )
     } else if let Some(d) = days.filter(|d| *d < EXPIRY_WARN_DAYS) {
-        ("warn", format!("GitHub token expires in {d} day(s)"))
+        ("warn", format!("{label}: expires in {d} day(s)"))
     } else {
         (
             "ok",
             match days {
-                Some(d) => format!("GitHub auth ok; token expires in {d} day(s)"),
-                None => "GitHub auth ok".into(),
+                Some(d) => format!("{label}: ok; expires in {d} day(s)"),
+                None => format!("{label}: ok"),
             },
         )
     };
@@ -397,16 +502,60 @@ pub fn summarize(raw: &serde_json::Value, now: DateTime<Utc>) -> serde_json::Val
         "level": level,
         "message": message,
         "token_env": s("token_env"),
+        "owner": s("owner"),
         "expires_at": s("expires_at"),
         "days_left": days,
         "checked_at": s("checked_at"),
     })
 }
 
-/// Feed a `gh` invocation result into the auth tracker.
+fn rank(level: &str) -> u8 {
+    match level {
+        "fail" => 3,
+        "warn" => 2,
+        "ok" => 1,
+        _ => 0,
+    }
+}
+
+pub fn summarize(raw: &serde_json::Value, now: DateTime<Utc>) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> =
+        if let Some(m) = raw.get("tokens").and_then(|t| t.as_object()) {
+            m.values().map(|v| summarize_one(v, now)).collect()
+        } else if raw.get("state").is_some() {
+            vec![summarize_one(raw, now)] // pre-per-owner single-token file
+        } else {
+            Vec::new()
+        };
+    if entries.is_empty() {
+        return serde_json::json!({"level": "unknown", "message": "no GitHub auth check yet", "tokens": []});
+    }
+    let worst = entries
+        .iter()
+        .map(|e| e["level"].as_str().unwrap_or("unknown"))
+        .max_by_key(|l| rank(l))
+        .unwrap_or("unknown")
+        .to_string();
+    let message = entries
+        .iter()
+        .filter(|e| worst == "ok" || e["level"].as_str() == Some(worst.as_str()))
+        .filter_map(|e| e["message"].as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let days_left = entries.iter().filter_map(|e| e["days_left"].as_i64()).min();
+    serde_json::json!({
+        "level": worst,
+        "message": message,
+        "days_left": days_left,
+        "tokens": entries,
+    })
+}
+
+/// Feed a `gh` invocation result (for `repo`) into that token's auth tracker.
 pub fn observe_gh(
     cfg: &Config,
     config_path: Option<&Path>,
+    repo: Option<&str>,
     success: bool,
     stderr: &str,
     what: &str,
@@ -415,20 +564,29 @@ pub fn observe_gh(
     if !success && !auth_fail {
         return; // unrelated failure: says nothing about auth
     }
+    let Some((key, _)) = resolve_for(cfg, config_path, repo) else {
+        if auth_fail {
+            tracing::error!(what, "GitHub auth failure and no token configured");
+        }
+        return;
+    };
+    let owner = repo
+        .map(repo_owner)
+        .filter(|o| owner_key(&cfg.github.tokens, o) == Some(key.as_str()));
     if auth_fail {
         tracing::error!(
             what,
+            token = %key,
             "GitHub auth failure: {}",
             crate::github_auth::redact_secrets(stderr.trim())
         );
     }
-    let alert = with_state(|s| s.record(!auth_fail, what, Utc::now()));
-    let key = resolve(cfg, config_path).map(|(k, _)| k);
+    let alert = with_state(&key, |s| s.record(!auth_fail, what, Utc::now()));
     if alert.is_some() || auth_fail {
-        persist(config_path, key.as_deref(), auth_fail.then_some(what));
+        persist(config_path, &key, owner, auth_fail.then_some(what));
     }
     if let Some(a) = alert {
-        send(cfg, &a, key.as_deref());
+        send(cfg, &a, &key, owner);
     }
 }
 
@@ -487,53 +645,122 @@ pub fn get(token: &str, path: &str) -> Probe {
     }
 }
 
-/// Periodic health probe (GET /user) run by the poller at most hourly.
+/// Repos atr talks to: enabled watch repos plus the shadow repo.
+pub fn used_repos(cfg: &Config) -> Vec<String> {
+    let mut repos: Vec<String> = Vec::new();
+    if cfg.intake_allows(crate::task::SourceKind::Github) {
+        for r in cfg.enabled_watch_repos() {
+            if !r.github.is_empty() && !repos.contains(&r.github) {
+                repos.push(r.github.clone());
+            }
+        }
+    }
+    if cfg.shadow.enabled {
+        let r = crate::shadow::shadow_repo(cfg);
+        if !r.is_empty() && !repos.contains(&r) {
+            repos.push(r);
+        }
+    }
+    repos
+}
+
+/// One entry per distinct token in use: env name, owner (if per-owner), the
+/// repos it serves, and the value (never log it).
+#[derive(Debug, Clone)]
+pub struct TokenUse {
+    pub key: String,
+    pub owner: Option<String>,
+    pub repos: Vec<String>,
+    pub value: Option<String>,
+}
+
+pub fn tokens_in_use(cfg: &Config, config_path: Option<&Path>) -> Vec<TokenUse> {
+    let mut out: Vec<TokenUse> = Vec::new();
+    let repos = used_repos(cfg);
+    let targets: Vec<Option<String>> = if repos.is_empty() {
+        vec![None]
+    } else {
+        repos.into_iter().map(Some).collect()
+    };
+    for repo in targets {
+        let resolved = resolve_for(cfg, config_path, repo.as_deref());
+        let mapped = repo.as_deref().and_then(|r| {
+            owner_key(&cfg.github.tokens, repo_owner(r))
+                .map(|k| (repo_owner(r).to_string(), k.to_string()))
+        });
+        let (key, value) = match (&resolved, &mapped) {
+            (Some((k, v)), _) => (k.clone(), Some(v.clone())),
+            (None, Some((_, k))) => (k.clone(), None),
+            (None, None) => (PRIMARY_KEY.to_string(), None),
+        };
+        let owner = mapped.filter(|(_, k)| *k == key).map(|(o, _)| o);
+        if let Some(e) = out.iter_mut().find(|e| e.key == key) {
+            if let Some(r) = repo {
+                e.repos.push(r);
+            }
+            continue;
+        }
+        out.push(TokenUse {
+            key,
+            owner,
+            repos: repo.into_iter().collect(),
+            value,
+        });
+    }
+    out
+}
+
+/// Periodic health probe (GET /user per token in use), at most hourly each.
 pub async fn maybe_probe(cfg: &Config, config_path: &Path) {
-    let now = Utc::now();
-    let due = with_state(|s| match s.last_probe {
-        None => true,
-        Some(t) => (now - t)
-            .to_std()
-            .map(|d| d >= PROBE_EVERY)
-            .unwrap_or(false),
-    });
-    if !due {
-        return;
-    }
-    with_state(|s| s.last_probe = Some(now));
-    let Some((key, tok)) = resolve(cfg, Some(config_path)) else {
-        tracing::debug!("no GitHub token configured; skip auth probe");
-        return;
-    };
-    let p = match tokio::task::spawn_blocking(move || get(&tok, "user")).await {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let mut alerts = Vec::new();
-    match p.status {
-        0 => return,
-        401 | 403 => {
-            tracing::error!(status = p.status, "GitHub token probe rejected");
-            if let Some(a) =
-                with_state(|s| s.record(false, &format!("GET /user -> {}", p.status), now))
-            {
-                alerts.push(a);
-            }
+    for tu in tokens_in_use(cfg, Some(config_path)) {
+        let Some(tok) = tu.value.clone() else {
+            tracing::debug!(token = %tu.key, "GitHub token not set; skip auth probe");
+            continue;
+        };
+        let now = Utc::now();
+        let due = with_state(&tu.key, |s| match s.last_probe {
+            None => true,
+            Some(t) => (now - t)
+                .to_std()
+                .map(|d| d >= PROBE_EVERY)
+                .unwrap_or(false),
+        });
+        if !due {
+            continue;
         }
-        200..=299 => {
-            if let Some(a) = with_state(|s| s.record(true, "", now)) {
-                alerts.push(a);
+        with_state(&tu.key, |s| s.last_probe = Some(now));
+        let p = match tokio::task::spawn_blocking(move || get(&tok, "user")).await {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let key = tu.key.as_str();
+        let mut alerts = Vec::new();
+        match p.status {
+            0 => continue,
+            401 | 403 => {
+                tracing::error!(status = p.status, token = %key, "GitHub token probe rejected");
+                if let Some(a) = with_state(key, |s| {
+                    s.record(false, &format!("GET /user -> {}", p.status), now)
+                }) {
+                    alerts.push(a);
+                }
             }
-            if let Some(a) = with_state(|s| s.note_expiry(p.expires_at, now)) {
-                alerts.push(a);
+            200..=299 => {
+                if let Some(a) = with_state(key, |s| s.record(true, "", now)) {
+                    alerts.push(a);
+                }
+                if let Some(a) = with_state(key, |s| s.note_expiry(p.expires_at, now)) {
+                    alerts.push(a);
+                }
             }
+            _ => {}
         }
-        _ => {}
-    }
-    let err = (p.status == 401 || p.status == 403).then(|| format!("GET /user -> {}", p.status));
-    persist(Some(config_path), Some(&key), err.as_deref());
-    for a in alerts {
-        send(cfg, &a, Some(&key));
+        let err =
+            (p.status == 401 || p.status == 403).then(|| format!("GET /user -> {}", p.status));
+        persist(Some(config_path), key, tu.owner.as_deref(), err.as_deref());
+        for a in alerts {
+            send(cfg, &a, key, tu.owner.as_deref());
+        }
     }
 }
 
@@ -703,6 +930,67 @@ mod tests {
     }
 
     #[test]
+    fn owner_mapping_case_insensitive_with_fallback() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("TaskrApps".to_string(), "TOK_T".to_string());
+        m.insert("rimusz".to_string(), "TOK_R".to_string());
+        assert_eq!(owner_key(&m, "taskrapps"), Some("TOK_T"));
+        assert_eq!(owner_key(&m, "RIMUSZ"), Some("TOK_R"));
+        assert_eq!(owner_key(&m, "other"), None);
+        assert_eq!(owner_key(&m, ""), None);
+        assert_eq!(repo_owner("TaskrApps/nixer-app"), "TaskrApps");
+        // mapped key first, then the default chain
+        let mut keys = vec!["TOK_T".to_string()];
+        keys.extend(keys_for("ATR_SHADOW_GH_TOKEN"));
+        let env = |k: &str| (k == "ATR_GH_TOKEN").then(|| "default".to_string());
+        assert_eq!(resolve_with(&keys, None, env).unwrap().0, "ATR_GH_TOKEN");
+        let env2 = |k: &str| match k {
+            "TOK_T" => Some("t".to_string()),
+            "ATR_GH_TOKEN" => Some("d".to_string()),
+            _ => None,
+        };
+        assert_eq!(resolve_with(&keys, None, env2).unwrap().0, "TOK_T");
+    }
+
+    #[test]
+    fn per_token_state_is_independent() {
+        with_state("TEST_A", |s| *s = AuthState::default());
+        with_state("TEST_B", |s| *s = AuthState::default());
+        assert!(with_state("TEST_A", |s| s.record(false, "x", t(0))).is_some());
+        assert!(with_state("TEST_B", |s| s.failing_since.is_none()));
+        assert!(with_state("TEST_B", |s| s.record(false, "y", t(0))).is_some());
+        assert_eq!(
+            with_state("TEST_A", |s| s.record(true, "", t(1))),
+            Some(Alert::Recovered)
+        );
+        assert!(with_state("TEST_B", |s| s.failing_since.is_some()));
+    }
+
+    #[test]
+    fn summarize_per_token_worst_wins() {
+        let raw = serde_json::json!({"tokens": {
+            "TOK_R": {"state":"ok","token_env":"TOK_R","owner":"rimusz","expires_at":"2027-01-12T07:28:00+00:00"},
+            "TOK_T": {"state":"failing","token_env":"TOK_T","owner":"TaskrApps","failing_since":"x","last_error":"issue list"}
+        }});
+        let v = summarize(&raw, t(0));
+        assert_eq!(v["level"], "fail");
+        assert!(v["message"]
+            .as_str()
+            .unwrap()
+            .contains("TOK_T (owner TaskrApps)"));
+        assert_eq!(v["tokens"].as_array().unwrap().len(), 2);
+        let txt = alert_text_for(&Alert::Expiring(3), "TOK_R", Some("rimusz"));
+        assert!(txt.contains("TOK_R (owner rimusz)") && txt.contains("3 day"));
+    }
+
+    #[test]
+    fn hook_env_scrubs_token_like_vars() {
+        assert!(is_token_var("ATR_GH_TOKEN_TASKRAPPS"));
+        assert!(is_token_var("GITHUB_TOKEN"));
+        assert!(!is_token_var("ATR_ALERT_KIND"));
+    }
+
+    #[test]
     fn alert_kinds() {
         assert_eq!(Alert::Recovered.kind(), "github_auth_recovered");
         assert_eq!(Alert::Expiring(1).kind(), "github_token_expiring");
@@ -721,5 +1009,27 @@ mod tests {
     fn alert_text_never_contains_value() {
         let s = alert_text(&Alert::Failing("poll".into()), Some("ATR_GH_TOKEN"));
         assert!(s.contains("ATR_GH_TOKEN") && s.contains("6h"));
+    }
+}
+
+#[cfg(test)]
+mod tokens_in_use_tests {
+    #[test]
+    fn groups_repos_by_owner_token() {
+        let cfg = crate::config::parse_config_toml(
+            "[github]\nenabled = false\n[github.tokens]\ntaskrapps = \"ATR_TEST_TOK_TASKR_UNSET\"\n[shadow]\nenabled = true\nrepo = \"TaskrApps/nixer-app\"\nlabels = [\"x\"]\n\n[[provider]]\nname = \"claude\"\nkind = \"claude\"\ncli = \"/bin/true\"\n",
+        )
+        .unwrap();
+        let t = super::tokens_in_use(&cfg, None);
+        let mapped = t.iter().find(|u| u.owner.as_deref() == Some("TaskrApps"));
+        // value may resolve via the default chain if the env has one; either way
+        // the owner mapping is reported when its key is the one chosen.
+        if let Some(m) = mapped {
+            assert_eq!(m.key, "ATR_TEST_TOK_TASKR_UNSET");
+            assert_eq!(m.repos, vec!["TaskrApps/nixer-app".to_string()]);
+        } else {
+            assert_eq!(t.len(), 1);
+            assert!(t[0].value.is_some());
+        }
     }
 }

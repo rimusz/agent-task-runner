@@ -18,7 +18,7 @@ broken. Each non-ok line prints a `fix:` hint.
 | `config` | — | config could not load | `atr init`, or fix the TOML error it prints |
 | `gh auth` | `gh auth status` fails in this shell but a token is in `shadow.env` | no `gh` login and no token | Use a token (below). A failed `gh auth status` over SSH on macOS is usually just the locked keychain. |
 | `gh token` | token lacks Contents/Issues/PRs/Metadata | no token anywhere | Fine-grained PAT, see [GITHUB.md](GITHUB.md) |
-| `github token api` | token expires within 14 days, or api.github.com unreachable | 401 (revoked/expired), or no access to a watched repo, or no token | Make a new PAT, set `ATR_GH_TOKEN` in `~/.config/atr/shadow.env`, `atr service restart` |
+| `github token api [owner]` (one per token) | token expires within 14 days, or api.github.com unreachable | 401 (revoked/expired), or no access to a watched repo, or no token | Make a new PAT, set `ATR_GH_TOKEN` in `~/.config/atr/shadow.env`, `atr service restart` |
 | `ssh github` | no SSH key (fine for HTTPS remotes) | — | Only needed for SSH remotes |
 | `shadow token` | — | shadow on, no token | Any of `ATR_GH_TOKEN` / `ATR_SHADOW_GH_TOKEN` in `shadow.env` |
 | `shadow.env mode` | group/other can read it | — | `chmod 600 ~/.config/atr/shadow.env` |
@@ -81,12 +81,18 @@ the environment**, passed to `gh` as `GH_TOKEN`. It never depends on
 `ATR_SHADOW_GH_TOKEN`), `GH_TOKEN`, `GITHUB_TOKEN`; process env first, then
 `~/.config/atr/shadow.env`. Setup: [GITHUB.md](GITHUB.md#one-token-for-atr).
 
+Repos from several owners use **per-owner tokens** (`[github.tokens]`, managed
+with `atr github token set|list|remove`); see
+[GITHUB.md](GITHUB.md#per-owner-tokens). `atr github token list` shows each
+owner's env var, ok/warn/fail and days left without printing values.
+
 | Symptom | Meaning | Fix |
 |---|---|---|
 | Telegram/hook "GitHub auth failing" | GitHub returned 401 (or 403 that isn't a rate limit). Intake is stalled. Repeats every 6h until fixed, then "recovered". | New fine-grained PAT → `ATR_GH_TOKEN` in `shadow.env` → `atr service restart` → `atr doctor` |
 | "GitHub token expires in N day(s)" | From the `Github-Authentication-Token-Expiration` header; daily within 14 days | Rotate before it expires |
 | `gh auth status` says "failed to log in" over SSH | macOS keychain is locked in SSH sessions. **False alarm** — atr doesn't use the `gh` login. | Check `atr doctor` → `github token api` instead |
-| `no access: owner/repo=404` | PAT not granted that repo | Add the repo to the token's repository access |
+| `no access: owner/repo=404` | PAT not granted that repo, or the repo belongs to another owner (fine-grained PATs are single-owner) | Add the repo to the token, or add a per-owner token: `atr github token set <owner>` |
+| One owner failing, others fine | Tokens are per owner (`[github.tokens]`); each has its own alert, banner and doctor line | `atr github token list`, then `atr github token set <owner>` |
 
 ## 6. Telegram
 

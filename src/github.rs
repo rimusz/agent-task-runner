@@ -98,7 +98,7 @@ async fn poll_repo(
     let repo_path = repo.path.display().to_string();
 
     let mut cmd = Command::new(gh);
-    crate::gh_token::apply(&mut cmd, cfg, Some(&shared.config_path));
+    crate::gh_token::apply(&mut cmd, cfg, Some(&shared.config_path), Some(github));
     let out = cmd
         .args([
             "issue",
@@ -119,6 +119,7 @@ async fn poll_repo(
     crate::gh_token::observe_gh(
         cfg,
         Some(&shared.config_path),
+        Some(github),
         out.status.success(),
         &String::from_utf8_lossy(&out.stderr),
         &format!("issue list {github}"),
@@ -187,7 +188,7 @@ async fn ingest_comments(
 ) -> Result<()> {
     let path = format!("repos/{repo}/issues/{number}/comments");
     let mut cmd = Command::new(gh);
-    crate::gh_token::apply(&mut cmd, cfg, Some(&shared.config_path));
+    crate::gh_token::apply(&mut cmd, cfg, Some(&shared.config_path), Some(repo));
     let out = cmd.args(["api", &path, "--paginate"]).output().await?;
     if !out.status.success() {
         return Ok(());

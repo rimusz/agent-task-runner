@@ -494,54 +494,52 @@ async fn github_token_api_check(checks: &mut Vec<Check>, cfg: &Config, config_pa
         );
         return;
     }
-    let Some((key, tok)) = crate::gh_token::resolve(cfg, Some(config_path)) else {
-        push(
-            checks,
-            "github token api",
-            Status::Fail,
-            format!("no token in {}", crate::gh_token::token_keys(cfg).join(" / ")),
-            Some("put ATR_GH_TOKEN=<fine-grained PAT> in ~/.config/atr/shadow.env (0600); see docs/GITHUB.md".into()),
-        );
-        return;
-    };
-    let mut repos: Vec<String> = cfg
-        .enabled_watch_repos()
-        .into_iter()
-        .map(|r| r.github.clone())
-        .filter(|g| !g.is_empty())
-        .collect();
-    if cfg.shadow.enabled {
-        let r = crate::shadow::shadow_repo(cfg);
-        if !r.is_empty() && !repos.contains(&r) {
-            repos.push(r);
-        }
+    for tu in crate::gh_token::tokens_in_use(cfg, Some(config_path)) {
+        let name = match &tu.owner {
+            Some(o) => format!("github token api {o}"),
+            None => "github token api".to_string(),
+        };
+        let label = crate::gh_token::token_label(&tu.key, tu.owner.as_deref());
+        let Some(tok) = tu.value.clone() else {
+            let tried = if tu.owner.is_some() {
+                format!("{} (then default chain)", tu.key)
+            } else {
+                crate::gh_token::token_keys(cfg).join(" / ")
+            };
+            push(
+                checks,
+                &name,
+                Status::Fail,
+                format!("no token in {tried}"),
+                Some(format!(
+                    "put {}=<fine-grained PAT> in ~/.config/atr/shadow.env (0600); see docs/GITHUB.md",
+                    tu.key
+                )),
+            );
+            continue;
+        };
+        let repos = tu.repos.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            let user = crate::gh_token::get(&tok, "user");
+            let repo_res: Vec<(String, u16)> = repos
+                .iter()
+                .map(|r| {
+                    (
+                        r.clone(),
+                        crate::gh_token::get(&tok, &format!("repos/{r}")).status,
+                    )
+                })
+                .collect();
+            (user, repo_res)
+        })
+        .await;
+        let Ok((user, repo_res)) = res else {
+            push(checks, &name, Status::Warn, "probe panicked".into(), None);
+            continue;
+        };
+        let (st, detail, hint) = token_api_verdict(&label, &user, &repo_res, chrono::Utc::now());
+        push(checks, &name, st, detail, hint);
     }
-    let res = tokio::task::spawn_blocking(move || {
-        let user = crate::gh_token::get(&tok, "user");
-        let repo_res: Vec<(String, u16)> = repos
-            .iter()
-            .map(|r| {
-                (
-                    r.clone(),
-                    crate::gh_token::get(&tok, &format!("repos/{r}")).status,
-                )
-            })
-            .collect();
-        (user, repo_res)
-    })
-    .await;
-    let Ok((user, repo_res)) = res else {
-        push(
-            checks,
-            "github token api",
-            Status::Warn,
-            "probe panicked".into(),
-            None,
-        );
-        return;
-    };
-    let (st, detail, hint) = token_api_verdict(&key, &user, &repo_res, chrono::Utc::now());
-    push(checks, "github token api", st, detail, hint);
 }
 
 fn token_api_verdict(

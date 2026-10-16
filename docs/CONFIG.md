@@ -148,6 +148,17 @@ with `ATR_ALERT_KIND`, `ATR_ALERT_MESSAGE`, `ATR_ALERT_SOURCE`,
 Put `ATR_GH_TOKEN=<fine-grained PAT>` in `~/.config/atr/shadow.env` (0600),
 never in config. See [GITHUB.md](GITHUB.md#one-token-for-atr).
 
+Repos from several owners: fine-grained PATs are single-owner, so map each
+owner to its own env var (or use `atr github token set <owner>`):
+
+```toml
+[github.tokens]
+your-user = "ATR_GH_TOKEN_YOUR_USER"
+YourOrg = "ATR_GH_TOKEN_YOURORG"
+```
+
+See [GITHUB.md](GITHUB.md#per-owner-tokens).
+
 ## Sources
 
 Omit `[[source]]` to keep current defaults: GitHub follows `[github].enabled`,
