@@ -195,6 +195,12 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Re-queue a finished, failed or cancelled task (same as Telegram /retry).
+    Retry { key: String },
+    /// Pause intake: GitHub, shadow and inbox pollers stop picking up work (same as Telegram /pause).
+    Pause,
+    /// Resume intake (same as Telegram /resume).
+    Resume,
     /// Open the dashboard in a browser (prints the URL when headless/SSH).
     Ui {
         /// Only print the URL.
@@ -292,6 +298,15 @@ enum ReposCmd {
 enum ConfigCmd {
     /// Write a [[repo]] block from repo_path + [github].repo. Leaves those keys in place.
     Migrate,
+    /// Print one config key (dotted, e.g. `telegram.assistant.enabled`). Secret keys are refused.
+    Get { key: String },
+    /// Set one config key (same validation as Telegram /config set), keep comments, back up, SIGHUP the service.
+    Set {
+        key: String,
+        /// Value; several words are joined with spaces.
+        #[arg(required = true, num_args = 1.., allow_hyphen_values = true)]
+        value: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -673,6 +688,15 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 print!("{}", atr::repos::migrate_text(&path)?);
                 Ok(ExitCode::SUCCESS)
             }
+            ConfigCmd::Get { key } => {
+                println!("{key} = {}", atr::config_edit::get_value(&path, &key)?);
+                Ok(ExitCode::SUCCESS)
+            }
+            ConfigCmd::Set { key, value } => {
+                let c = atr::config_edit::apply_set(&path, &key, &value.join(" "))?;
+                println!("set {} {} → {}", c.key, c.old, c.new);
+                Ok(ExitCode::SUCCESS)
+            }
         },
         Cmd::Driver { cmd } => {
             match cmd {
@@ -857,6 +881,42 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let shared = Shared::open(path)?;
             shared.cancel(&key, force)?;
             println!("{}", atr::app::Shared::cancel_ok_line(&key, force));
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Retry { key } => {
+            let cfg = load_config(&path)?;
+            match http_post_json(&cfg, &format!("tasks/{key}/retry")) {
+                Ok(_) => {}
+                Err(PostErr::Unreachable(e)) => {
+                    // No running service: queue it in the database; the next `atr serve` picks it up.
+                    Shared::open(path)?.retry(&key)?;
+                    eprintln!(
+                        "atr serve not reachable ({e}); queued in the database for the next start"
+                    );
+                }
+                Err(PostErr::Refused(e)) => return Err(e),
+            }
+            println!("retried {key}");
+            Ok(ExitCode::SUCCESS)
+        }
+        c @ (Cmd::Pause | Cmd::Resume) => {
+            let pause = matches!(c, Cmd::Pause);
+            let cfg = load_config(&path)?;
+            let route = if pause {
+                "intake/pause"
+            } else {
+                "intake/resume"
+            };
+            match http_post_json(&cfg, route) {
+                Ok(_) => {}
+                Err(PostErr::Unreachable(e)) => {
+                    // Persisted in the db meta table; `atr serve` reads it at start.
+                    Shared::open(path)?.set_intake_paused(pause);
+                    eprintln!("atr serve not reachable ({e}); saved for the next start");
+                }
+                Err(PostErr::Refused(e)) => return Err(e),
+            }
+            println!("intake {}", if pause { "paused" } else { "resumed" });
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Ui { print } => {
@@ -1054,6 +1114,35 @@ fn http_create(
     }
     let resp = req.send_json(payload)?;
     Ok(resp.status())
+}
+
+enum PostErr {
+    /// Could not connect (service not running / wrong listen).
+    Unreachable(anyhow::Error),
+    /// The service answered with an error (auth, unknown task, running task…).
+    Refused(anyhow::Error),
+}
+
+/// POST `{}` to a write route on the running `atr serve`, with the MCP bearer token.
+fn http_post_json(cfg: &atr::config::Config, route: &str) -> Result<serde_json::Value, PostErr> {
+    let url = format!("http://{}/{route}", cfg.listen);
+    let mut req = ureq::post(&url).set("User-Agent", "atr");
+    if let Some(a) = atr::mcp::auth_header(&cfg.mcp) {
+        req = req.set("Authorization", &a);
+    }
+    match req.send_json(serde_json::json!({})) {
+        Ok(resp) => Ok(resp.into_json().unwrap_or(serde_json::Value::Null)),
+        Err(ureq::Error::Status(code, resp)) => {
+            let msg = resp
+                .into_string()
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+                .unwrap_or_else(|| format!("HTTP {code}"));
+            Err(PostErr::Refused(anyhow::anyhow!("{msg}")))
+        }
+        Err(e) => Err(PostErr::Unreachable(anyhow::anyhow!("{e}"))),
+    }
 }
 
 fn http_cancel(listen: &str, auth: Option<&str>, key: &str, force: bool) -> Result<()> {

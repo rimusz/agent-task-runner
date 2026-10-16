@@ -10,10 +10,10 @@ atr serves one HTTP listener (`listen`, default `127.0.0.1:7420`):
 |---|---|
 | `GET /`, `/dashboard.json`, `/health`, `/tasks/<key>/result` (dashboard) | **None** (read-only) |
 | `GET /status`, `/tasks/<key>`, `/tasks/<key>/result` | **None** (read-only) |
-| `POST /tasks`, `/tasks/<key>/messages`, `/tasks/<key>/cancel`, `/hooks` | Bearer token |
+| `POST /tasks`, `/tasks/<key>/messages`, `/tasks/<key>/cancel`, `/tasks/<key>/retry`, `/intake/pause`, `/intake/resume`, `/hooks` | Bearer token |
 | `POST /mcp` | Bearer token |
 
-Every state-changing route uses the same token as `/mcp` (see [MCP over HTTP](#mcp-over-http)), compared in constant time, and rejects a foreign browser `Origin` (403). Missing or wrong token: 401. No token configured: 503. `atr serve` creates a 0600 token file at start if none exists, and the local CLI (`atr add`, `atr submit`, `atr cancel`) and the Grok plugin hook scripts read it automatically, so local use needs no setup.
+Every state-changing route uses the same token as `/mcp` (see [MCP over HTTP](#mcp-over-http)), compared in constant time, and rejects a foreign browser `Origin` (403). Missing or wrong token: 401. No token configured: 503. `atr serve` creates a 0600 token file at start if none exists, and the local CLI (`atr add`, `atr submit`, `atr cancel`, `atr retry`, `atr pause`, `atr resume`) and the Grok plugin hook scripts read it automatically, so local use needs no setup.
 
 The dashboard is read-only (no buttons or forms) and has no login: anyone who can reach the listener can view task titles, status and usage. Keep the tailnet to your own devices, or restrict the host with [Tailscale ACLs](https://tailscale.com/kb/1018/acls). Secrets (Telegram and GitHub tokens) are redacted from the dashboard data.
 

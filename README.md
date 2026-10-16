@@ -125,7 +125,7 @@ Claude Code, Grok Build, Cursor, Codex and OpenCode. OpenCode also opens the doo
 |---|---|
 | [docs/INSTALL.md](docs/INSTALL.md) | Manual install, Arch/Asahi, full agent deploy prompt |
 | [docs/USE-CASES.md](docs/USE-CASES.md) | Each use case with examples |
-| [docs/USAGE.md](docs/USAGE.md) | Adding work, watching repos, Telegram, dashboard, providers, upkeep, troubleshooting |
+| [docs/USAGE.md](docs/USAGE.md) | Adding work, watching repos, Telegram (and the CLI equivalent of every Telegram command), dashboard, providers, upkeep, troubleshooting |
 | [docs/GITHUB.md](docs/GITHUB.md) | GitHub token, SSH, what needs what |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | `atr doctor` checks, status, logs, service, GitHub token, Telegram, notify hook |
 | [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md) | Dashboard and MCP from other devices over Tailscale |

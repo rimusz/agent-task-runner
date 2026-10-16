@@ -28,6 +28,9 @@ fn write_routes(shared: Arc<Shared>) -> Router<Arc<Shared>> {
         .route("/tasks", post(create_task))
         .route("/tasks/:key/messages", post(post_message))
         .route("/tasks/:key/cancel", post(cancel))
+        .route("/tasks/:key/retry", post(retry))
+        .route("/intake/pause", post(intake_pause))
+        .route("/intake/resume", post(intake_resume))
         .route("/hooks", post(plugin_hook))
         .route_layer(axum::middleware::from_fn_with_state(
             shared,
@@ -378,6 +381,26 @@ async fn cancel(
     }
 }
 
+async fn retry(State(shared): State<Arc<Shared>>, Path(key): Path<String>) -> impl IntoResponse {
+    match shared.retry(&key) {
+        Ok(()) => (StatusCode::OK, Json(json!({"ok": true, "key": key}))),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": e.to_string()})),
+        ),
+    }
+}
+
+async fn intake_pause(State(shared): State<Arc<Shared>>) -> impl IntoResponse {
+    shared.set_intake_paused(true);
+    Json(json!({"ok": true, "intake_paused": true}))
+}
+
+async fn intake_resume(State(shared): State<Arc<Shared>>) -> impl IntoResponse {
+    shared.set_intake_paused(false);
+    Json(json!({"ok": true, "intake_paused": false}))
+}
+
 async fn plugin_hook(
     State(shared): State<Arc<Shared>>,
     Json(payload): Json<serde_json::Value>,
@@ -693,6 +716,38 @@ token_file = "/tmp/atr-mcp-missing.token"
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn intake_pause_resume_and_retry_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), "");
+        let base = listen(s.clone()).await;
+        let post = |path: &str| -> (u16, String) {
+            match ureq::post(&format!("{base}/{path}"))
+                .set("Authorization", &format!("Bearer {TEST_TOKEN}"))
+                .set("Content-Type", "application/json")
+                .send_string("{}")
+            {
+                Ok(r) => (r.status(), r.into_string().unwrap_or_default()),
+                Err(e) => status_body(e),
+            }
+        };
+        assert_eq!(post("intake/pause").0, 200);
+        assert!(s.intake_paused.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(
+            s.db.meta_get("intake_paused").unwrap().as_deref(),
+            Some("1")
+        );
+        assert_eq!(post("intake/resume").0, 200);
+        assert!(!s.intake_paused.load(std::sync::atomic::Ordering::Relaxed));
+        let (code, body) = post("tasks/nope-1/retry");
+        assert_eq!(code, 400);
+        assert!(body.contains("unknown task"), "{body}");
+        s.db.upsert_task("retry-1", "/repo", None).unwrap();
+        s.db.set_status("retry-1", "failed").unwrap();
+        assert_eq!(post("tasks/retry-1/retry").0, 200);
+        assert_eq!(s.db.get_task("retry-1").unwrap().unwrap().status, "queued");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn create_task_without_issue() {
         let dir = tempfile::tempdir().unwrap();
         let s = shared(dir.path(), "");
@@ -895,10 +950,13 @@ token_file = "/tmp/atr-mcp-missing.token"
         assert!(ev[0].raw.contains("PostToolUse"));
     }
 
-    const WRITE_ROUTES: [&str; 4] = [
+    const WRITE_ROUTES: [&str; 7] = [
         "tasks",
         "tasks/auth-1/messages",
         "tasks/auth-1/cancel",
+        "tasks/auth-1/retry",
+        "intake/pause",
+        "intake/resume",
         "hooks",
     ];
 
