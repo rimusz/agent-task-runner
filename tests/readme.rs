@@ -187,6 +187,8 @@ const TELEGRAM: &[&str] = &[
     "/help",
     "/start",
     "/status",
+    "/doctor",
+    "/tokens",
     "/tasks",
     "/task",
     "/add",
