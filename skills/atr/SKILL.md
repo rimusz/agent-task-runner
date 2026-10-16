@@ -129,6 +129,14 @@ Every change or destructive action still needs inline **Confirm** (old → new).
 atr mcp
 ```
 
+## Remote access
+
+Full guide: `docs/REMOTE-ACCESS.md` in the atr repo.
+
+- Recommended: keep `listen = "127.0.0.1:7420"` and run `tailscale serve --bg 7420` (macOS CLI: `/Applications/Tailscale.app/Contents/MacOS/Tailscale`). URL `https://<host>.<tailnet>.ts.net/`, tailnet-only HTTPS. Needs MagicDNS + HTTPS certificates. Check `tailscale serve status`; off `tailscale serve --https=443 off`.
+- The dashboard and HTTP task API have no auth; only `/mcp` needs `Authorization: Bearer`. The tailnet (and ACLs) is the protection. Never use Funnel or public exposure.
+- MCP token: 0600 `~/.config/atr/mcp.token` or `ATR_MCP_TOKEN` in `shadow.env`, `[mcp] enabled = true`, `atr service restart`, `atr doctor` shows `ok mcp token`. No token → 401. Never print, paste or commit it.
+
 ## Doctor
 
 ```bash

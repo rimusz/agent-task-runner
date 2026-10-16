@@ -91,7 +91,7 @@ Deploy atr (https://github.com/rimusz/agent-task-runner) on this machine. Follow
    - Local: register an MCP server named "atr" in your own MCP config with command "atr" and args ["mcp"].
    - Remote (over Tailscale): create a random token file ~/.config/atr/mcp.token with mode 0600 (for example: umask 077; openssl rand -hex 32 > ~/.config/atr/mcp.token), add an [mcp] section with enabled = true to the config, then restart:
      atr service restart
-     Point the remote client at http://<host>:7420/mcp with the header "Authorization: Bearer ${ATR_MCP_TOKEN}". Never display the token value.
+     Expose it with Tailscale Serve (tailscale serve --bg 7420) and point the remote client at https://<host>.<tailnet>.ts.net/mcp with the header "Authorization: Bearer ${ATR_MCP_TOKEN}". Never display the token value. Full steps: docs/REMOTE-ACCESS.md in the atr repo.
 
 9. Run the health check and report:
    atr doctor

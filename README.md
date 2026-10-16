@@ -127,6 +127,7 @@ Claude Code, Grok Build, Cursor, Codex and OpenCode. OpenCode also opens the doo
 | [docs/USE-CASES.md](docs/USE-CASES.md) | Each use case with examples |
 | [docs/USAGE.md](docs/USAGE.md) | Adding work, watching repos, Telegram, dashboard, providers, upkeep, troubleshooting |
 | [docs/GITHUB.md](docs/GITHUB.md) | GitHub token, SSH, what needs what |
+| [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md) | Dashboard and MCP from other devices over Tailscale |
 | [docs/CONFIG.md](docs/CONFIG.md) | Config file, paths, several repos, dashboard bind |
 | [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) | How providers, MCP and CI fit together |
 | [docs/DESIGN.md](docs/DESIGN.md) | Internals, for people changing atr |

@@ -203,12 +203,16 @@ atr gc --tasks --dry-run
 
 `atr reset` is a full reset. It lists what it will remove and asks before doing it (`--yes`/`-y` skips the prompt; without a terminal it refuses unless you pass `--yes`; `--dry-run` only prints the list). It stops and uninstalls the service, then deletes only atr's own files: `~/.config/atr` (config, secrets, launcher), `~/.local/share/atr` (task database, logs, backups, inbox), `~/atr-work` (worktrees), `~/Library/Logs/atr` and `~/Library/Logs/atr.boot.err` on macOS, and the `skills/atr/` folders under `~/.claude`, `~/.cursor`, `~/.codex`, `~/.grok` and `~/.config/opencode`. It never touches provider configs, your repos, or the `atr` binary; configured paths outside those dirs, or a dir that holds a watched repo, are listed as kept. Run `atr init` afterwards to set up again. Full flag list: `atr --help`. Service files and config edits: [CONFIG.md](CONFIG.md).
 
+## Remote access
+
+To open the dashboard from a phone or another Mac, or connect a remote MCP client, use Tailscale Serve and an MCP token: [REMOTE-ACCESS.md](REMOTE-ACCESS.md). The dashboard has no login; your tailnet is what protects it. Never use Tailscale Funnel.
+
 ## How other agents and tools reach atr
 
 **Control.** AI agent apps such as Claude Code, Codex, Cursor, Grok Build, Grok Bot and OpenCode control atr through its MCP server:
 
 - on the same machine, with local stdio: `atr mcp`
-- from another machine, with HTTP `/mcp` over Tailscale and a bearer token
+- from another machine, with HTTP `/mcp` over Tailscale and a bearer token ([REMOTE-ACCESS.md](REMOTE-ACCESS.md))
 
 Other ways in are the GitHub `for:atr` label, `atr add` / `atr submit` over SSH, `POST /tasks`, Telegram `/add`, an inbox directory of TOML/JSON files, and the dashboard on port 7420. MCP can add, wait, fetch results, steer and cancel tasks, but it cannot change config. Details: [HOW-IT-WORKS.md](HOW-IT-WORKS.md#mcp-tool-reference) and [CONFIG.md](CONFIG.md#mcp).
 
