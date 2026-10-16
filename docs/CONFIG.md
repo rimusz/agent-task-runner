@@ -58,6 +58,8 @@ token_env = "ATR_MCP_TOKEN"
 token_file = "~/.config/atr/mcp.token"
 ```
 
+Token setup, client configs and rotation: [REMOTE-ACCESS.md](REMOTE-ACCESS.md#mcp-over-http).
+
 ### Dashboard
 
 `atr ui` opens the dashboard on this machine: it takes the port from `listen`, uses `127.0.0.1` when `listen` is a wildcard (`0.0.0.0`, `::`), checks `/health`, then runs `open` (macOS) or `xdg-open` (Linux desktop). Over SSH or without a display it only prints the URL; `--print` always only prints.
@@ -80,6 +82,8 @@ bind = "<tailscale-ip>"
 
 If `bind` is not the listen host, serve also tries an extra read-only listener
 on `{bind}:{port}` so submit/cancel stay on loopback.
+
+The recommended way to reach the dashboard and `/mcp` from other devices is Tailscale Serve with `listen` left on loopback. See [REMOTE-ACCESS.md](REMOTE-ACCESS.md). The dashboard has no auth of its own.
 
 ### Repos
 
