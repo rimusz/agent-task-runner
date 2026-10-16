@@ -192,6 +192,7 @@ pub fn snapshot_period(
                 "cooling": cooling,
                 "usage": redact(&usage, &refs),
                 "usage_reported": usage_reported,
+                "usage_segments": crate::reported::provider_usage_segments(&view, tz, now),
                 "extra_credits": extra_credits,
                 "model": p.model,
                 "version": crate::providers::recorded_version(&shared.config_path, &p.name).map(|(v, _)| v),
@@ -1028,6 +1029,52 @@ kind = "claude"
         assert_eq!(u, "-");
         assert!(rep);
         assert_eq!(extra.as_deref(), Some("$140.32"));
+    }
+
+    #[test]
+    fn usage_segments_are_compact_without_zone() {
+        use chrono::TimeZone;
+        let tz = crate::tz::DisplayTz::parse("Europe/Vilnius").unwrap();
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 16, 12, 0, 0)
+            .unwrap();
+        let view = crate::reported::ProviderUsageView {
+            windows: vec![
+                crate::reported::UsageWindowView {
+                    name: "5h".into(),
+                    percent_used: Some(0.0),
+                    resets_at: Some(
+                        chrono::Utc
+                            .with_ymd_and_hms(2026, 10, 16, 17, 20, 0)
+                            .unwrap(),
+                    ),
+                },
+                crate::reported::UsageWindowView {
+                    name: "7d".into(),
+                    percent_used: Some(4.0),
+                    resets_at: Some(chrono::Utc.with_ymd_and_hms(2026, 10, 17, 0, 0, 0).unwrap()),
+                },
+            ],
+            extra_credits: None,
+        };
+        let segs = crate::reported::provider_usage_segments(&view, &tz, now);
+        assert_eq!(segs[0]["text"], "5h 0%");
+        assert_eq!(segs[0]["reset"], "resets Oct 16");
+        assert_eq!(segs[1]["text"], "7d 4%");
+        assert_eq!(segs[1]["reset"], "resets Oct 17");
+        assert!(segs[1]["reset_full"]
+            .as_str()
+            .unwrap()
+            .contains("Europe/Vilnius"));
+        assert!(!segs[0]["reset"].as_str().unwrap().contains("Vilnius"));
+    }
+
+    #[test]
+    fn page_drops_zone_suffixes_and_keeps_segments_whole() {
+        assert!(PAGE.contains("function usageCell"));
+        assert!(PAGE.contains(".seg { white-space: nowrap; }"));
+        assert!(PAGE.contains("shortTime(ta.last_activity"));
+        assert!(!PAGE.contains("sav.timezone"));
     }
 
     #[test]

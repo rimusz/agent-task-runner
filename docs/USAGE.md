@@ -113,7 +113,7 @@ atr telegram test
 
 If you type a normal sentence (not a `/command`), the assistant answers. It can only propose the same commands; each write still needs Confirm.
 
-**Dashboard.** While atr is running, open `http://127.0.0.1:7420/`. It is read-only: what is running, what is queued, recent results, and usage. No buttons.
+**Dashboard.** While atr is running, open `http://127.0.0.1:7420/`. It is read-only: what is running, what is queued, recent results, and usage. No buttons. Times are in `display_timezone`, shown once in the header and not repeated after each time. Plan usage reads like `5h 0% · resets Oct 16; 7d 4% · resets Oct 17`; hover a reset date for the full time and zone.
 
 **Terminal.**
 

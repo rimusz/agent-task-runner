@@ -454,6 +454,41 @@ pub fn format_provider_usage(
     parts.join("; ")
 }
 
+/// Dashboard usage segments: `{text: "5h 0%", reset: "resets Oct 16", reset_full:
+/// "2026-10-16 20:20 Europe/Vilnius"}`. No zone name in `reset` (the page
+/// header shows the display zone once); the full stamp is for a hover title.
+pub fn provider_usage_segments(
+    view: &ProviderUsageView,
+    tz: &crate::tz::DisplayTz,
+    now: DateTime<Utc>,
+) -> Vec<serde_json::Value> {
+    view.windows
+        .iter()
+        .map(|w| {
+            let text = match w.percent_used {
+                Some(p) => {
+                    let p = one_decimal(p);
+                    if p.fract() == 0.0 {
+                        format!("{} {:.0}%", w.name, p)
+                    } else {
+                        format!("{} {:.1}%", w.name, p)
+                    }
+                }
+                None => w.name.clone(),
+            };
+            let (reset, full) = match reset_display(&w.name, w.resets_at, now) {
+                Some(ResetDisplay::At(t)) => (
+                    Some(format!("resets {}", tz.format_compact(t))),
+                    Some(tz.format(t)),
+                ),
+                Some(ResetDisplay::WindowReset) => (Some("window reset".to_string()), None),
+                None => (None, None),
+            };
+            serde_json::json!({"text": text, "reset": reset, "reset_full": full})
+        })
+        .collect()
+}
+
 /// One line per provider, same formatter for every name (now or later).
 pub fn format_providers_usage(
     db: &Db,
