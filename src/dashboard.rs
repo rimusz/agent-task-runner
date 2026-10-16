@@ -178,11 +178,8 @@ pub fn snapshot_period(
                 .db
                 .provider_blocked(&p.name)
                 .unwrap_or((false, false));
-            let usage = crate::reported::format_provider_usage(
-                &crate::reported::provider_usage_view(&shared.db, &p.name),
-                tz,
-                now,
-            );
+            let view = crate::reported::provider_usage_view(&shared.db, &p.name);
+            let (usage, usage_reported, extra_credits) = provider_usage_cells(&view, tz, now);
             let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
             json!({
                 "order": i + 1,
@@ -190,6 +187,8 @@ pub fn snapshot_period(
                 "enabled": enabled,
                 "cooling": cooling,
                 "usage": redact(&usage, &refs),
+                "usage_reported": usage_reported,
+                "extra_credits": extra_credits,
                 "model": p.model,
                 "version": crate::providers::recorded_version(&shared.config_path, &p.name).map(|(v, _)| v),
                 "last_success": last_ok.get(&p.name).map(|e| tz.format_str(e)),
@@ -245,6 +244,8 @@ pub fn snapshot_period(
                 "cost_usd": st.cost_usd,
                 "input": u.map(|u| u.input).unwrap_or(0),
                 "output": u.map(|u| u.output).unwrap_or(0),
+                "cached": u.map(|u| u.cache_read).unwrap_or(0),
+                "cache_write": u.map(|u| u.cache_write).unwrap_or(0),
                 "hit": hit,
             })
         })
@@ -441,6 +442,28 @@ fn health(
         "clis": clis,
         "uptime": uptime,
     })
+}
+
+/// Dashboard usage cell: plan windows only (`-` when the CLI reports none),
+/// with Grok-style extra credits split out into their own field.
+fn provider_usage_cells(
+    view: &crate::reported::ProviderUsageView,
+    tz: &crate::tz::DisplayTz,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (String, bool, Option<String>) {
+    let extra = view.extra_credits.map(|u| format!("${u:.2}"));
+    if view.windows.is_empty() {
+        return ("-".into(), extra.is_some(), extra);
+    }
+    let windows_only = crate::reported::ProviderUsageView {
+        windows: view.windows.clone(),
+        extra_credits: None,
+    };
+    (
+        crate::reported::format_provider_usage(&windows_only, tz, now),
+        true,
+        extra,
+    )
 }
 
 fn start_of_local_day(tz: &crate::tz::DisplayTz, now: chrono::DateTime<chrono::Utc>) -> String {
@@ -815,7 +838,13 @@ kind = "claude"
             "{v}"
         );
         let usage = v["providers"][0]["usage"].as_str().unwrap();
-        assert!(usage.contains("usage:"), "{usage}");
+        assert_eq!(usage, "-", "not-reported usage shows a dash");
+        assert_eq!(v["providers"][0]["usage_reported"], false);
+        assert!(v["today"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r.get("cached").is_some()));
         let logs = v["logs"].as_array().unwrap();
         let joined = logs
             .iter()
@@ -914,6 +943,33 @@ kind = "claude"
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let resp = json(&shared, None).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn provider_usage_cells_split_extra_credits() {
+        let tz = crate::tz::DisplayTz::parse("UTC").unwrap();
+        let now = chrono::Utc::now();
+        let none = crate::reported::ProviderUsageView::default();
+        assert_eq!(
+            provider_usage_cells(&none, &tz, now),
+            ("-".to_string(), false, None)
+        );
+        let grok = crate::reported::ProviderUsageView {
+            windows: vec![],
+            extra_credits: Some(140.32),
+        };
+        let (u, rep, extra) = provider_usage_cells(&grok, &tz, now);
+        assert_eq!(u, "-");
+        assert!(rep);
+        assert_eq!(extra.as_deref(), Some("$140.32"));
+    }
+
+    #[test]
+    fn page_has_compact_badges_and_cached_column() {
+        assert!(PAGE.contains("CLIs ok"));
+        assert!(PAGE.contains("cached"));
+        assert!(PAGE.contains("Telegram"));
+        assert!(PAGE.contains("savingsRuns"));
     }
 
     #[test]
