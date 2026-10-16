@@ -123,8 +123,10 @@ See [DESIGN.md](DESIGN.md) §5 for the prefix contract and hit-rate math.
 
 `driver` is the provider used for **planning** and **review**. Empty means Grok
 if that provider is enabled, otherwise the first enabled provider. `atr init`
-asks which one to use. If the driver is missing, signed out, or limited, atr
-falls back to the next provider using the same error classes as worker failover.
+asks which one to use; change it with `atr driver set <provider> [--model M]`.
+A disabled driver or missing CLI is skipped for the next provider in order; a busy
+one makes the task wait; run failures (signed out, limit) fail over like workers.
+See [CONFIG.md](CONFIG.md#choosing-the-driver-provider-and-model).
 
 Planning and review work with any provider. Grok-only extras (plugin,
 `grok usage`, session fork) switch off when the driver is not Grok.

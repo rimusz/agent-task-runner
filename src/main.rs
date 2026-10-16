@@ -117,6 +117,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<ProvidersCmd>,
     },
+    /// Show or set the driver (planning/review provider).
+    Driver {
+        #[command(subcommand)]
+        cmd: Option<DriverCmd>,
+    },
     /// List tasks, show one, or remove finished ones.
     #[command(subcommand_negates_reqs = true)]
     Tasks {
@@ -299,6 +304,18 @@ enum TasksCmd {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum DriverCmd {
+    /// Use this [[provider]] as driver; `--model` also sets its model.
+    Set {
+        provider: String,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Clear `driver` (default: grok if enabled, else first enabled).
+    Clear,
 }
 
 #[derive(Subcommand, Debug)]
@@ -657,6 +674,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 Ok(ExitCode::SUCCESS)
             }
         },
+        Cmd::Driver { cmd } => {
+            match cmd {
+                Some(DriverCmd::Set { provider, model }) => {
+                    atr::providers_edit::set_driver(&path, Some(&provider), model.as_deref())?
+                }
+                Some(DriverCmd::Clear) => atr::providers_edit::set_driver(&path, None, None)?,
+                None => {}
+            }
+            print!("{}", atr::providers_edit::driver_text(&load_config(&path)?));
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Providers { cmd } => {
             match cmd {
                 None => {

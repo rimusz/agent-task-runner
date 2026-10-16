@@ -13,6 +13,12 @@ OpenCode covers Ollama and the Chinese providers (Kimi, Qwen, GLM, MiniMax, Deep
 
 Secrets live in `~/.config/atr/shadow.env` (mode 0600), never in config.
 
+## Driver and models
+
+- `driver` (top-level) = planning/review provider; empty = grok if enabled, else first enabled. Show/set: `atr driver`, `atr driver set <provider> [--model M]`, `atr driver clear`; Telegram `/config set driver <name>`.
+- Workers use `[[provider]]` order; the Telegram assistant uses `telegram.assistant.provider` or first available (not `driver`). Models are per provider (`atr providers model <name> <model>`); per-task override is provider only (`atr add --provider`, POST/MCP `provider`).
+- Verify: `atr driver`, dashboard `driver <name>`, `atr status --json | jq .driver`. Details: CONFIG.md "Choosing the driver provider and model".
+
 ## Telegram assistant (this chat)
 
 You are answering in Telegram about atr. You already have a read-only snapshot of `atr status`, `atr doctor`, and config (secrets redacted).
