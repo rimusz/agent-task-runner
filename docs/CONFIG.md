@@ -25,8 +25,11 @@ with SIGHUP (`atr providers` edits do that) or `atr service restart`.
 atr --config ~/.config/atr/config.toml status
 ```
 
-Telegram `/config get github.label` and `/config set github.label for:atr` edit
-the same file (Confirm, then reload). `atr config migrate` converts shorthand
+`atr config get github.label` and `atr config set github.label for:atr` (or
+Telegram `/config get` / `/config set`, which Confirm first) edit the same file
+with the same validation: secret keys are refused, the new file must parse,
+comments are kept, `config.toml.bak` is written and the running service is
+reloaded with SIGHUP. `atr config migrate` converts shorthand
 `repo_path` + `[github].repo` into `[[repo]]` and leaves the old keys in place.
 
 ## Useful keys

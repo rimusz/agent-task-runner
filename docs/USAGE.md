@@ -126,7 +126,36 @@ atr usage --repo demo-1 --period 7d
 atr logs -f
 atr doctor
 atr cancel my-task --force
+atr retry my-task
+atr pause
+atr resume
+atr config get github.label
+atr config set github.label for:atr
 ```
+
+`atr pause` / `atr resume` / `atr retry` call the running `atr serve` (bearer token, read from the same token file as `atr cancel`). If the service is not reachable they write the state database instead and the change applies at the next start. `atr config get/set` use the same keys and validation as Telegram `/config` (secret keys refused, comments kept, `config.toml.bak` written, service reloaded with SIGHUP).
+
+Telegram command to CLI:
+
+| Telegram | CLI | HTTP (bearer token) |
+|---|---|---|
+| `/status [repo]` | `atr status [--repo R]` | `GET /status` |
+| `/tasks [repo]` | `atr tasks [--repo R]` | `GET /dashboard.json` |
+| `/task <key>` | `atr tasks <key>` | `GET /tasks/<key>` |
+| `/add <prompt>` | `atr add <prompt>` | `POST /tasks` |
+| `/cancel <key> [force]` | `atr cancel <key> [--force]` | `POST /tasks/<key>/cancel` |
+| `/retry <key>` | `atr retry <key>` | `POST /tasks/<key>/retry` |
+| `/pause` | `atr pause` | `POST /intake/pause` |
+| `/resume` | `atr resume` | `POST /intake/resume` |
+| `/config get <key>` | `atr config get <key>` | none |
+| `/config set <key> <value>` | `atr config set <key> <value>` | none |
+| `/providers …`, `/enable`, `/disable` | `atr providers [add\|enable\|disable\|move\|model]` | none |
+| `/repos` | `atr repos list` | none |
+| `/usage [period] [repo]` | `atr usage [--period P] [--repo R]` | none |
+| `/shadow` | `atr shadow report` | none |
+| `/doctor` | `atr doctor` | none |
+| `/tokens` | `atr github token list` | none |
+| `/ui` | `atr ui --print` | `GET /` |
 
 ### Using atr from other agents
 

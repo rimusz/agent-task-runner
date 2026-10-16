@@ -226,6 +226,20 @@ impl Shared {
             .meta_set("intake_paused", if paused { "1" } else { "0" });
     }
 
+    /// Re-queue a finished/failed/cancelled task (Telegram /retry, `atr retry`,
+    /// POST /tasks/:key/retry). A running task is refused.
+    pub fn retry(&self, key: &str) -> Result<()> {
+        let Some(t) = self.db.get_task(key)? else {
+            bail!("unknown task {key}");
+        };
+        if t.status == "running" || self.inflight.lock().unwrap().contains_key(key) {
+            bail!("task {key} is running");
+        }
+        self.db.set_status(key, "queued")?;
+        self.kick.notify_waiters();
+        Ok(())
+    }
+
     pub fn cancel_ok_line(key: &str, force: bool) -> String {
         if force {
             format!("cancelled {key} (force)")

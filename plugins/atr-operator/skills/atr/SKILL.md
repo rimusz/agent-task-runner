@@ -38,6 +38,30 @@ You are answering in Telegram about atr. You already have a read-only snapshot o
 
 Allowed command families: `/status` `/tasks` `/task` `/add` `/usage` `/shadow` `/providers` `/config` `/repos` `/cancel` `/retry` `/pause` `/resume` `/enable` `/disable` `/ui` `/help`.
 
+## Telegram command to CLI
+
+Operators with a shell use the CLI; it shares the same code paths. `atr pause`/`resume`/`retry` go through the running service (fallback: state db, applied at next start). `atr config set` validates, keeps comments, backs up and SIGHUPs.
+
+| Telegram | CLI | HTTP (bearer token) |
+|---|---|---|
+| `/status [repo]` | `atr status [--repo R]` | `GET /status` |
+| `/tasks [repo]` | `atr tasks [--repo R]` | `GET /dashboard.json` |
+| `/task <key>` | `atr tasks <key>` | `GET /tasks/<key>` |
+| `/add <prompt>` | `atr add <prompt>` | `POST /tasks` |
+| `/cancel <key> [force]` | `atr cancel <key> [--force]` | `POST /tasks/<key>/cancel` |
+| `/retry <key>` | `atr retry <key>` | `POST /tasks/<key>/retry` |
+| `/pause` | `atr pause` | `POST /intake/pause` |
+| `/resume` | `atr resume` | `POST /intake/resume` |
+| `/config get <key>` | `atr config get <key>` | none |
+| `/config set <key> <value>` | `atr config set <key> <value>` | none |
+| `/providers …`, `/enable`, `/disable` | `atr providers [add\|enable\|disable\|move\|model]` | none |
+| `/repos` | `atr repos list` | none |
+| `/usage [period] [repo]` | `atr usage [--period P] [--repo R]` | none |
+| `/shadow` | `atr shadow report` | none |
+| `/doctor` | `atr doctor` | none |
+| `/tokens` | `atr github token list` | none |
+| `/ui` | `atr ui --print` | `GET /` |
+
 ## Init
 
 ```bash

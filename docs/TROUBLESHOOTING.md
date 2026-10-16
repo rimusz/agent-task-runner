@@ -160,7 +160,14 @@ Non-zero exits and timeouts are logged as warnings.
 
 ## 8. MCP / HTTP token
 
-Writes (`POST /tasks`, `/messages`, `/cancel`, `/hooks`) and `/mcp` need
+Writes (`POST /tasks`, `/messages`, `/cancel`, `/retry`, `/intake/pause`,
+`/intake/resume`, `/hooks`) and `/mcp` need
 `Authorization: Bearer` with `~/.config/atr/mcp.token` (0600) or
 `ATR_MCP_TOKEN`. A 401 means a missing/wrong token in the client. Reads and the
 dashboard stay open. See [REMOTE-ACCESS.md](REMOTE-ACCESS.md).
+
+`atr pause`, `atr resume` and `atr retry` use these routes. "atr serve not
+reachable … saved for the next start" means the service was down (or `listen`
+points elsewhere): the change is in the state database and applies when it
+starts. A 401/503 is a token problem, not a fallback. Check the result with
+`atr status` (`intake paused`/`on`).

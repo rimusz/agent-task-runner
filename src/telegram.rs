@@ -2051,15 +2051,7 @@ fn apply_edit(shared: &Shared, f: impl FnOnce() -> Result<String>) -> String {
 }
 
 fn retry_task(shared: &Shared, key: &str) -> Result<()> {
-    let Some(t) = shared.db.get_task(key)? else {
-        anyhow::bail!("unknown task {key}");
-    };
-    if t.status == "running" {
-        anyhow::bail!("task {key} is running");
-    }
-    shared.db.set_status(key, "queued")?;
-    shared.kick.notify_waiters();
-    Ok(())
+    shared.retry(key)
 }
 
 fn format_status(shared: &Shared, repo: Option<&str>) -> String {
