@@ -131,6 +131,15 @@ pub struct ProviderUsageRow {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ProviderRunStats {
+    pub provider: String,
+    pub runs: i64,
+    pub successes: i64,
+    pub tokens: i64,
+    pub cost_usd: Option<f64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct EventRow {
     pub run_id: i64,
@@ -1481,6 +1490,79 @@ impl Db {
             params![if resume { 1 } else { 0 }, run_id],
         )?;
         Ok(())
+    }
+
+    /// Per-provider run stats for runs started at/after `since` (RFC 3339 UTC).
+    pub fn provider_run_stats(&self, since: &str) -> Result<Vec<ProviderRunStats>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            r#"SELECT r.provider, COUNT(*),
+                      SUM(CASE WHEN r.outcome = 'success' THEN 1 ELSE 0 END),
+                      COALESCE(SUM(u.t), 0), SUM(u.c)
+               FROM runs r
+               LEFT JOIN (SELECT run_id, SUM(input + output + cache_read + cache_write) AS t,
+                                 SUM(cost_usd) AS c
+                          FROM usage GROUP BY run_id) u ON u.run_id = r.id
+               WHERE r.started >= ?1
+               GROUP BY r.provider ORDER BY r.provider"#,
+        )?;
+        let rows = stmt.query_map(params![since], |r| {
+            Ok(ProviderRunStats {
+                provider: r.get(0)?,
+                runs: r.get(1)?,
+                successes: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                tokens: r.get(3)?,
+                cost_usd: r.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Latest successful run end per provider.
+    pub fn last_success_by_provider(&self) -> Result<HashMap<String, String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT provider, MAX(ended) FROM runs WHERE outcome = 'success' AND ended IS NOT NULL GROUP BY provider",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Total tokens and summed cost for one run (cost None when never reported).
+    pub fn run_totals(&self, run_id: i64) -> Result<(i64, Option<f64>)> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT COALESCE(SUM(input + output + cache_read + cache_write), 0), SUM(cost_usd) FROM usage WHERE run_id = ?1",
+            params![run_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Most recent event of a run (for a one-line progress hint).
+    pub fn last_event_for_run(&self, run_id: i64) -> Result<Option<EventRow>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT run_id, kind, raw_json FROM events WHERE run_id = ?1 ORDER BY id DESC LIMIT 1",
+            params![run_id],
+            row_to_event,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Prompt for a run: first message that run consumed, else the task's first.
+    pub fn run_prompt(&self, key: &str, run_id: i64) -> Result<Option<String>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT body FROM messages WHERE task_key = ?1
+             ORDER BY (consumed_by_run = ?2) DESC, id LIMIT 1",
+            params![key, run_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn list_usage_for_run(&self, run_id: i64) -> Result<Vec<UsageRow>> {

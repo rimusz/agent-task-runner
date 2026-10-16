@@ -50,6 +50,14 @@ still read):
 is failing and an **amber banner** when the token expires within 14 days.
 Both read `~/.config/atr/github-auth.json`, which the running service updates.
 
+The dashboard header shows `atr v<version> (<sha>)`, today's runs and success
+rate, and a health strip (GitHub token(s), Telegram, each CLI with the version
+the service recorded, uptime). Repos lists watched repos (`direct`), the shadow
+repo (`shadow`) and the Telegram assistant workspace (`assistant`), with the
+token env var NAME used; the top-level default repo is hidden while GitHub
+intake is off. Finished rows link to `tasks/<key>/result`. Filters (repo,
+status, provider, time window) and column sorting are read-only.
+
 Wrong provider planning or answering? `atr driver` shows the driver; see
 [Choosing the driver provider and model](CONFIG.md#choosing-the-driver-provider-and-model).
 
