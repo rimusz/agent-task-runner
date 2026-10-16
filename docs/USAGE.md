@@ -106,7 +106,10 @@ atr telegram test
 /add what is 2+2?
 /usage month
 /cancel my-task
+/ui
 ```
+
+`/ui` replies with a dashboard link: `[dashboard] public_url` if set, else a detected Tailscale Serve `https://…ts.net/` URL, else the local `atr ui --print` address (marked local-only).
 
 If you type a normal sentence (not a `/command`), the assistant answers. It can only propose the same commands; each write still needs Confirm.
 

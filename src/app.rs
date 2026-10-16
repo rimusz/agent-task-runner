@@ -438,6 +438,14 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
     }
     let cfg = shared.config.read().unwrap().clone();
     cfg.validate_for_serve()?;
+    match crate::mcp::ensure_token(&cfg.mcp) {
+        Ok(true) => tracing::info!(
+            file = %cfg.mcp.token_file.display(),
+            "created HTTP token file (0600) for write routes and /mcp"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("could not create HTTP token file: {e:#}"),
+    }
     crate::opencode_cfg::apply_ollama_keep_alive(&cfg);
     crate::util::write_pid(&cfg)?;
     if cfg.shadow.enabled {

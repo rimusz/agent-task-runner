@@ -691,12 +691,19 @@ async fn http_submit_uses_exit_contract_codes() {
     )
     .await;
     let url = format!("http://{}/tasks/demo-60/messages", h.addr);
+    let auth = format!("Bearer {}", common::HTTP_TOKEN);
+    let unauth = ureq::post(&url)
+        .send_json(serde_json::json!({"body": "x", "source": "relay"}))
+        .unwrap_err();
+    assert!(matches!(unauth, ureq::Error::Status(401, _)), "{unauth}");
     let first = ureq::post(&url)
+        .set("Authorization", &auth)
         .send_json(serde_json::json!({"body": "one", "source": "relay"}))
         .unwrap();
     assert_eq!(first.status(), 200);
     h.wait_status("demo-60", &["running"], 8000).await;
     let second = ureq::post(&url)
+        .set("Authorization", &auth)
         .send_json(serde_json::json!({"body": "two", "source": "relay"}))
         .unwrap();
     assert_eq!(second.status(), 202);

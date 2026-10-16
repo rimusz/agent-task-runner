@@ -25,6 +25,7 @@ pub async fn run(
     run_id: i64,
     task_key: &str,
     hook_url: &str,
+    hook_env: &[(String, String)],
     test_command: &str,
     inflight_pid: Arc<Mutex<Option<u32>>>,
     run_timeout: Duration,
@@ -59,7 +60,8 @@ pub async fn run(
         .env("ATR_PROVIDER", &provider.name)
         .env("ATR_TASK_KEY", task_key)
         .env("ATR_HOOK_URL", hook_url)
-        .env("ATR_PLUGIN_TEST", test_command);
+        .env("ATR_PLUGIN_TEST", test_command)
+        .envs(hook_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     unsafe {
         cmd.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -248,6 +250,7 @@ plugin = true
             run_id,
             "g-1",
             "http://127.0.0.1:1/hook",
+            &[],
             "true",
             Arc::new(Mutex::new(None)),
             Duration::from_secs(60),

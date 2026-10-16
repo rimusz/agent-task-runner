@@ -19,6 +19,14 @@ install -m 755 /tmp/atr ~/.local/bin/atr
 
 Or from this repo: `cargo install --path .`
 
+## `atr: command not found`
+
+`install.sh` installs to `~/.local/bin` (or `ATR_BIN_DIR`); `cargo install` uses `~/.cargo/bin`. If that dir is not on `PATH`, the installer prints a one-line fix, and `atr doctor` warns `atr on PATH`. Fix (zsh: `~/.zshenv`; bash: `~/.bashrc`):
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshenv && exec $SHELL -l
+```
+
 ## Signing in to the coding CLIs
 
 Sign in to the CLIs you want (on a Mac, do this at the desktop so Cursor can use the login keychain):

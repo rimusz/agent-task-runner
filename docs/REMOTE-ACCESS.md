@@ -8,11 +8,14 @@ atr serves one HTTP listener (`listen`, default `127.0.0.1:7420`):
 
 | Path | Auth |
 |---|---|
-| `/`, `/dashboard.json`, `/health` (dashboard) | **None** |
-| `/status`, `/tasks`, `/tasks/<key>`, `/tasks/<key>/result`, `/tasks/<key>/messages`, `/tasks/<key>/cancel`, `/hooks` | **None** |
-| `POST /mcp` | Bearer token (see [MCP over HTTP](#mcp-over-http)) |
+| `GET /`, `/dashboard.json`, `/health` (dashboard) | **None** (read-only) |
+| `GET /status`, `/tasks/<key>`, `/tasks/<key>/result` | **None** (read-only) |
+| `POST /tasks`, `/tasks/<key>/messages`, `/tasks/<key>/cancel`, `/hooks` | Bearer token |
+| `POST /mcp` | Bearer token |
 
-The dashboard has no login of its own. The `/mcp` token protects only `/mcp`. Anyone who can reach the listener can view the dashboard and, on the main listener, use the HTTP task API (add, steer and cancel tasks). Your protection for everything except `/mcp` is that only your tailnet can reach it: keep the tailnet to your own devices, or restrict the host with [Tailscale ACLs](https://tailscale.com/kb/1018/acls). Secrets (Telegram and GitHub tokens) are redacted from the dashboard data.
+Every state-changing route uses the same token as `/mcp` (see [MCP over HTTP](#mcp-over-http)), compared in constant time, and rejects a foreign browser `Origin` (403). Missing or wrong token: 401. No token configured: 503. `atr serve` creates a 0600 token file at start if none exists, and the local CLI (`atr add`, `atr submit`, `atr cancel`) and the Grok plugin hook scripts read it automatically, so local use needs no setup.
+
+The dashboard is read-only (no buttons or forms) and has no login: anyone who can reach the listener can view task titles, status and usage. Keep the tailnet to your own devices, or restrict the host with [Tailscale ACLs](https://tailscale.com/kb/1018/acls). Secrets (Telegram and GitHub tokens) are redacted from the dashboard data.
 
 ## Recommended: Tailscale Serve
 
@@ -46,11 +49,16 @@ tailscale serve status            # shows the https://… URL and the 127.0.0.1:
 tailscale serve --https=443 off   # stop serving
 ```
 
-`atr ui --print` still prints the local `http://127.0.0.1:7420/` address; it does not know about Serve.
+`atr ui --print` still prints the local `http://127.0.0.1:7420/` address; it does not know about Serve. Telegram `/ui` does: it sends `[dashboard] public_url` if set, else the detected Serve URL. To pin it:
+
+```toml
+[dashboard]
+public_url = "https://<host>.<tailnet>.ts.net/"
+```
 
 ### Never use Funnel
 
-Do not run `tailscale funnel`, and do not bind atr to `0.0.0.0` on a machine with a public IP, port-forward 7420, or put it behind a public reverse proxy. The dashboard and task API have no auth; public exposure gives anyone control of your agents.
+Do not run `tailscale funnel`, and do not bind atr to `0.0.0.0` on a machine with a public IP, port-forward 7420, or put it behind a public reverse proxy. The dashboard has no auth, and the bearer token is the only thing guarding writes.
 
 ## Alternative: bind to the Tailscale IP
 
@@ -70,7 +78,7 @@ Restart with `atr service restart`. Trade-offs versus Serve:
 
 - Plain HTTP, not HTTPS (traffic is still WireGuard-encrypted inside the tailnet, but browsers mark it insecure).
 - The Tailscale IP is stable in practice but can change (re-auth, new node), and then the config is wrong and atr cannot bind.
-- With `listen` on the Tailscale IP, the full API and `/mcp` are on the tailnet, and the host itself must use that IP instead of `127.0.0.1`.
+- With `listen` on the Tailscale IP, the full API and `/mcp` are on the tailnet (writes still need the token), and the host itself must use that IP instead of `127.0.0.1`.
 
 ## MCP over HTTP
 
@@ -99,7 +107,7 @@ atr service restart
 atr doctor
 ```
 
-`atr doctor` should show `ok mcp token`. If `/mcp` is enabled with no token, doctor shows a `warn` (`HTTP /mcp enabled, no token`) and `/mcp` answers 503 `mcp token not configured` to every request. atr never prints the token.
+`atr doctor` should show `ok mcp token` and `ok http write auth`. With no token, doctor warns (`HTTP /mcp enabled, no token`, `http write auth`) and `/mcp` and the write routes answer 503 `mcp token not configured`. atr never prints the token. `atr serve` creates the token file at start when none exists.
 
 ### 3. Verify
 
@@ -160,7 +168,7 @@ umask 077; openssl rand -hex 32 > ~/.config/atr/mcp.token
 atr service restart
 ```
 
-atr re-reads the token on each request, so the restart is only needed when it comes from `ATR_MCP_TOKEN`; restarting is harmless either way. Then update every client. The old token stops working immediately.
+atr re-reads the token on each request, so the restart is only needed when it comes from `ATR_MCP_TOKEN`; restarting is harmless either way. The local CLI and hook scripts pick up the new file on their next call. Update every remote client; the old token stops working immediately.
 
 ### Keep the token secret
 
@@ -176,4 +184,7 @@ Never commit it, paste it into chat, issues, logs or screenshots, or put it in `
 | Dashboard works, `/mcp` 401 | Wrong token, or the header is missing `Bearer `. |
 | `/mcp` 503 | No token configured; see step 1 and `atr doctor`. |
 | `/mcp` 403 | Request sent a browser `Origin`; call it from an MCP client, not a web page. |
+| `POST /tasks`, `/messages`, `/cancel` or `/hooks` 401 | Script or tool calling the HTTP API without `Authorization: Bearer <token>`; read the token file. The `atr` CLI falls back to the local database if the HTTP call is refused. |
+| Same routes 503 | No token; restart `atr serve` (creates one) or run `atr init`. |
+| No live progress from Grok runs after an upgrade | Hook scripts are rewritten on each new Grok run; restart `atr serve` so it has the token. |
 | Bind alternative fails after reboot | The Tailscale IP changed or Tailscale was not up yet; switch to Serve. |

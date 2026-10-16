@@ -15,14 +15,66 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/dashboard.json", get(dashboard_json))
         .route("/health", get(health))
         .route("/status", get(status))
-        .route("/tasks", post(create_task))
         .route("/tasks/:key", get(get_task))
         .route("/tasks/:key/result", get(get_result))
+        .route("/mcp", post(mcp_post).get(mcp_get))
+        .merge(write_routes(shared.clone()))
+        .with_state(shared)
+}
+
+/// State-changing routes: same bearer token and Origin check as `/mcp`.
+fn write_routes(shared: Arc<Shared>) -> Router<Arc<Shared>> {
+    Router::new()
+        .route("/tasks", post(create_task))
         .route("/tasks/:key/messages", post(post_message))
         .route("/tasks/:key/cancel", post(cancel))
         .route("/hooks", post(plugin_hook))
-        .route("/mcp", post(mcp_post).get(mcp_get))
-        .with_state(shared)
+        .route_layer(axum::middleware::from_fn_with_state(
+            shared,
+            require_write_auth,
+        ))
+}
+
+async fn require_write_auth(
+    State(shared): State<Arc<Shared>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let cfg = shared.config.read().unwrap().clone();
+    if let Some(deny) = auth_failure(&cfg, req.headers()) {
+        return deny;
+    }
+    next.run(req).await
+}
+
+fn deny(code: StatusCode, error: String) -> Option<Response> {
+    Some((code, Json(json!({"ok": false, "error": error}))).into_response())
+}
+
+/// Origin + bearer check shared by `/mcp` and the write routes.
+/// 403 foreign browser Origin, 503 no token configured, 401 missing/bad token.
+fn auth_failure(cfg: &crate::config::Config, headers: &HeaderMap) -> Option<Response> {
+    let origin = headers.get("origin").and_then(|v| v.to_str().ok());
+    if !crate::mcp::origin_allowed(origin, &cfg.listen) {
+        return deny(StatusCode::FORBIDDEN, "origin denied".into());
+    }
+    let Some(want) = crate::mcp::read_token(&cfg.mcp) else {
+        return deny(
+            StatusCode::SERVICE_UNAVAILABLE,
+            crate::mcp::token_missing_error(&cfg.mcp),
+        );
+    };
+    let got = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::mcp::bearer_token);
+    let Some(got) = got else {
+        return deny(StatusCode::UNAUTHORIZED, "missing bearer token".into());
+    };
+    if !crate::mcp::tokens_equal(&got, &want) {
+        return deny(StatusCode::UNAUTHORIZED, "invalid bearer token".into());
+    }
+    None
 }
 
 async fn dashboard_page(State(shared): State<Arc<Shared>>) -> impl IntoResponse {
@@ -389,41 +441,8 @@ async fn mcp_post(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: B
         )
             .into_response();
     }
-    let origin = headers.get("origin").and_then(|v| v.to_str().ok());
-    if !crate::mcp::origin_allowed(origin, &cfg.listen) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"ok": false, "error": "origin denied"})),
-        )
-            .into_response();
-    }
-    let Some(want) = crate::mcp::read_token(&cfg.mcp) else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "ok": false,
-                "error": crate::mcp::token_missing_error(&cfg.mcp),
-            })),
-        )
-            .into_response();
-    };
-    let got = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(crate::mcp::bearer_token);
-    let Some(got) = got else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"ok": false, "error": "missing bearer token"})),
-        )
-            .into_response();
-    };
-    if !crate::mcp::tokens_equal(&got, &want) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"ok": false, "error": "invalid bearer token"})),
-        )
-            .into_response();
+    if let Some(deny) = auth_failure(&cfg, &headers) {
+        return deny;
     }
     let raw = String::from_utf8_lossy(&body);
     let replies = crate::mcp::handle_raw(&shared, &raw).await;
@@ -469,7 +488,22 @@ mod tests {
     use crate::config::load_config;
     use crate::mcp::write_token_file;
 
+    const TEST_TOKEN: &str = "http-write-test-token";
+
+    /// Test config; adds an `[mcp]` token file unless `extra` sets its own.
     fn shared(dir: &std::path::Path, extra: &str) -> Arc<Shared> {
+        let tok = dir.join("write.token");
+        crate::mcp::write_token_file(&tok, TEST_TOKEN).unwrap();
+        let owned;
+        let extra = if extra.contains("[mcp]") {
+            extra
+        } else {
+            owned = format!(
+                "{extra}\n[mcp]\nenabled = true\ntoken_env = \"ATR_HTTP_WRITE_TEST_UNSET\"\ntoken_file = \"{}\"\n",
+                tok.display()
+            );
+            owned.as_str()
+        };
         let cfg_path = dir.join("config.toml");
         let prompt = dir.join("p.md");
         std::fs::write(&prompt, "p\n").unwrap();
@@ -655,6 +689,7 @@ token_file = "/tmp/atr-mcp-missing.token"
         let s = shared(dir.path(), "");
         let base = listen(s.clone()).await;
         let resp = ureq::post(&format!("{base}/tasks"))
+            .set("Authorization", &format!("Bearer {TEST_TOKEN}"))
             .set("Content-Type", "application/json")
             .send_string(r#"{"body":"what is 2+2?","workspace":"none","output":"text"}"#)
             .unwrap();
@@ -676,6 +711,7 @@ token_file = "/tmp/atr-mcp-missing.token"
         let notes = dir.path().join("notes");
         std::fs::create_dir_all(&notes).unwrap();
         let resp = ureq::post(&format!("{base}/tasks"))
+            .set("Authorization", &format!("Bearer {TEST_TOKEN}"))
             .set("Content-Type", "application/json")
             .send_string(&format!(
                 r#"{{"body":"fix the typo","dir":"{}"}}"#,
@@ -698,6 +734,7 @@ token_file = "/tmp/atr-mcp-missing.token"
         let notes = dir.path().join("notes");
         std::fs::create_dir_all(&notes).unwrap();
         let resp = ureq::post(&format!("{base}/tasks"))
+            .set("Authorization", &format!("Bearer {TEST_TOKEN}"))
             .set("Content-Type", "application/json")
             .send_string(&format!(
                 r#"{{"body":"fix the typo","repo":"{}","workspace":"dir"}}"#,
@@ -721,6 +758,7 @@ token_file = "/tmp/atr-mcp-missing.token"
         let s = shared(dir.path(), r#"max_prompt_bytes = "32""#);
         let base = listen(s).await;
         let err = ureq::post(&format!("{base}/tasks"))
+            .set("Authorization", &format!("Bearer {TEST_TOKEN}"))
             .set("Content-Type", "application/json")
             .send_string(r#"{"body":"this prompt is definitely over thirty two bytes"}"#)
             .unwrap_err();
@@ -731,6 +769,7 @@ token_file = "/tmp/atr-mcp-missing.token"
     #[allow(clippy::result_large_err)]
     fn post_json(url: &str, body: &str) -> Result<ureq::Response, ureq::Error> {
         ureq::post(url)
+            .set("Authorization", &format!("Bearer {TEST_TOKEN}"))
             .set("Content-Type", "application/json")
             .send_string(body)
     }
@@ -845,6 +884,89 @@ token_file = "/tmp/atr-mcp-missing.token"
         let ev = s.db.events_for_run(run).unwrap();
         assert_eq!(ev.len(), 1, "{ev:?}");
         assert!(ev[0].raw.contains("PostToolUse"));
+    }
+
+    const WRITE_ROUTES: [&str; 4] = [
+        "tasks",
+        "tasks/auth-1/messages",
+        "tasks/auth-1/cancel",
+        "hooks",
+    ];
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_routes_need_bearer_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), "");
+        let base = listen(s.clone()).await;
+        post_json(
+            &format!("{base}/tasks"),
+            r#"{"key":"auth-1","body":"hi","workspace":"none","output":"text"}"#,
+        )
+        .unwrap();
+        for path in WRITE_ROUTES {
+            let url = format!("{base}/{path}");
+            let missing = ureq::post(&url)
+                .set("Content-Type", "application/json")
+                .send_string("{}")
+                .unwrap_err();
+            assert_eq!(status(missing), 401, "{path} missing");
+            let bad = ureq::post(&url)
+                .set("Authorization", "Bearer wrong")
+                .set("Content-Type", "application/json")
+                .send_string("{}")
+                .unwrap_err();
+            assert_eq!(status(bad), 401, "{path} bad");
+            let origin = ureq::post(&url)
+                .set("Authorization", &format!("Bearer {TEST_TOKEN}"))
+                .set("Origin", "https://evil.example")
+                .set("Content-Type", "application/json")
+                .send_string("{}")
+                .unwrap_err();
+            assert_eq!(status(origin), 403, "{path} origin");
+        }
+        let ok = [
+            (
+                "tasks",
+                r#"{"key":"auth-2","body":"x","workspace":"none","output":"text"}"#,
+            ),
+            ("tasks/auth-1/messages", r#"{"text":"more"}"#),
+            ("hooks", r#"{"task":"auth-1","event":"PostToolUse"}"#),
+            ("tasks/auth-1/cancel", "{}"),
+        ];
+        for (path, body) in ok {
+            let r = post_json(&format!("{base}/{path}"), body).unwrap();
+            assert_eq!(r.status(), 200, "{path}");
+        }
+        // Reads stay open.
+        for path in ["", "dashboard.json", "health", "status", "tasks/auth-1"] {
+            let r = ureq::get(&format!("{base}/{path}")).call().unwrap();
+            assert_eq!(r.status(), 200, "{path}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_routes_503_without_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(
+            dir.path(),
+            r#"
+[mcp]
+enabled = false
+token_env = "ATR_HTTP_WRITE_TEST_UNSET"
+token_file = "/tmp/atr-write-missing.token"
+"#,
+        );
+        let base = listen(s).await;
+        for path in WRITE_ROUTES {
+            let err = ureq::post(&format!("{base}/{path}"))
+                .set("Authorization", "Bearer x")
+                .set("Content-Type", "application/json")
+                .send_string("{}")
+                .unwrap_err();
+            let (code, body) = status_body(err);
+            assert_eq!(code, 503, "{path}");
+            assert!(body.contains("token not configured"), "{body}");
+        }
     }
 
     fn mcp_cfg(token_path: &std::path::Path, env: &str) -> String {

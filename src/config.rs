@@ -936,6 +936,9 @@ pub struct RawDashboard {
     pub enabled: bool,
     #[serde(default = "default_dashboard_bind")]
     pub bind: String,
+    /// Link Telegram `/ui` sends, e.g. a Tailscale Serve `https://…ts.net/`.
+    #[serde(default)]
+    pub public_url: String,
 }
 
 impl Default for RawDashboard {
@@ -943,6 +946,7 @@ impl Default for RawDashboard {
         Self {
             enabled: true,
             bind: default_dashboard_bind(),
+            public_url: String::new(),
         }
     }
 }
@@ -951,6 +955,7 @@ impl Default for RawDashboard {
 pub struct DashboardConfig {
     pub enabled: bool,
     pub bind: String,
+    pub public_url: String,
 }
 
 impl Default for DashboardConfig {
@@ -958,6 +963,7 @@ impl Default for DashboardConfig {
         Self {
             enabled: true,
             bind: default_dashboard_bind(),
+            public_url: String::new(),
         }
     }
 }
@@ -1929,6 +1935,7 @@ impl Config {
                 } else {
                     raw.dashboard.bind.trim().to_string()
                 },
+                public_url: raw.dashboard.public_url.trim().to_string(),
             },
             telegram: {
                 let t = raw.telegram;

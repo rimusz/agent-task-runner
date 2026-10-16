@@ -12,6 +12,17 @@ const PLUGIN_JSON: &str = r#"{
 
 const POST_SH: &str = r#"#!/bin/sh
 url="${ATR_HOOK_URL:-http://127.0.0.1:7420/hooks}"
+tok="${ATR_HOOK_TOKEN:-}"
+if [ -z "$tok" ] && [ -n "$ATR_HOOK_TOKEN_FILE" ] && [ -r "$ATR_HOOK_TOKEN_FILE" ]; then
+  tok=$(tr -d ' \r\n' < "$ATR_HOOK_TOKEN_FILE")
+fi
+if [ -n "$tok" ]; then
+  # Header via fd 3 so the token never shows up in `ps`.
+  exec 3<<EOF
+Authorization: Bearer $tok
+EOF
+  exec curl -sS --max-time 5 -X POST -H "Content-Type: application/json" -H @/dev/fd/3 --data-binary @- "$url"
+fi
 exec curl -sS --max-time 5 -X POST -H "Content-Type: application/json" --data-binary @- "$url"
 "#;
 
@@ -20,6 +31,17 @@ if [ -n "$ATR_PLUGIN_TEST" ]; then
   sh -c "$ATR_PLUGIN_TEST" || exit 2
 fi
 url="${ATR_HOOK_URL:-http://127.0.0.1:7420/hooks}"
+tok="${ATR_HOOK_TOKEN:-}"
+if [ -z "$tok" ] && [ -n "$ATR_HOOK_TOKEN_FILE" ] && [ -r "$ATR_HOOK_TOKEN_FILE" ]; then
+  tok=$(tr -d ' \r\n' < "$ATR_HOOK_TOKEN_FILE")
+fi
+if [ -n "$tok" ]; then
+  # Header via fd 3 so the token never shows up in `ps`.
+  exec 3<<EOF
+Authorization: Bearer $tok
+EOF
+  exec curl -sS --max-time 5 -X POST -H "Content-Type: application/json" -H @/dev/fd/3 --data-binary @- "$url"
+fi
 exec curl -sS --max-time 5 -X POST -H "Content-Type: application/json" --data-binary @- "$url"
 "#;
 
@@ -106,5 +128,45 @@ mod tests {
         assert!(hooks.contains("PostToolUse"));
         assert!(hooks.contains("SubagentStart"));
         assert!(hooks.contains("StopFailure"));
+    }
+
+    #[test]
+    fn hook_script_sends_token_from_file_without_argv() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let out = dir.path().join("out");
+        let curl = bin.join("curl");
+        std::fs::write(
+            &curl,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in @/dev/fd/*) cat \"${{a#@}}\" >> {o};; *) echo \"arg:$a\" >> {o};; esac; done\n",
+                o = out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tok = dir.path().join("t.token");
+        std::fs::write(&tok, "hook-secret\n").unwrap();
+        let script = dir.path().join("post.sh");
+        std::fs::write(&script, POST_SH).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let st = std::process::Command::new("sh")
+            .arg(&script)
+            .env("PATH", path)
+            .env("ATR_HOOK_TOKEN_FILE", &tok)
+            .env_remove("ATR_HOOK_TOKEN")
+            .stdin(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let got = std::fs::read_to_string(&out).unwrap();
+        assert!(got.contains("Authorization: Bearer hook-secret"), "{got}");
+        assert!(!got.contains("arg:Authorization"), "{got}");
     }
 }
