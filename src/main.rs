@@ -436,8 +436,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         } => {
             let text = read_body(body, body_file)?;
             let cfg = load_config(&path)?;
+            let auth = atr::mcp::auth_header(&cfg.mcp);
             if let Ok(status) = http_submit(
                 &cfg.listen,
+                auth.as_deref(),
                 &key,
                 &text,
                 &source,
@@ -533,8 +535,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 None => atr::task::allocate_key(&shared.db, &cfg.task_key_prefix, &title)?,
             };
             let body = format!("# {title}\n\n{text}");
+            let auth = atr::mcp::auth_header(&cfg.mcp);
             if let Ok(status) = http_create(
                 &cfg.listen,
+                auth.as_deref(),
                 &key,
                 &text,
                 repo_path.as_deref(),
@@ -775,7 +779,12 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         },
         Cmd::Cancel { key, force } => {
             if let Ok(cfg) = load_config(&path) {
-                match http_cancel(&cfg.listen, &key, force) {
+                match http_cancel(
+                    &cfg.listen,
+                    atr::mcp::auth_header(&cfg.mcp).as_deref(),
+                    &key,
+                    force,
+                ) {
                     Ok(()) => {
                         println!("{}", atr::app::Shared::cancel_ok_line(&key, force));
                         return Ok(ExitCode::SUCCESS);
@@ -898,6 +907,7 @@ fn read_body(body: Option<String>, file: Option<PathBuf>) -> Result<String> {
 #[allow(clippy::too_many_arguments)]
 fn http_submit(
     listen: &str,
+    auth: Option<&str>,
     key: &str,
     body: &str,
     source: &str,
@@ -907,22 +917,25 @@ fn http_submit(
     tests_ok: bool,
 ) -> Result<u16> {
     let url = format!("http://{listen}/tasks/{key}/messages");
-    let resp = ureq::post(&url)
-        .set("User-Agent", "atr")
-        .send_json(serde_json::json!({
-            "body": body,
-            "source": source,
-            "repo": repo,
-            "issue": issue,
-            "shadow": shadow,
-            "tests_ok": tests_ok,
-        }))?;
+    let mut req = ureq::post(&url).set("User-Agent", "atr");
+    if let Some(a) = auth {
+        req = req.set("Authorization", a);
+    }
+    let resp = req.send_json(serde_json::json!({
+        "body": body,
+        "source": source,
+        "repo": repo,
+        "issue": issue,
+        "shadow": shadow,
+        "tests_ok": tests_ok,
+    }))?;
     Ok(resp.status())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn http_create(
     listen: &str,
+    auth: Option<&str>,
     key: &str,
     body: &str,
     repo: Option<&str>,
@@ -963,17 +976,21 @@ fn http_create(
             payload["patch"] = serde_json::Value::String(spec.into());
         }
     }
-    let resp = ureq::post(&url)
-        .set("User-Agent", "atr")
-        .send_json(payload)?;
+    let mut req = ureq::post(&url).set("User-Agent", "atr");
+    if let Some(a) = auth {
+        req = req.set("Authorization", a);
+    }
+    let resp = req.send_json(payload)?;
     Ok(resp.status())
 }
 
-fn http_cancel(listen: &str, key: &str, force: bool) -> Result<()> {
+fn http_cancel(listen: &str, auth: Option<&str>, key: &str, force: bool) -> Result<()> {
     let url = format!("http://{listen}/tasks/{key}/cancel");
-    let resp = ureq::post(&url)
-        .set("User-Agent", "atr")
-        .send_json(serde_json::json!({ "force": force }))?;
+    let mut req = ureq::post(&url).set("User-Agent", "atr");
+    if let Some(a) = auth {
+        req = req.set("Authorization", a);
+    }
+    let resp = req.send_json(serde_json::json!({ "force": force }))?;
     if resp.status() >= 400 {
         let msg = resp
             .into_string()

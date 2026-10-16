@@ -6,6 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tempfile::TempDir;
 
+/// Bearer token for the harness HTTP write routes.
+#[allow(dead_code)]
+pub const HTTP_TOKEN: &str = "e2e-http-write-token";
+
 struct Watchdog(Arc<AtomicBool>);
 
 impl Drop for Watchdog {
@@ -73,6 +77,7 @@ impl Harness {
         )
         .unwrap();
 
+        atr::mcp::write_token_file(&db.with_file_name("http.token"), HTTP_TOKEN).unwrap();
         let cfg = atr::load_config(&cfg_path).unwrap();
         let shared = Shared::from_config(cfg_path, cfg).unwrap();
         let addr = serve_background(shared.clone()).await.unwrap();
@@ -272,6 +277,11 @@ daily_summary = ""
 enabled = true
 bind = "127.0.0.1"
 
+[mcp]
+enabled = true
+token_env = "ATR_E2E_HTTP_TOKEN_UNSET"
+token_file = "{token}"
+
 [handoff]
 max_bytes = 8192
 include_diff = true
@@ -290,6 +300,7 @@ key_prefix = ""
         repo = repo.display(),
         prompt = prompt.display(),
         gh = bin.join("gh").display(),
+        token = db.with_file_name("http.token").display(),
     );
     for (name, enabled, _) in providers {
         out.push_str(&provider_block(name, *enabled, bin));

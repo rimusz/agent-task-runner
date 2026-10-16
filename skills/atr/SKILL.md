@@ -30,7 +30,7 @@ You are answering in Telegram about atr. You already have a read-only snapshot o
 - atr will show an inline **Confirm** (old → new) before anything is applied.
 - Read-only questions (“how do I add kimi?”, “why did task X fail?”) get a short answer from this skill + the snapshot. Do not invent keys or tokens.
 
-Allowed command families: `/status` `/tasks` `/task` `/add` `/usage` `/shadow` `/providers` `/config` `/repos` `/cancel` `/retry` `/pause` `/resume` `/enable` `/disable` `/help`.
+Allowed command families: `/status` `/tasks` `/task` `/add` `/usage` `/shadow` `/providers` `/config` `/repos` `/cancel` `/retry` `/pause` `/resume` `/enable` `/disable` `/ui` `/help`.
 
 ## Init
 
@@ -134,7 +134,8 @@ atr mcp
 Full guide: `docs/REMOTE-ACCESS.md` in the atr repo.
 
 - Recommended: keep `listen = "127.0.0.1:7420"` and run `tailscale serve --bg 7420` (macOS CLI: `/Applications/Tailscale.app/Contents/MacOS/Tailscale`). URL `https://<host>.<tailnet>.ts.net/`, tailnet-only HTTPS. Needs MagicDNS + HTTPS certificates. Check `tailscale serve status`; off `tailscale serve --https=443 off`.
-- The dashboard and HTTP task API have no auth; only `/mcp` needs `Authorization: Bearer`. The tailnet (and ACLs) is the protection. Never use Funnel or public exposure.
+- Reads (dashboard, `GET /status`, `GET /tasks/<key>`) are open. Writes (`POST /tasks`, `/messages`, `/cancel`, `/hooks`) and `/mcp` need `Authorization: Bearer` with the same token; the CLI and hook scripts send it automatically. Never use Funnel or public exposure.
+- Telegram `/ui` sends the dashboard link (`[dashboard] public_url`, else detected Serve URL).
 - MCP token: 0600 `~/.config/atr/mcp.token` or `ATR_MCP_TOKEN` in `shadow.env`, `[mcp] enabled = true`, `atr service restart`, `atr doctor` shows `ok mcp token`. No token → 401. Never print, paste or commit it.
 
 ## Doctor

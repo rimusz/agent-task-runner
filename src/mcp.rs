@@ -117,6 +117,38 @@ pub fn read_token(cfg: &McpConfig) -> Option<String> {
     }
 }
 
+/// `Authorization` header value for local HTTP callers (CLI), from the same
+/// token `/mcp` and the write routes check. Never logged.
+pub fn auth_header(cfg: &McpConfig) -> Option<String> {
+    read_token(cfg).map(|t| format!("Bearer {t}"))
+}
+
+/// Env for hook scripts so they can authenticate to `POST /hooks`: the value
+/// when the token comes from the env var, otherwise the token file path.
+pub fn hook_env(cfg: &McpConfig) -> Vec<(String, String)> {
+    if !cfg.token_env.is_empty() {
+        if let Ok(v) = std::env::var(&cfg.token_env) {
+            if !v.trim().is_empty() {
+                return vec![("ATR_HOOK_TOKEN".into(), v.trim().to_string())];
+            }
+        }
+    }
+    vec![(
+        "ATR_HOOK_TOKEN_FILE".into(),
+        cfg.token_file.display().to_string(),
+    )]
+}
+
+/// Create a 0600 token file when no token is configured, so local write
+/// callers keep working after an upgrade. Returns true when one was written.
+pub fn ensure_token(cfg: &McpConfig) -> Result<bool> {
+    if read_token(cfg).is_some() || cfg.token_file.exists() {
+        return Ok(false);
+    }
+    write_token_file(&cfg.token_file, &generate_token())?;
+    Ok(true)
+}
+
 pub fn tokens_equal(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
@@ -1213,6 +1245,30 @@ cli = "/bin/true"
         .await;
         assert_eq!(dash[0]["jsonrpc"], "2.0");
         assert!(dash[0]["result"]["contents"][0]["text"].is_string());
+    }
+
+    #[test]
+    fn cli_auth_header_and_hook_env_from_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("mcp.token");
+        let mut cfg = McpConfig {
+            enabled: false,
+            token_env: "ATR_CLI_AUTH_TEST_UNSET".into(),
+            token_file: p.clone(),
+        };
+        assert_eq!(auth_header(&cfg), None);
+        assert!(ensure_token(&cfg).unwrap());
+        assert!(!ensure_token(&cfg).unwrap());
+        let tok = read_token(&cfg).unwrap();
+        assert_eq!(auth_header(&cfg), Some(format!("Bearer {tok}")));
+        assert_eq!(
+            hook_env(&cfg),
+            vec![("ATR_HOOK_TOKEN_FILE".to_string(), p.display().to_string())]
+        );
+        std::env::set_var("ATR_CLI_AUTH_TEST_SET", "env-tok");
+        cfg.token_env = "ATR_CLI_AUTH_TEST_SET".into();
+        assert_eq!(auth_header(&cfg).as_deref(), Some("Bearer env-tok"));
+        assert_eq!(hook_env(&cfg)[0].0, "ATR_HOOK_TOKEN");
     }
 
     #[test]

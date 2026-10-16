@@ -18,6 +18,7 @@ Watch
 • status — what's running
 • tasks / task <id> — queue
 • usage [period] — spend & cache
+• ui — dashboard link
 
 Work
 • add <prompt> — queue a task
@@ -31,6 +32,22 @@ Control
 
 Prefix with / (e.g. /status).
 Plain text talks to the assistant when it is on; writes still need Confirm.";
+
+/// Marks an `Outgoing` text as Telegram HTML; stripped before sending.
+const HTML_MARK: &str = "\u{2063}html\u{2063}";
+
+fn ui_reply(public_url: &str, listen: &str) -> String {
+    let (url, local) = crate::ui::shareable_url(public_url, listen);
+    let href = html_escape(&url).replace('"', "&quot;");
+    let mut s = format!(
+        "{HTML_MARK}📊 <a href=\"{href}\">atr dashboard</a>\n{}",
+        html_escape(&url)
+    );
+    if local {
+        s.push_str("\nLocal only. Set [dashboard] public_url or use Tailscale Serve.");
+    }
+    s
+}
 
 /// Shown for free-text when `[telegram.assistant] enabled = false`.
 const ASSISTANT_OFF_TIP: &str = "\
@@ -511,6 +528,23 @@ fn send_outgoing(shared: &Shared, cfg: &TelegramConfig, o: Outgoing) {
             text = interim_working_text(Some(&provider_label_for(shared, &p)));
         }
     }
+    if let Some(html) = text.strip_prefix(HTML_MARK) {
+        let body = sanitize(html, &[&token]);
+        if let Err(e) = send_message_mode(
+            cfg,
+            &token,
+            o.chat_id,
+            &body,
+            o.markup.clone(),
+            Some("HTML"),
+        ) {
+            if e.starts_with("HTTP 400") {
+                let plain = body.replace(['<', '>'], " ");
+                let _ = send_message_mode(cfg, &token, o.chat_id, &plain, o.markup, None);
+            }
+        }
+        return;
+    }
     let body = sanitize(&text, &[&token]);
     let mid = send_message_mode(cfg, &token, o.chat_id, &body, o.markup, None);
     if interim {
@@ -847,6 +881,14 @@ fn handle_command(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
     let cmd = parts.next().unwrap_or("");
     match cmd {
         "/help" | "/start" => help_outgoing(chat),
+        "/ui" => {
+            let cfg = shared.config.read().unwrap().clone();
+            Outgoing {
+                chat_id: chat,
+                text: ui_reply(&cfg.dashboard.public_url, &cfg.listen),
+                markup: None,
+            }
+        }
         "/status" => {
             let repo = parts.next();
             Outgoing {
@@ -1204,6 +1246,7 @@ fn is_driveable_command(cmd: &str) -> bool {
             | "/task"
             | "/add"
             | "/usage"
+            | "/ui"
             | "/shadow"
             | "/providers"
             | "/config"
@@ -2954,6 +2997,27 @@ cli = "/bin/true"
                 .unwrap()
                 .enabled
         );
+    }
+
+    #[test]
+    fn ui_sends_public_url_as_html_link() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        shared.config.write().unwrap().dashboard.public_url = "https://ai.t.ts.net/".into();
+        let upd = json!({"message":{"chat":{"id":42},"text":"/ui"}});
+        let out = handle_update(&shared, &upd).unwrap();
+        let t = &out[0].text;
+        assert!(t.starts_with(HTML_MARK), "{t}");
+        assert!(t.contains(r#"<a href="https://ai.t.ts.net/">"#), "{t}");
+        assert!(!t.contains("Local only"), "{t}");
+        assert!(COMMANDS.contains("• ui — dashboard link"));
+        assert!(is_driveable_command("/ui"));
+    }
+
+    #[test]
+    fn ui_reply_escapes_and_flags_local() {
+        let t = ui_reply("https://x/?a=1&b=\"2\"", "127.0.0.1:7420");
+        assert!(t.contains("a=1&amp;b=&quot;2&quot;"), "{t}");
     }
 
     #[test]

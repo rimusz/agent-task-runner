@@ -91,6 +91,7 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
     skip_at_check(&mut checks, cfg);
     telegram_check(&mut checks, cfg, config_path);
     mcp_check(&mut checks, cfg);
+    path_check(&mut checks);
 
     if !cfg.system_prompt_file.exists() {
         push(
@@ -193,7 +194,60 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
     Report { checks, problems }
 }
 
+/// Warn when the running `atr` binary's directory is not on `PATH`.
+fn path_check(checks: &mut Vec<Check>) {
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    else {
+        return;
+    };
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    if dir_on_path(&dir, &path) {
+        push(
+            checks,
+            "atr on PATH",
+            Status::Ok,
+            dir.display().to_string(),
+            None,
+        );
+    } else {
+        push(
+            checks,
+            "atr on PATH",
+            Status::Warn,
+            format!("{} not on PATH", dir.display()),
+            Some(format!(
+                "add `export PATH=\"{}:$PATH\"` to ~/.zshenv (zsh) or ~/.bashrc (bash)",
+                dir.display()
+            )),
+        );
+    }
+}
+
+fn dir_on_path(dir: &std::path::Path, path: &std::ffi::OsStr) -> bool {
+    let want = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    std::env::split_paths(path).any(|p| std::fs::canonicalize(&p).unwrap_or(p) == want)
+}
+
 fn mcp_check(checks: &mut Vec<Check>, cfg: &Config) {
+    if crate::mcp::read_token(&cfg.mcp).is_some() {
+        push(
+            checks,
+            "http write auth",
+            Status::Ok,
+            "POST /tasks, /messages, /cancel, /hooks need the bearer token".into(),
+            None,
+        );
+    } else {
+        push(
+            checks,
+            "http write auth",
+            Status::Warn,
+            "no token: HTTP write routes refuse (503); serve creates one at start".into(),
+            Some(crate::mcp::token_missing_hint(&cfg.mcp)),
+        );
+    }
     if !cfg.mcp.enabled {
         push(
             checks,
@@ -1077,6 +1131,37 @@ cli = "/bin/true"
             "{text}"
         );
         assert!(!crate::mcp::read_token(&cfg.mcp).is_some_and(|t| text.contains(&t)));
+    }
+
+    #[test]
+    fn dir_on_path_matches_entries() {
+        let d = tempfile::tempdir().unwrap();
+        let p = std::env::join_paths([std::path::Path::new("/usr/bin"), d.path()]).unwrap();
+        assert!(dir_on_path(d.path(), &p));
+        assert!(!dir_on_path(d.path(), std::ffi::OsStr::new("/usr/bin")));
+    }
+
+    #[tokio::test]
+    async fn http_write_auth_check() {
+        let (dir, mut cfg, path) = mini_cfg("");
+        cfg.mcp.token_env = "ATR_WRITE_DOCTOR_TEST_UNSET".into();
+        cfg.mcp.token_file = dir.path().join("none.token");
+        let report = run(&cfg, &path, false).await;
+        let c = report
+            .checks
+            .iter()
+            .find(|c| c.name == "http write auth")
+            .unwrap();
+        assert_eq!(c.status, Status::Warn, "{c:?}");
+        crate::mcp::write_token_file(&cfg.mcp.token_file, "doctor-write-tok").unwrap();
+        let report = run(&cfg, &path, false).await;
+        let c = report
+            .checks
+            .iter()
+            .find(|c| c.name == "http write auth")
+            .unwrap();
+        assert_eq!(c.status, Status::Ok, "{c:?}");
+        assert!(!report.format().contains("doctor-write-tok"));
     }
 
     #[tokio::test]

@@ -80,6 +80,10 @@ enabled = true
 bind = "<tailscale-ip>"
 ```
 
+`public_url` (optional) is the link Telegram `/ui` sends, e.g.
+`public_url = "https://ai-stack.<tailnet>.ts.net/"`. Unset: atr tries
+`tailscale serve status --json`, then falls back to the local URL.
+
 If `bind` is not the listen host, serve also tries an extra read-only listener
 on `{bind}:{port}` so submit/cancel stay on loopback.
 

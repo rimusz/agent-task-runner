@@ -31,5 +31,16 @@ tar -xzf "$tmp/$file" -C "$tmp"
 mkdir -p "$BIN_DIR"
 install -m 755 "$tmp/atr" "$BIN_DIR/atr"
 echo "Installed atr $ver to $BIN_DIR/atr"
-case ":$PATH:" in *":$BIN_DIR:"*) ;; *) echo "Add $BIN_DIR to your PATH, e.g.: echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.profile" ;; esac
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *)
+    case "${SHELL##*/}" in
+      zsh) rc="~/.zshenv" ;;
+      bash) rc="~/.bashrc" ;;
+      *) rc="~/.profile" ;;
+    esac
+    echo "WARNING: $BIN_DIR is not on your PATH, so \`atr\` will be 'command not found'. Fix:"
+    echo "  echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> $rc && exec \$SHELL -l"
+    ;;
+esac
 echo "Next: atr init"

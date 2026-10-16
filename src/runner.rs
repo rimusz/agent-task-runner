@@ -154,6 +154,7 @@ pub async fn run_cli(
             run_id,
             task_key,
             &hook,
+            &crate::mcp::hook_env(&cfg.mcp),
             &cfg.plugin.test_command,
             inflight_pid,
             provider.run_timeout,

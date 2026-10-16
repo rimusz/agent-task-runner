@@ -201,6 +201,7 @@ const TELEGRAM: &[&str] = &[
     "/disable",
     "/config",
     "/repos",
+    "/ui",
 ];
 
 fn validate_invocation(tokens: &[String], top: &BTreeSet<String>, global_flags: &BTreeSet<String>) {
