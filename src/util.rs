@@ -13,6 +13,43 @@ pub(crate) fn ureq_agent(timeout: Duration) -> ureq::Agent {
         .build()
 }
 
+/// Spawning a script right after it was written can fail with ETXTBSY
+/// ("Text file busy"): a child forked by another thread at that moment still
+/// holds the write fd until it execs. The fd closes within milliseconds, so
+/// retry the spawn while (and only while) the error is ExecutableFileBusy.
+const EXEC_BUSY_TRIES: u32 = 50;
+
+fn exec_busy_backoff(attempt: u32) -> Duration {
+    Duration::from_millis(5u64 << attempt.min(4))
+}
+
+pub fn retry_exec_busy<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempt = 0;
+    loop {
+        match f() {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && attempt + 1 < EXEC_BUSY_TRIES =>
+            {
+                std::thread::sleep(exec_busy_backoff(attempt));
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// `tokio::process::Command::output` with [`retry_exec_busy`] on spawn.
+/// Captures stdout/stderr; stdin is null (same defaults as `output()`).
+pub async fn output_retry_busy(
+    cmd: &mut tokio::process::Command,
+) -> std::io::Result<std::process::Output> {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    retry_exec_busy(|| cmd.spawn())?.wait_with_output().await
+}
+
 pub fn current_bin() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -107,6 +144,27 @@ pub fn parse_sha256_line(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retry_exec_busy_retries_only_busy() {
+        let mut n = 0;
+        let r = super::retry_exec_busy(|| {
+            n += 1;
+            if n < 3 {
+                Err(std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy))
+            } else {
+                Ok(n)
+            }
+        });
+        assert_eq!(r.unwrap(), 3);
+        let mut m = 0;
+        let e = super::retry_exec_busy::<()>(|| {
+            m += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+        assert!(e.is_err());
+        assert_eq!(m, 1, "other errors are not retried");
+    }
+
     use super::*;
 
     #[test]

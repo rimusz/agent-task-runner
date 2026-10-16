@@ -804,7 +804,11 @@ pub async fn check_version(p: &Provider) -> VersionCheck {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let result = timeout(Duration::from_secs(10), cmd.output()).await;
+    let result = timeout(
+        Duration::from_secs(10),
+        crate::util::output_retry_busy(&mut cmd),
+    )
+    .await;
     match result {
         Ok(Ok(out)) => {
             let text = format!(
