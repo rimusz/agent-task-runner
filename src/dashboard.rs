@@ -434,11 +434,29 @@ pub fn telegram_assistant(cfg: &Config, db: &crate::db::Db) -> Value {
     chats.sort_unstable();
     chats.dedup();
     let last = tasks.iter().map(|t| t.updated.as_str()).max();
-    let provider = cfg.telegram.assistant.provider.trim();
+    let ast = &cfg.telegram.assistant;
+    let provider = ast.provider.trim();
+    let configured = ast.display();
+    // The provider the assistant actually used last (its newest run).
+    let last_provider = db
+        .list_runs(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| crate::telegram::is_assistant_key(&r.task_key))
+        .max_by_key(|r| r.id)
+        .map(|r| r.provider);
+    let display = match &last_provider {
+        Some(p) if configured != *p => format!("{p} (config: {configured})"),
+        Some(p) => p.clone(),
+        None => configured.clone(),
+    };
     json!({
         "enabled": true,
         "provider": if provider.is_empty() { None } else { Some(provider) },
-        "provider_display": if provider.is_empty() { "first available" } else { provider },
+        "providers": ast.providers,
+        "configured": configured,
+        "last_provider": last_provider,
+        "provider_display": display,
         "workspace": cfg.worktree_root.join("_src").join("assistant").display().to_string(),
         "chats_today": chats.len(),
         "runs_today": runs_today.len(),
@@ -1103,6 +1121,23 @@ kind = "claude"
             "{line}"
         );
         assert!(line.contains("0 chats / 0 runs today"), "{line}");
+
+        // A provider list shows as `a > b`; once a run exists, the provider
+        // actually used leads.
+        cfg.telegram.assistant.providers = vec!["grok".into(), "claude".into()];
+        let v = telegram_assistant(&cfg, &shared.db);
+        assert_eq!(v["provider_display"], "grok > claude");
+        shared.db.upsert_task("tg42", "", None).unwrap();
+        let run = shared.db.start_run("tg42", "claude", "").unwrap();
+        shared.db.finish_run(run, "success", Some(0)).unwrap();
+        let v = telegram_assistant(&cfg, &shared.db);
+        assert_eq!(v["last_provider"], "claude");
+        assert_eq!(v["provider_display"], "claude (config: grok > claude)");
+        let line = telegram_assistant_line(&v).unwrap();
+        assert!(
+            line.starts_with("telegram assistant: provider claude (config: grok > claude)"),
+            "{line}"
+        );
     }
 
     #[test]

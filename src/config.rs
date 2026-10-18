@@ -426,6 +426,10 @@ pub struct RawTelegramAssistant {
     /// Empty = first available provider in order.
     #[serde(default)]
     pub provider: String,
+    /// Ordered preference: the first enabled provider that is not busy,
+    /// cooling down, rate-limited or at quota. Wins over `provider`.
+    #[serde(default)]
+    pub providers: Vec<String>,
     #[serde(default = "default_assistant_timeout")]
     pub timeout: String,
 }
@@ -434,6 +438,8 @@ pub struct RawTelegramAssistant {
 pub struct TelegramAssistant {
     pub enabled: bool,
     pub provider: String,
+    /// Ordered provider list (deduplicated, validated against `[[provider]]`).
+    pub providers: Vec<String>,
     pub timeout: Duration,
 }
 
@@ -442,6 +448,7 @@ impl Default for TelegramAssistant {
         Self {
             enabled: false,
             provider: String::new(),
+            providers: Vec::new(),
             timeout: Duration::from_secs(600),
         }
     }
@@ -1672,7 +1679,41 @@ pub fn parse_config_toml(text: &str) -> Result<Config> {
     }
     let mut cfg = Config::from_raw(raw)?;
     cfg.unknown_keys = unknown;
+    validate_assistant_providers(&cfg)?;
     Ok(cfg)
+}
+
+/// Every `[telegram.assistant] providers` name must be a `[[provider]]`.
+fn validate_assistant_providers(cfg: &Config) -> Result<()> {
+    for n in &cfg.telegram.assistant.providers {
+        if cfg.provider(n).is_none() {
+            let known: Vec<&str> = cfg.providers.iter().map(|p| p.name.as_str()).collect();
+            bail!(
+                "telegram.assistant.providers: {n:?} is not a [[provider]] (known: {})",
+                known.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+impl TelegramAssistant {
+    /// `providers` and a non-empty `provider` are both set (`providers` wins).
+    pub fn both_set(&self) -> bool {
+        !self.providers.is_empty() && !self.provider.trim().is_empty()
+    }
+
+    /// Human form of the configured choice: `grok > codex > claude`, the
+    /// single pin, or `first available`.
+    pub fn display(&self) -> String {
+        if !self.providers.is_empty() {
+            self.providers.join(" > ")
+        } else if !self.provider.trim().is_empty() {
+            self.provider.trim().to_string()
+        } else {
+            "first available".into()
+        }
+    }
 }
 
 /// Unknown keys in `text` (empty if it does not parse).
@@ -2204,6 +2245,16 @@ impl Config {
                     assistant: TelegramAssistant {
                         enabled: t.assistant.enabled,
                         provider: t.assistant.provider,
+                        providers: {
+                            let mut v: Vec<String> = Vec::new();
+                            for n in &t.assistant.providers {
+                                let n = n.trim();
+                                if !n.is_empty() && !v.iter().any(|x| x == n) {
+                                    v.push(n.to_string());
+                                }
+                            }
+                            v
+                        },
                         timeout: parse_duration(&t.assistant.timeout)
                             .unwrap_or(Duration::from_secs(600)),
                     },
@@ -3179,6 +3230,7 @@ kind = "claude"
         assert!(cfg.telegram.assistant.enabled);
         assert_eq!(cfg.telegram.assistant.provider, "claude");
         assert_eq!(cfg.telegram.assistant.timeout, Duration::from_secs(120));
+        assert!(cfg.telegram.assistant.providers.is_empty());
         assert!(cfg.dashboard.enabled);
         assert_eq!(cfg.dashboard.bind, "127.0.0.1");
 
@@ -3401,5 +3453,48 @@ kind = "claude"
             "owner/name"
         );
         assert!(parse_github_slug("not-a-slug").is_err());
+    }
+}
+
+#[cfg(test)]
+mod assistant_providers_tests {
+    use super::*;
+
+    const PROVIDERS: &str = r#"
+[[provider]]
+name = "claude"
+kind = "claude"
+[[provider]]
+name = "grok"
+kind = "grok"
+[[provider]]
+name = "codex"
+kind = "codex"
+"#;
+
+    #[test]
+    fn assistant_providers_parse_dedupe_and_display() {
+        let cfg = parse_config_toml(&format!(
+            "[telegram.assistant]\nenabled = true\nprovider = \"claude\"\nproviders = [\"grok\", \" codex \", \"grok\", \"claude\"]\n{PROVIDERS}"
+        ))
+        .unwrap();
+        let ast = &cfg.telegram.assistant;
+        assert_eq!(ast.providers, vec!["grok", "codex", "claude"]);
+        assert!(ast.both_set());
+        assert_eq!(ast.display(), "grok > codex > claude");
+        let cfg = parse_config_toml(PROVIDERS).unwrap();
+        assert!(cfg.telegram.assistant.providers.is_empty());
+        assert_eq!(cfg.telegram.assistant.display(), "first available");
+    }
+
+    #[test]
+    fn assistant_providers_must_name_configured_providers() {
+        let err = parse_config_toml(&format!(
+            "[telegram.assistant]\nproviders = [\"grok\", \"kimi\"]\n{PROVIDERS}"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("\"kimi\" is not a [[provider]]"), "{err}");
+        assert!(err.contains("claude, grok, codex"), "{err}");
     }
 }

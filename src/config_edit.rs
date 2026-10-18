@@ -392,6 +392,33 @@ model = "opus"
     }
 
     #[test]
+    fn set_and_get_assistant_providers() {
+        let (_dir, path) = seed();
+        assert_eq!(
+            get_value(&path, "telegram.assistant.providers").unwrap(),
+            "(unset)"
+        );
+        apply_set(&path, "telegram.assistant.providers", r#"["claude"]"#).unwrap();
+        assert_eq!(
+            get_value(&path, "telegram.assistant.providers").unwrap(),
+            r#"["claude"]"#
+        );
+        let cfg = crate::config::load_config(&path).unwrap();
+        assert_eq!(cfg.telegram.assistant.providers, vec!["claude"]);
+        // Names are validated against [[provider]] before writing.
+        let before = std::fs::read_to_string(&path).unwrap();
+        let err = apply_set(
+            &path,
+            "telegram.assistant.providers",
+            r#"["claude", "nope"]"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not a [[provider]]"), "{err}");
+        assert_eq!(before, std::fs::read_to_string(&path).unwrap());
+    }
+
+    #[test]
     fn invalid_value_fails_before_write() {
         let (_dir, path) = seed();
         let before = std::fs::read_to_string(&path).unwrap();
