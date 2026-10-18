@@ -228,7 +228,11 @@ pub fn base_branch(cfg: &Config, task: &Task) -> String {
 /// excluding `.atr/`.
 pub fn diff_stats(wt: &Path, base: &str) -> (u64, u64, u64) {
     let git = |args: &[&str]| -> Option<String> {
-        let o = Command::new("git").current_dir(wt).args(args).output().ok()?;
+        let o = Command::new("git")
+            .current_dir(wt)
+            .args(args)
+            .output()
+            .ok()?;
         o.status
             .success()
             .then(|| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -339,14 +343,19 @@ pub fn arm_report(cfg: &Config, db: &Db, arm: &Task) -> ArmReport {
 /// Returns the ordering and the criterion that decided it.
 fn rank(a: &ArmReport, b: &ArmReport) -> (Ordering, &'static str) {
     let cost = if a.cost_usd > 0.0 && b.cost_usd > 0.0 {
-        a.cost_usd.partial_cmp(&b.cost_usd).unwrap_or(Ordering::Equal)
+        a.cost_usd
+            .partial_cmp(&b.cost_usd)
+            .unwrap_or(Ordering::Equal)
     } else {
         Ordering::Equal
     };
     let steps: [(Ordering, &'static str); 6] = [
         (a.diff().cmp(&b.diff()), "smaller diff"),
         (a.files.cmp(&b.files), "fewer files"),
-        (a.verify_retries.cmp(&b.verify_retries), "fewer verify retries"),
+        (
+            a.verify_retries.cmp(&b.verify_retries),
+            "fewer verify retries",
+        ),
         (a.tokens.cmp(&b.tokens), "fewer tokens"),
         (cost, "lower cost"),
         (a.duration_ms.cmp(&b.duration_ms), "shorter duration"),
@@ -393,7 +402,11 @@ pub fn judge(arms: &[ArmReport]) -> Decision {
         }
         [a, b, ..] => {
             let (o, why) = rank(a, b);
-            let (w, l) = if o == Ordering::Greater { (b, a) } else { (a, b) };
+            let (w, l) = if o == Ordering::Greater {
+                (b, a)
+            } else {
+                (a, b)
+            };
             d.reason = match why {
                 "smaller diff" => format!("smaller diff ({} vs {} lines)", w.diff(), l.diff()),
                 "fewer files" => format!("fewer files ({} vs {})", w.files, l.files),
@@ -519,7 +532,11 @@ pub fn footer(d: &Decision) -> String {
             a.key,
             if a.result == "won" { " 🏆" } else { "" },
             a.provider,
-            if a.outcome.is_empty() { "-" } else { &a.outcome },
+            if a.outcome.is_empty() {
+                "-"
+            } else {
+                &a.outcome
+            },
             a.verify,
             a.added,
             a.removed,
@@ -639,7 +656,11 @@ fn cleanup_loser(shared: &Shared, cfg: &Config, loser: &Task) {
         }
         let _ = db.clear_worktree(&loser.key);
     }
-    if let Some(last) = db.list_runs(Some(&loser.key)).ok().and_then(|r| r.last().cloned()) {
+    if let Some(last) = db
+        .list_runs(Some(&loser.key))
+        .ok()
+        .and_then(|r| r.last().cloned())
+    {
         let _ = db.insert_event(
             last.id,
             "compare",
@@ -762,8 +783,18 @@ mod tests {
         ArmReport {
             key: key.into(),
             provider: key.into(),
-            status: if verify == "passed" { "waiting" } else { "needs_attention" }.into(),
-            outcome: if verify == "passed" { "success" } else { "verify_failed" }.into(),
+            status: if verify == "passed" {
+                "waiting"
+            } else {
+                "needs_attention"
+            }
+            .into(),
+            outcome: if verify == "passed" {
+                "success"
+            } else {
+                "verify_failed"
+            }
+            .into(),
             verify: verify.into(),
             files: 1,
             added,
@@ -786,7 +817,10 @@ mod tests {
         let mut a = arm("k-a", "passed", 10);
         let mut b = arm("k-b", "passed", 10);
         b.files = 2;
-        assert_eq!(judge(&[a.clone(), b.clone()]).winner.as_deref(), Some("k-a"));
+        assert_eq!(
+            judge(&[a.clone(), b.clone()]).winner.as_deref(),
+            Some("k-a")
+        );
         b.files = 1;
         a.verify_retries = 1;
         let d = judge(&[a.clone(), b.clone()]);
@@ -799,7 +833,10 @@ mod tests {
         b.tokens = 500;
         a.cost_usd = 0.02;
         b.cost_usd = 0.01;
-        assert_eq!(judge(&[a.clone(), b.clone()]).winner.as_deref(), Some("k-b"));
+        assert_eq!(
+            judge(&[a.clone(), b.clone()]).winner.as_deref(),
+            Some("k-b")
+        );
         b.cost_usd = 0.02;
         a.duration_ms = 10;
         b.duration_ms = 20;

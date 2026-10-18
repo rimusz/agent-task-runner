@@ -79,11 +79,16 @@ async fn assert_arm_failed_without_failover(h: &Harness, key: &str) {
     let ta = h.shared.db.get_task(&a).unwrap().unwrap();
     assert_eq!(ta.provider.as_deref(), Some("claude"));
     assert!(ta.pin_strict);
-    // The parent never runs; it stays waiting for the judge.
+    // The parent never runs. With no verify configured, the judge finds no
+    // winner and parks it.
     assert!(run_providers(h, key).is_empty());
+    let d = wait_decided(h, key).await;
+    assert_eq!(d.winner, None);
+    assert_eq!(d.arms[0].verify, "none");
+    assert_eq!(d.arms[1].verify, "skipped");
     assert_eq!(
         h.shared.db.get_task(key).unwrap().unwrap().status,
-        "waiting"
+        "needs_attention"
     );
 }
 
@@ -248,8 +253,14 @@ async fn harness2(claude: &str, grok: &str) -> Harness {
     .await;
     // A bare origin so the winner's push can be checked.
     let origin = h.dir.path().join("origin.git");
-    git(h.dir.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
-    git(&h.repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(
+        h.dir.path(),
+        &["init", "-q", "--bare", origin.to_str().unwrap()],
+    );
+    git(
+        &h.repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
     std::fs::write(h.fake_dir.join("gh-allow-pr"), "").unwrap();
     h
 }
@@ -350,7 +361,10 @@ async fn smaller_passing_diff_wins_and_becomes_the_pr() {
     let origin = h.dir.path().join("origin.git");
     let refs = git(&origin, &["for-each-ref", "--format=%(refname)"]);
     assert!(refs.contains("refs/heads/atr/demo-w1\n"), "{refs}");
-    assert!(!refs.contains("demo-w1-a") && !refs.contains("demo-w1-b"), "{refs}");
+    assert!(
+        !refs.contains("demo-w1-a") && !refs.contains("demo-w1-b"),
+        "{refs}"
+    );
     // PR body carries the comparison footer.
     let pr = std::fs::read_to_string(h.fake_dir.join("gh-pr.log")).unwrap();
     assert!(pr.contains("atr compare"), "{pr}");
@@ -361,10 +375,15 @@ async fn smaller_passing_diff_wins_and_becomes_the_pr() {
     assert_eq!(la.status, "done");
     assert!(la.worktree.is_none());
     assert!(!h.dir.path().join("work/repo/demo-w1-a").exists());
-    assert!(git(&h.repo, &["branch", "--list", "atr/demo-w1-a"]).trim().is_empty());
+    assert!(git(&h.repo, &["branch", "--list", "atr/demo-w1-a"])
+        .trim()
+        .is_empty());
     let wb = h.shared.db.get_task("demo-w1-b").unwrap().unwrap();
     assert_eq!(wb.status, "done");
-    assert!(wb.worktree.is_none(), "gc must not own the winner's tree via the arm");
+    assert!(
+        wb.worktree.is_none(),
+        "gc must not own the winner's tree via the arm"
+    );
 
     let cfg = h.shared.config.read().unwrap().clone();
     let show = atr::compare::show_text(&cfg, &h.shared.db, "demo-w1").unwrap();

@@ -74,7 +74,8 @@ fn compare_check(checks: &mut Vec<Check>, cfg: &Config) {
             checks,
             "compare",
             Status::Ok,
-            "off: [verify] is disabled, so `atr add --compare` refuses (compare can't judge)".into(),
+            "off: [verify] is disabled, so `atr add --compare` refuses (compare can't judge)"
+                .into(),
             None,
         );
         return;
