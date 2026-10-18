@@ -203,6 +203,10 @@ Off by default (`[lessons] enabled = true`, or `lessons = true` in one `[[repo]]
 
 With lessons on, atr reflects after informative failures (verify failed, stalled, needs attention, task timeout, success after a verify retry or review): a read-only 3-turn run on `[lessons] provider` (default: the driver) under a hidden `<key>-reflect` task, at most 2 lessons of ≤ 240 chars, near-duplicates bumped instead of added, unpinned lessons expire after `ttl` (30d). A task past `task_timeout` leaves a run with outcome `task_timeout` (see `atr tasks <key>`).
 
+## Compare
+
+`atr add --repo R --output pr --compare grok,claude "…"` runs the task on both providers (arms `K-a`, `K-b`, each pinned to its provider, no failover, no pushes). The arm that passes verify with the smallest diff wins; its branch becomes `atr/K` and the PR comes from `K`. Neither passes → `K` is `needs_attention`, no PR. Needs verify commands for the repo; refused when a provider is disabled or over quota. About 2x tokens. `atr compare show K [--json]` shows arms, verify, diff sizes, decision and PR URL. No Telegram command yet.
+
 ## Troubleshooting
 
 | Symptom | What to check |

@@ -321,6 +321,12 @@ PY
   edit_lines)
     # Compare tests: commit $DIR/${KIND}.lines lines (default 1) to
     # CHANGE_${KIND}.md, then try to push (recorded in $DIR/${KIND}.push).
+    # Only inside the harness worktree root: side calls such as
+    # `grok usage <sid>` run from the test's cwd and must not touch git.
+    case "$(pwd -P)/" in
+      "$(cd "$SELF_DIR/.." && pwd -P)/work/"*) ;;
+      *) emit_success; exit 0 ;;
+    esac
     n=1
     if [[ -f "$DIR/${KIND}.lines" ]]; then
       n=$(cat "$DIR/${KIND}.lines")
@@ -331,7 +337,6 @@ PY
     done
     git add -A >/dev/null 2>&1
     git -c user.name=fake -c user.email=fake@example.invalid commit -qm "change from $KIND" >/dev/null 2>&1 || true
-    { git config --show-origin --get-all remote.origin.pushurl; git config --show-origin --get core.hooksPath; git config --show-origin --get extensions.worktreeConfig; pwd; } > "$DIR/${KIND}.pushcfg" 2>&1 || true
     if git push -q origin HEAD >/dev/null 2>&1; then
       echo pushed > "$DIR/${KIND}.push"
     else

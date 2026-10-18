@@ -18,6 +18,7 @@ broken. Each non-ok line prints a `fix:` hint.
 | `config` | — | config could not load | `atr init`, or fix the TOML error it prints |
 | `config keys` | the file has keys this atr does not know (they are ignored); the line names each one and the nearest valid key | — | Fix the typo, delete the key, or upgrade atr if the key belongs to a newer version (normal after a rollback) |
 | `lessons` | lessons are on but the reflect provider (`[lessons] provider`, else the driver) is missing or disabled: only manual lessons get added | — | Set `[lessons] provider` to an enabled provider, or enable the driver |
+| `compare` | `[verify]` is on but some repos have no verify commands: compare can't judge there and `atr add --compare` refuses | — | Set `[verify] commands` or a `[[verify.repo]]` entry with commands |
 | `gh auth` | `gh auth status` fails in this shell but a token is in `shadow.env` | no `gh` login and no token | Use a token (below). A failed `gh auth status` over SSH on macOS is usually just the locked keychain. |
 | `gh token` | token lacks Contents/Issues/PRs/Metadata | no token anywhere | Fine-grained PAT, see [GITHUB.md](GITHUB.md) |
 | `github token api [owner]` (one per token) | token expires within 14 days, or api.github.com unreachable | 401 (revoked/expired), or no access to a watched repo, or no token | Make a new PAT, set `ATR_GH_TOKEN` in `~/.config/atr/shadow.env`, `atr service restart` |
@@ -180,3 +181,10 @@ reachable … saved for the next start" means the service was down (or `listen`
 points elsewhere): the change is in the state database and applies when it
 starts. A 401/503 is a token problem, not a fallback. Check the result with
 `atr status` (`intake paused`/`on`).
+
+## Compare tasks
+
+- **`atr add --compare` refuses with "needs verify commands":** compare picks the arm that passed verify, so the repo needs verify commands (`[verify] enabled = true` plus `commands`, or a `[[verify.repo]]` entry).
+- **An arm failed with `arm_unavailable`:** its provider hit a limit, auth error, stall or was disabled. Arms never fail over to the other provider. The other arm can still win (a walkover); see `atr compare show K`.
+- **Both arms failed verify:** `K` is in `needs_attention` and both arm worktrees are kept (`atr tasks K-a`, `atr tasks K-b` show their paths). There is no PR.
+- **Arms fail at start with a `gh` error:** like shadow runs, arms run behind a read-only `gh` wrapper, which needs `[github] cli` to resolve to a real `gh`.

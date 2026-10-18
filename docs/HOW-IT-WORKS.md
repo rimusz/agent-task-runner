@@ -198,8 +198,43 @@ Each arm has a **strict provider pin** (`tasks.pin_strict`):
 | Stall within `stall_resumes` | retries the same session | same (on its own provider) |
 
 So both arms can never collapse onto one provider. Arms skip the review
-loop. The judge and `atr add --compare` are documented in
-`docs/USAGE.md` once they land.
+loop.
+
+**Workspaces.** Each arm gets its own worktree (`<worktree_root>/<repo>/K-a`,
+branch `atr/K-a`), never a pool slot. It is hardened like a shadow run (a
+`pre-push` hook, `pushurl = no_push`, the read-only `gh` wrapper, no GitHub
+tokens in the environment), but the git settings go into that worktree's own
+`config.worktree` (atr turns on `extensions.worktreeConfig` in the repo), so
+the repo's shared config and other tasks can still push. Each arm run also
+records a `shadow_results` row.
+
+**Judge.** When both arms are terminal (`waiting`, `done`, `failed`,
+`needs_attention`), one caller claims the parent (atomic update of
+`compare_decision`) and judges:
+
+1. Candidates: arms whose last run succeeded and whose verify checks all
+   passed. A success with no verify checks is not a pass.
+2. If any candidate has a non-empty diff, empty-diff candidates are dropped.
+3. Lowest diff (added + removed lines from `git diff --numstat` against the
+   merge-base with the repo's `base`, plus untracked files, excluding
+   `.atr/`), then fewer files, fewer `verify_failed` runs, fewer tokens,
+   lower cost (when both report one), shorter total run time, first arm.
+4. The decision (winner, reason, walkover, per-arm numbers) is stored as JSON
+   in `tasks.compare_decision`; `atr compare show K` prints it.
+
+**Winner.** atr removes the hardening from the winner's worktree, renames its
+branch `atr/K-x` → `atr/K`, and the parent `K` takes over the worktree,
+provider and session (role becomes `worker`, so follow-ups resume there). The
+parent's output is delivered from that tree with the winner's final text
+plus a comparison table (`--output pr` pushes `atr/K` and opens the PR). The
+winner arm is marked `done` and no longer owns the tree.
+
+**Loser.** Its worktree is removed (`git worktree remove --force`), its
+local branch deleted (it was never pushed), and the arm marked `done`; a
+`compare` event on its last run records `lost`.
+
+**No winner.** The parent goes to `needs_attention`, both arm worktrees are
+kept, and the notification lists each arm's outcome and verify failure tail.
 
 ## MCP tool reference
 

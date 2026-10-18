@@ -144,3 +144,44 @@ fn lessons_round_trip_without_service() {
     let (ok, out) = atr(&dir, &cfg, &["lessons", "list"]);
     assert!(ok && out.contains("no lessons"), "{out}");
 }
+
+#[test]
+fn compare_cli_refuses_bad_input_without_service() {
+    let (dir, cfg) = setup();
+    let repo = dir.path().join("r");
+    atr::worktree::init_sample_repo(&repo).unwrap();
+    let r = repo.display().to_string();
+    // Needs two different configured providers.
+    let (ok, out) = atr(
+        &dir,
+        &cfg,
+        &["add", "--repo", &r, "--compare", "claude", "x"],
+    );
+    assert!(!ok && out.contains("exactly two"), "{out}");
+    let (ok, out) = atr(
+        &dir,
+        &cfg,
+        &["add", "--repo", &r, "--compare", "claude,nope", "x"],
+    );
+    assert!(!ok && out.contains("unknown provider"), "{out}");
+    // Needs --repo, and conflicts with --provider.
+    let (ok, out) = atr(&dir, &cfg, &["add", "--compare", "claude,grok", "x"]);
+    assert!(!ok, "{out}");
+    let (ok, out) = atr(
+        &dir,
+        &cfg,
+        &[
+            "add",
+            "--repo",
+            &r,
+            "--compare",
+            "a,b",
+            "--provider",
+            "claude",
+            "x",
+        ],
+    );
+    assert!(!ok && out.contains("cannot be used with"), "{out}");
+    let (ok, out) = atr(&dir, &cfg, &["compare", "show", "nope"]);
+    assert!(!ok && out.contains("unknown task"), "{out}");
+}

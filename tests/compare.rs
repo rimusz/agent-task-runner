@@ -338,9 +338,7 @@ async fn smaller_passing_diff_wins_and_becomes_the_pr() {
     // Arms could not push while running.
     for kind in ["claude", "grok"] {
         let p = std::fs::read_to_string(h.fake_dir.join(format!("{kind}.push"))).unwrap();
-        let cfgdump =
-            std::fs::read_to_string(h.fake_dir.join(format!("{kind}.pushcfg"))).unwrap_or_default();
-        assert_eq!(p.trim(), "blocked", "{kind} arm pushed; cfg:\n{cfgdump}");
+        assert_eq!(p.trim(), "blocked", "{kind} arm pushed");
     }
     // The user's repo config was never hardened (worktree-scoped config).
     assert!(git(&h.repo, &["config", "--get", "remote.origin.pushurl"]).is_empty());
