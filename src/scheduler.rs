@@ -167,7 +167,7 @@ fn repo_inflight_count(
 /// The per-task wall clock was hit: leave a durable record (a finished run
 /// with outcome `task_timeout` plus a `task_timeout` event) and capture the
 /// result/diff, so the failure survives log rotation and can be learned from.
-pub fn record_task_timeout(shared: &Shared, cfg: &Config, task: &crate::db::Task) {
+pub fn record_task_timeout(shared: &Arc<Shared>, cfg: &Config, task: &crate::db::Task) {
     let key = task.key.as_str();
     let provider = task
         .provider
@@ -195,6 +195,14 @@ pub fn record_task_timeout(shared: &Shared, cfg: &Config, task: &crate::db::Task
         .insert_event(run_id, "task_timeout", &detail.to_string());
     let _ = shared.db.finish_run(run_id, "task_timeout", None);
     let _ = crate::output::capture(shared, key);
+    if cfg.lessons_enabled_for(task) {
+        crate::lessons::spawn_reflect(
+            shared.clone(),
+            key.to_string(),
+            "task_timeout",
+            Some(run_id),
+        );
+    }
 }
 
 fn task_over_cap(db: &Db, cfg: &Config, key: &str) -> Result<bool> {
@@ -1129,6 +1137,23 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     if final_outcome != "success" {
         let _ = crate::output::capture(&shared, &key);
     }
+    if !assistant && cfg.lessons_enabled_for(&task) {
+        let status_now = shared
+            .db
+            .get_task(&key)
+            .ok()
+            .flatten()
+            .map(|t| t.status)
+            .unwrap_or_default();
+        if let Some(signal) = crate::lessons::signal_after_run(
+            &status_now,
+            &final_outcome,
+            task.verify_retries,
+            task.review_rounds,
+        ) {
+            crate::lessons::spawn_reflect(shared.clone(), key.clone(), signal, Some(run_id));
+        }
+    }
     shared.kick.notify_waiters();
     Ok(())
 }
@@ -1419,7 +1444,7 @@ async fn maybe_review(
     }
 }
 
-fn pick_driver_fallback(cfg: &Config, db: &Db) -> Option<Provider> {
+pub(crate) fn pick_driver_fallback(cfg: &Config, db: &Db) -> Option<Provider> {
     let empty = HashMap::new();
     let dummy = crate::db::Task {
         role: "review".into(),

@@ -23,7 +23,7 @@ atr is a single Rust binary (`atr`, edition 2021, MSRV 1.85) that runs as a long
 | `src/http.rs`, `dashboard.rs`, `dashboard.html`, `mcp.rs` | HTTP API, read-only dashboard (`dashboard.json`), MCP server |
 | `src/doctor.rs`, `service.rs`, `upgrade.rs`, `init.rs`, `skill.rs`, `plugin.rs` | doctor checks, launchd/systemd service, self-upgrade, init, skill install |
 | `src/db.rs`, `usage.rs`, `quota.rs`, `gc.rs`, `logrotate.rs` | SQLite state, usage/quota, cleanup |
-| `src/lessons.rs` | per-repo lessons: scrubber, `## Repo lessons (atr)` block (variable tail only, first runs, worker roles), export |
+| `src/lessons.rs` | per-repo lessons: scrubber, `## Repo lessons (atr)` block (variable tail only, first runs, worker roles), export; automatic reflect (signal mapping, hidden `<key>-reflect` task, JSON parse, dedupe, ttl). Fake CLIs answer reflect runs from `fake/reflect.json` |
 | `tests/` | integration tests (`e2e.rs`, `init.rs`, `readme.rs` docs checks, `release_decide.rs`, shell tests, `fixtures/` fake CLIs) |
 | `contrib/` | service units, `release-decide.sh`, `next-version.sh` |
 | `docs/` | user docs (CONFIG, HOW-IT-WORKS, TROUBLESHOOTING, USAGE, INSTALL, DESIGN, RELEASING, …) |

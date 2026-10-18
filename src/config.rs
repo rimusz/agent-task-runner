@@ -1366,6 +1366,13 @@ pub struct RawLessons {
     pub max_entries: usize,
     #[serde(default = "default_lessons_bytes")]
     pub max_bytes: String,
+    /// Reflect provider; empty = the driver.
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default = "default_lessons_ttl")]
+    pub ttl: String,
+    #[serde(default = "default_lessons_on")]
+    pub on: Vec<String>,
 }
 
 impl Default for RawLessons {
@@ -1374,8 +1381,32 @@ impl Default for RawLessons {
             enabled: false,
             max_entries: default_lessons_entries(),
             max_bytes: default_lessons_bytes(),
+            provider: String::new(),
+            ttl: default_lessons_ttl(),
+            on: default_lessons_on(),
         }
     }
+}
+
+fn default_lessons_ttl() -> String {
+    "30d".into()
+}
+
+/// Outcome signals that trigger an automatic reflection by default.
+pub fn default_lessons_on() -> Vec<String> {
+    [
+        "task_timeout",
+        "run_timeout",
+        "stalled",
+        "verify_failed",
+        "verify_retry_passed",
+        "tests_modified",
+        "needs_attention",
+        "review_request_changes",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 fn default_lessons_entries() -> usize {
@@ -1395,6 +1426,12 @@ pub struct LessonsConfig {
     pub max_entries: usize,
     /// Max bytes of the injected `## Repo lessons (atr)` block.
     pub max_bytes: usize,
+    /// Provider for the automatic reflect step; empty = the driver.
+    pub provider: String,
+    /// Unpinned lessons not created or injected within this long are dropped.
+    pub ttl: Duration,
+    /// Signals that trigger a reflection after a task ends.
+    pub on: Vec<String>,
 }
 
 impl Default for LessonsConfig {
@@ -1403,6 +1440,9 @@ impl Default for LessonsConfig {
             enabled: false,
             max_entries: default_lessons_entries(),
             max_bytes: 4096,
+            provider: String::new(),
+            ttl: Duration::from_secs(30 * 86_400),
+            on: default_lessons_on(),
         }
     }
 }
@@ -2242,6 +2282,25 @@ impl Config {
                 )
                 .context("[lessons] max_bytes")?
                 .clamp(256, 64 * 1024) as usize,
+                provider: raw.lessons.provider.trim().to_string(),
+                ttl: parse_duration(if raw.lessons.ttl.trim().is_empty() {
+                    "30d"
+                } else {
+                    &raw.lessons.ttl
+                })
+                .context("[lessons] ttl")?,
+                on: {
+                    let mut on = Vec::new();
+                    for s in &raw.lessons.on {
+                        let s = s.trim();
+                        if crate::lessons::SIGNALS.contains(&s) && s != "manual" {
+                            on.push(s.to_string());
+                        } else {
+                            tracing::info!(signal = %s, "ignoring unknown [lessons] on signal");
+                        }
+                    }
+                    on
+                },
             },
             log: LogConfig {
                 path: if raw.log.path.trim().is_empty() {

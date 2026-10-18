@@ -171,6 +171,9 @@ pub fn run_with(
     prune_worktrees(cfg, db, dry_run, force, &mut report)?;
     report.events = db.prune_events(&cutoff(cfg.gc.event_retention), dry_run)?;
     report.runs = db.prune_runs(&cutoff(cfg.gc.run_retention), dry_run)?;
+    if !dry_run {
+        let _ = db.expire_lessons(&cutoff(cfg.lessons.ttl));
+    }
     if cfg.gc.session_files {
         report.sessions = prune_session_files(cfg, db, home, dry_run)?;
     }
@@ -187,7 +190,7 @@ pub fn run_with(
 
 fn prune_tasks(db: &Db, dry_run: bool, filter: &TaskGc, report: &mut GcReport) -> Result<()> {
     report.task_gc = true;
-    for t in db.list_tasks()? {
+    for t in db.list_all_tasks()? {
         if !filter.matches(&t) {
             continue;
         }

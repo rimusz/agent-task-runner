@@ -150,7 +150,29 @@ them. Off by default.
 enabled = false      # all repos; or `lessons = true` in one [[repo]]
 max_entries = 20     # stored per repo; oldest unpinned (by last use) pruned first
 max_bytes = "4k"     # cap on the injected "## Repo lessons (atr)" block
+provider = ""        # reflect provider; empty = the driver
+ttl = "30d"          # unpinned lessons not created or injected within this are dropped
+on = ["task_timeout","run_timeout","stalled","verify_failed","verify_retry_passed",
+      "tests_modified","needs_attention","review_request_changes"]
 ```
+
+**Automatic reflection.** When a task in a repo with lessons on ends with one
+of the `on` signals (verify failed, tests modified, stalled, needs attention,
+past `task_timeout`, or a success that needed a verify retry or a review
+round), atr runs one short reflection: a read-only run on `[lessons] provider`
+(or the driver) in an empty directory, capped at 3 turns (Grok/Claude get
+`--max-turns 3`, plan permission mode and a JSON schema). It sees the task
+record (request, summary, commands, failing checks, diff, all size-capped) and
+the repo's existing lessons, and returns at most 2 lessons of up to 240
+characters. Each is scrubbed, then either stored with evidence from atr's own
+records (task key, run id, signal) or, if it is a near-duplicate (word
+overlap ≥ 0.6) of an existing lesson, counted as a hit on that one. A clean
+first-try success, quota/auth failures and cancels never reflect. The
+reflection runs in the background under a hidden task `<key>-reflect` (in
+usage and quotas, not in task lists); it never changes the task's status, and
+it is skipped when the provider is disabled, cooling down or over quota.
+Point `provider` at a cheap or local model to make it nearly free. `ttl` is
+applied when lessons are injected, on each reflection and by `atr gc`.
 
 Lessons live in the state DB (`lessons` table), not in the repo, so they never
 show up in diffs. Manage them with `atr lessons list|add|pin|unpin|clear|export`

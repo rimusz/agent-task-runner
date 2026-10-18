@@ -170,7 +170,7 @@ atr lessons clear --repo R [--id 3]
 atr lessons export --repo R  # markdown, to copy into AGENTS.md by hand
 ```
 
-Lessons are refused if they look like they contain a secret (token prefixes, `KEY=value`, `Bearer …`, private keys, URLs with passwords, values from `shadow.env`) or like instructions (`git push`, `gh pr create`, "ignore previous instructions", …). There is no Telegram command for lessons yet.
+Lessons are refused if they look like they contain a secret (token prefixes, `KEY=value`, `Bearer …`, private keys, URLs with passwords, values from `shadow.env`) or like instructions (`git push`, `gh pr create`, "ignore previous instructions", …). With lessons on, atr also writes up to 2 lessons itself after an informative failure (see [CONFIG.md](CONFIG.md#lessons)); `atr lessons list` shows them with their evidence (task, run, signal). There is no Telegram command for lessons yet.
 
 ### Using atr from other agents
 

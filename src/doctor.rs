@@ -65,6 +65,42 @@ impl Report {
     }
 }
 
+/// With lessons on, the reflect provider must exist and be enabled.
+fn lessons_check(checks: &mut Vec<Check>, cfg: &Config) {
+    let on = cfg.lessons.enabled
+        || cfg
+            .effective_repos()
+            .iter()
+            .any(|r| r.lessons == Some(true));
+    if !on {
+        return;
+    }
+    let want = if cfg.lessons.provider.is_empty() {
+        cfg.driver_name()
+    } else {
+        Some(cfg.lessons.provider.clone())
+    };
+    match want.as_deref().and_then(|n| cfg.provider(n)) {
+        Some(p) if p.enabled => push(
+            checks,
+            "lessons",
+            Status::Ok,
+            format!("on; reflect provider {}", p.name),
+            None,
+        ),
+        _ => push(
+            checks,
+            "lessons",
+            Status::Warn,
+            format!(
+                "on, but reflect provider {} is missing or disabled; only manual lessons will be added",
+                want.as_deref().unwrap_or("(none)")
+            ),
+            Some("set [lessons] provider to an enabled provider, or enable the driver".into()),
+        ),
+    }
+}
+
 /// Unknown keys are ignored on load (so rollbacks work); surface them here.
 fn unknown_keys_check(checks: &mut Vec<Check>, cfg: &Config) {
     if cfg.unknown_keys.is_empty() {
@@ -101,6 +137,7 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
         None,
     );
     unknown_keys_check(&mut checks, cfg);
+    lessons_check(&mut checks, cfg);
 
     github_auth_checks(&mut checks, cfg, config_path);
     github_token_api_check(&mut checks, cfg, config_path).await;
@@ -1103,6 +1140,23 @@ cli = "/bin/true"
         std::fs::write(&path, &text).unwrap();
         let cfg = crate::config::parse_config_toml(&text).unwrap();
         (dir, cfg, path)
+    }
+
+    #[test]
+    fn lessons_doctor_line() {
+        let (_dir, cfg, _path) = mini_cfg("");
+        let mut checks = Vec::new();
+        lessons_check(&mut checks, &cfg);
+        assert!(checks.is_empty(), "off by default");
+        let (_dir, cfg, _path) = mini_cfg("[lessons]\nenabled = true\n");
+        let mut checks = Vec::new();
+        lessons_check(&mut checks, &cfg);
+        assert_eq!(checks[0].status, Status::Ok, "{:?}", checks[0]);
+        assert!(checks[0].detail.contains("claude"));
+        let (_dir, cfg, _path) = mini_cfg("[lessons]\nenabled = true\nprovider = \"nope\"\n");
+        let mut checks = Vec::new();
+        lessons_check(&mut checks, &cfg);
+        assert_eq!(checks[0].status, Status::Warn);
     }
 
     #[test]
