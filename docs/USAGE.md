@@ -172,6 +172,23 @@ atr lessons export --repo R  # markdown, to copy into AGENTS.md by hand
 
 Lessons are refused if they look like they contain a secret (token prefixes, `KEY=value`, `Bearer …`, private keys, URLs with passwords, values from `shadow.env`) or like instructions (`git push`, `gh pr create`, "ignore previous instructions", …). With lessons on, atr also writes up to 2 lessons itself after an informative failure (see [CONFIG.md](CONFIG.md#lessons)); `atr lessons list` shows them with their evidence (task, run, signal). There is no Telegram command for lessons yet.
 
+### Compare two providers
+
+Run the same task on two providers and keep the better result:
+
+```bash
+atr add --repo R --output pr --compare grok,claude "Fix the flaky date parser test"
+atr compare show <key> [--json]   # arms, outcomes, verify, diff sizes, decision, PR URL
+```
+
+atr creates the task `K` plus two arms, `K-a` (first provider) and `K-b`. Each arm runs only on its own provider: if that provider hits a limit, auth error or stall, the arm fails instead of moving to the other provider. Arms work in their own worktrees and can't push or write to GitHub.
+
+When both arms are done, atr keeps the arm that **passed verify** with the **smallest diff** against the repo's base branch (added + removed lines, untracked files included). Ties go to fewer files, then fewer verify retries, fewer tokens, lower cost, shorter run time, then the first arm. If only one arm passed, it wins (a *walkover* when the other ended before verify). An empty diff never beats a real change. The winner's branch becomes `atr/K` and its output (for `--output pr`, the PR, with a short comparison table in the body) is delivered from `K`. The loser's worktree and local branch are removed. Follow-ups on `K` continue the winner's session in its tree.
+
+If neither arm passes verify, there is no PR: `K` goes to `needs_attention` and both arm worktrees are kept for you to inspect.
+
+Compare needs verify commands for the repo (`[verify]`, see [CONFIG.md](CONFIG.md)); without them it can't judge, so `atr add --compare` refuses. It also refuses when either provider is disabled, missing its CLI, or over quota (a compare never falls back to a single run). It costs about twice the tokens of a single run. `--compare` can't be combined with `--provider`, `--dir` or `--needs`. Not there yet: prompt variants on one provider, more than two arms, picking an arm by hand, and Telegram/dashboard views.
+
 ### Using atr from other agents
 
 Other coding agents can give atr work too.

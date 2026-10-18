@@ -366,6 +366,89 @@ pub fn ensure_shadow_no_push(worktree: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Compare-arm variant of [`ensure_shadow_no_push`] for a linked worktree of
+/// the user's own repo. `git config --local` there would write the shared
+/// repo config and block pushes for every task, so the hook path and
+/// `pushurl = no_push` go into this worktree's own `config.worktree`
+/// (`extensions.worktreeConfig`). Undo with [`clear_worktree_no_push`].
+pub fn ensure_worktree_no_push(worktree: &Path) -> Result<()> {
+    write_no_push_hook(worktree)?;
+    git_ok(worktree, &["config", "extensions.worktreeConfig", "true"])?;
+    git_ok(
+        worktree,
+        &["config", "--worktree", "core.hooksPath", ".atr/hooks"],
+    )?;
+    for remote in remote_names(worktree)? {
+        let key = format!("remote.{remote}.pushurl");
+        git_ok(worktree, &["config", "--worktree", &key, "no_push"])?;
+    }
+    Ok(())
+}
+
+/// Remove what [`ensure_worktree_no_push`] added (winner promotion).
+pub fn clear_worktree_no_push(worktree: &Path) -> Result<()> {
+    let _ = Command::new("git")
+        .current_dir(worktree)
+        .args(["config", "--worktree", "--unset", "core.hooksPath"])
+        .status();
+    for remote in remote_names(worktree)? {
+        let key = format!("remote.{remote}.pushurl");
+        let _ = Command::new("git")
+            .current_dir(worktree)
+            .args(["config", "--worktree", "--unset-all", &key])
+            .status();
+    }
+    let _ = std::fs::remove_file(worktree.join(".atr").join("hooks").join("pre-push"));
+    let _ = std::fs::remove_file(worktree.join(".atr").join("bin").join("gh"));
+    Ok(())
+}
+
+fn write_no_push_hook(worktree: &Path) -> Result<()> {
+    let hooks = worktree.join(".atr").join("hooks");
+    std::fs::create_dir_all(&hooks).with_context(|| format!("create {}", hooks.display()))?;
+    let hook = hooks.join("pre-push");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho \"atr: git push is disabled in this worktree\" >&2\nexit 1\n",
+    )
+    .with_context(|| format!("write {}", hook.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+fn remote_names(worktree: &Path) -> Result<Vec<String>> {
+    let remotes = Command::new("git")
+        .current_dir(worktree)
+        .args(["remote"])
+        .output()
+        .context("git remote")?;
+    let mut names: Vec<String> = String::from_utf8_lossy(&remotes.stdout)
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !names.iter().any(|n| n == "origin") {
+        names.push("origin".into());
+    }
+    Ok(names)
+}
+
+fn git_ok(worktree: &Path, args: &[&str]) -> Result<()> {
+    let st = Command::new("git")
+        .current_dir(worktree)
+        .args(args)
+        .status()
+        .with_context(|| format!("git {}", args.join(" ")))?;
+    if !st.success() {
+        bail!("git {} failed in {}", args.join(" "), worktree.display());
+    }
+    Ok(())
+}
+
 /// Remove a git worktree. Refuses a dirty tree unless `force`.
 pub fn remove_worktree(repo: &Path, dest: &Path, force: bool) -> Result<()> {
     if dest.exists() {

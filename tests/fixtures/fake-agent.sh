@@ -318,6 +318,33 @@ PY
     emit_success
     exit 0
     ;;
+  edit_lines)
+    # Compare tests: commit $DIR/${KIND}.lines lines (default 1) to
+    # CHANGE_${KIND}.md, then try to push (recorded in $DIR/${KIND}.push).
+    # Only inside the harness worktree root: side calls such as
+    # `grok usage <sid>` run from the test's cwd and must not touch git.
+    case "$(pwd -P)/" in
+      "$(cd "$SELF_DIR/.." && pwd -P)/work/"*) ;;
+      *) emit_success; exit 0 ;;
+    esac
+    n=1
+    if [[ -f "$DIR/${KIND}.lines" ]]; then
+      n=$(cat "$DIR/${KIND}.lines")
+    fi
+    : > "CHANGE_${KIND}.md"
+    for i in $(seq 1 "$n"); do
+      echo "line $i from $KIND" >> "CHANGE_${KIND}.md"
+    done
+    git add -A >/dev/null 2>&1
+    git -c user.name=fake -c user.email=fake@example.invalid commit -qm "change from $KIND" >/dev/null 2>&1 || true
+    if git push -q origin HEAD >/dev/null 2>&1; then
+      echo pushed > "$DIR/${KIND}.push"
+    else
+      echo blocked > "$DIR/${KIND}.push"
+    fi
+    emit_success
+    exit 0
+    ;;
   edit_success)
     if [[ -f README.md ]]; then
       printf '\nshadow-edit\n' >> README.md

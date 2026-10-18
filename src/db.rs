@@ -761,6 +761,18 @@ impl Db {
         Ok(())
     }
 
+    /// Claim the right to judge compare parent `key`: true for exactly one
+    /// caller while its decision is still empty.
+    pub fn claim_compare_decision(&self, key: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            r#"UPDATE tasks SET compare_decision = '{"judging":true}', updated = ?1
+               WHERE key = ?2 AND compare_decision = ''"#,
+            params![now_rfc3339(), key],
+        )?;
+        Ok(n == 1)
+    }
+
     pub fn set_compare_decision(&self, key: &str, json: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(

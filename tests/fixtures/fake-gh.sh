@@ -26,6 +26,11 @@ case "$cmd $sub" in
   "issue comment"|"issue edit"|"issue create"|"issue delete"|"issue close"|"issue reopen"|"issue develop"|"issue transfer"|"issue pin"|"issue unpin"|"pr create"|"pr comment"|"pr edit"|"pr merge"|"pr close"|"pr ready"|"pr review"|"label create"|"label delete"|"label edit"|"label clone")
     write=1 ;;
 esac
+if [[ "$cmd $sub" == "pr create" && -f "$DIR/gh-allow-pr" ]]; then
+  printf '%s\n' "$@" >> "$DIR/gh-pr.log"
+  echo "https://github.com/example/repo/pull/7"
+  exit 0
+fi
 if [[ "$write" -eq 1 ]]; then
   echo "$*" >> "$DIR/gh-writes.log"
   echo "fake-gh: refusing write: $*" >&2

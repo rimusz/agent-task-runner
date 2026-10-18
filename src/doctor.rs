@@ -66,6 +66,48 @@ impl Report {
 }
 
 /// With lessons on, the reflect provider must exist and be enabled.
+/// Compare judges on verify; without verify commands it can't pick a
+/// winner, and `atr add --compare` refuses that repo.
+fn compare_check(checks: &mut Vec<Check>, cfg: &Config) {
+    if !cfg.verify.enabled {
+        push(
+            checks,
+            "compare",
+            Status::Ok,
+            "off: [verify] is disabled, so `atr add --compare` refuses (compare can't judge)"
+                .into(),
+            None,
+        );
+        return;
+    }
+    let repos = cfg.effective_repos();
+    let missing: Vec<String> = repos
+        .iter()
+        .filter(|r| crate::verify::commands_for(cfg, &r.path, &r.path).is_empty())
+        .map(|r| r.name.clone())
+        .collect();
+    if missing.is_empty() {
+        push(
+            checks,
+            "compare",
+            Status::Ok,
+            "verify commands set; compare can judge".into(),
+            None,
+        );
+    } else {
+        push(
+            checks,
+            "compare",
+            Status::Warn,
+            format!(
+                "no verify commands for {}: compare can't judge there (`atr add --compare` refuses)",
+                missing.join(", ")
+            ),
+            Some("set [verify] commands or a [[verify.repo]] entry with commands".into()),
+        );
+    }
+}
+
 fn lessons_check(checks: &mut Vec<Check>, cfg: &Config) {
     let on = cfg.lessons.enabled
         || cfg
@@ -138,6 +180,7 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
     );
     unknown_keys_check(&mut checks, cfg);
     lessons_check(&mut checks, cfg);
+    compare_check(&mut checks, cfg);
 
     github_auth_checks(&mut checks, cfg, config_path);
     github_token_api_check(&mut checks, cfg, config_path).await;
