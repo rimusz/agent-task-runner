@@ -62,13 +62,19 @@ pub async fn dispatch_available(shared: &Arc<Shared>) -> Result<()> {
         let Some(task) = shared.db.get_task(&key)? else {
             continue;
         };
-        if task.role == "parent" {
+        if task.role == "parent" || task.role == "compare" {
             continue;
         }
         if !crate::plan::deps_ready(&shared.db, &task)? {
             continue;
         }
         let cfg = shared.config.read().unwrap().clone();
+        if task.pin_strict {
+            if let Some(reason) = strict_pin_unusable(&cfg, &shared.db, &task) {
+                fail_strict_arm(shared, &cfg, &task, None, &reason);
+                continue;
+            }
+        }
         if task_over_cap(&shared.db, &cfg, &key)? {
             tracing::warn!(task = %key, "per-task wall clock exceeded");
             record_task_timeout(shared, &cfg, &task);
@@ -205,6 +211,66 @@ pub fn record_task_timeout(shared: &Arc<Shared>, cfg: &Config, task: &crate::db:
     }
 }
 
+/// Why a strictly pinned task can never run on its provider (unknown,
+/// disabled, missing CLI, or lacking a needed capability), if so.
+pub fn strict_pin_unusable(cfg: &Config, db: &Db, task: &crate::db::Task) -> Option<String> {
+    let name = task.provider.as_deref().filter(|n| !n.is_empty())?;
+    let Some(p) = cfg.provider(name) else {
+        return Some(format!("provider {name} is not configured"));
+    };
+    let enabled = db
+        .enabled_override(&p.name)
+        .ok()
+        .flatten()
+        .unwrap_or(p.enabled);
+    if !enabled {
+        return Some(format!("provider {name} is disabled"));
+    }
+    if !p.cli.exists() {
+        return Some(format!("provider {name} CLI is missing"));
+    }
+    let needs = crate::task::task_needs(&task.needs, &task.labels);
+    if !provider_has(p, &needs) {
+        return Some(format!("provider {name} lacks {}", needs.join(",")));
+    }
+    None
+}
+
+/// A compare arm cannot continue on its pinned provider: fail it instead of
+/// failing over (so both arms never collapse onto one provider). Records an
+/// `arm_unavailable` event on `run_id`, or on a finished marker run when the
+/// arm never started.
+pub fn fail_strict_arm(
+    shared: &Shared,
+    cfg: &Config,
+    task: &crate::db::Task,
+    run_id: Option<i64>,
+    reason: &str,
+) {
+    let key = task.key.as_str();
+    tracing::warn!(task = %key, reason, "compare arm unavailable; not failing over");
+    let detail = serde_json::json!({"type": "arm_unavailable", "reason": reason}).to_string();
+    match run_id {
+        Some(id) => {
+            let _ = shared.db.insert_event(id, "arm_unavailable", &detail);
+        }
+        None => {
+            let provider = task.provider.clone().unwrap_or_else(|| "atr".into());
+            if let Ok(id) = shared.db.start_run(key, &provider, "") {
+                let _ = shared.db.insert_event(id, "arm_unavailable", &detail);
+                let _ = shared.db.finish_run(id, "arm_unavailable", None);
+            }
+        }
+    }
+    let _ = shared.db.set_status(key, "failed");
+    let _ = crate::output::capture(shared, key);
+    notify_run(
+        &cfg.telegram,
+        &format!("failed {key} (compare arm: {reason})"),
+        task.shadow,
+    );
+}
+
 fn task_over_cap(db: &Db, cfg: &Config, key: &str) -> Result<bool> {
     let Some(first) = db.first_run_started(key)? else {
         return Ok(false);
@@ -283,6 +349,27 @@ pub fn pick_provider(
         return Ok(None);
     }
     let capable = |p: &Provider| provider_has(p, &needs);
+
+    // Compare arms: only the pinned provider, ever. Busy, cooling, degraded
+    // or over quota means wait; disabled/missing is failed by the dispatcher.
+    if task.pin_strict {
+        let Some(name) = task.provider.as_deref().filter(|n| !n.is_empty()) else {
+            return Ok(None);
+        };
+        if tried.contains(&name) {
+            return Ok(None);
+        }
+        let Some(p) = cfg.provider(name).filter(|p| capable(p)) else {
+            return Ok(None);
+        };
+        // A stall retry resumes on the same provider despite the degraded
+        // mark it just set, exactly like a soft-pinned task.
+        let resuming = task.stall_retries > 0 || task.session_id.is_some();
+        return Ok(match unavailable(cfg, p, db, inflight, resuming, clock)? {
+            None => Some(p.clone()),
+            Some(_) => None,
+        });
+    }
 
     let mut prefers = Vec::new();
     if crate::plan::is_driver_role(&task.role) {
@@ -1167,6 +1254,16 @@ async fn handle_failover(
     run_id: i64,
     worktree: &std::path::Path,
 ) -> Result<()> {
+    if let Some(task) = shared.db.get_task(key)?.filter(|t| t.pin_strict) {
+        fail_strict_arm(
+            shared,
+            cfg,
+            &task,
+            Some(run_id),
+            &format!("{} ended with {}", current.name, result.outcome),
+        );
+        return Ok(());
+    }
     let mut tried = shared
         .db
         .get_task(key)?
@@ -1382,7 +1479,12 @@ async fn maybe_review(
     wt: &std::path::Path,
     assistant: bool,
 ) -> Result<ReviewAfter> {
-    if !cfg.review.enabled || assistant || task.shadow || crate::plan::is_driver_role(&task.role) {
+    if !cfg.review.enabled
+        || assistant
+        || task.shadow
+        || task.role == "arm"
+        || crate::plan::is_driver_role(&task.role)
+    {
         return Ok(ReviewAfter::Skip);
     }
     let Some(mut driver) = pick_driver_fallback(cfg, &shared.db) else {
