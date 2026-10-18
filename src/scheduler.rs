@@ -354,6 +354,18 @@ pub fn pick_provider(
     }
     let capable = |p: &Provider| provider_has(p, &needs);
 
+    // Telegram assistant with `[telegram.assistant] providers`: the first
+    // listed provider that is usable right now; wait while a listed one is
+    // only busy/cooling; fall through when none of them can ever run.
+    if crate::telegram::is_assistant_key(&task.key) && !cfg.telegram.assistant.providers.is_empty()
+    {
+        match assistant_pick(cfg, db, inflight, &tried, clock)? {
+            AssistantPick::Use(p) => return Ok(Some(*p)),
+            AssistantPick::Wait => return Ok(None),
+            AssistantPick::NoneUsable => {}
+        }
+    }
+
     // Compare arms: only the pinned provider, ever. Busy, cooling, degraded
     // or over quota means wait; disabled/missing is failed by the dispatcher.
     if task.pin_strict {
@@ -418,6 +430,76 @@ pub fn pick_provider(
         return Ok(Some(p.clone()));
     }
     Ok(None)
+}
+
+enum AssistantPick {
+    Use(Box<Provider>),
+    Wait,
+    NoneUsable,
+}
+
+/// Walk `[telegram.assistant] providers` in order, skipping `tried` ones.
+fn assistant_pick(
+    cfg: &Config,
+    db: &Db,
+    inflight: &HashMap<String, InFlight>,
+    tried: &[&str],
+    clock: &Clock,
+) -> Result<AssistantPick> {
+    let mut can_wait = false;
+    for name in &cfg.telegram.assistant.providers {
+        if tried.contains(&name.as_str()) {
+            continue;
+        }
+        let Some(p) = cfg.provider(name) else {
+            continue;
+        };
+        match unavailable(cfg, p, db, inflight, false, clock)? {
+            None => return Ok(AssistantPick::Use(Box::new(p.clone()))),
+            Some("disabled") | Some("missing-cli") => {}
+            Some(reason) => {
+                tracing::debug!(provider = %p.name, reason, "assistant provider skipped");
+                can_wait = true;
+            }
+        }
+    }
+    Ok(if can_wait {
+        AssistantPick::Wait
+    } else {
+        AssistantPick::NoneUsable
+    })
+}
+
+/// The provider a new Telegram assistant turn would use right now (for the
+/// "working…" message): `providers` list, else the single `provider` pin,
+/// else `None` (first available, decided at dispatch).
+pub fn assistant_provider_now(shared: &Shared) -> Option<String> {
+    let cfg = shared.config.read().unwrap().clone();
+    let ast = &cfg.telegram.assistant;
+    if !ast.providers.is_empty() {
+        let inflight = shared.inflight.lock().unwrap().clone();
+        return match assistant_pick(&cfg, &shared.db, &inflight, &[], &Clock::system()) {
+            Ok(AssistantPick::Use(p)) => Some(p.name),
+            // All listed ones busy/cooling: it waits for the first of them.
+            Ok(AssistantPick::Wait) => ast
+                .providers
+                .iter()
+                .find(|n| {
+                    cfg.provider(n).is_some_and(|p| {
+                        shared
+                            .db
+                            .enabled_override(&p.name)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(p.enabled)
+                    })
+                })
+                .cloned(),
+            _ => None,
+        };
+    }
+    let pin = ast.provider.trim();
+    (!pin.is_empty()).then(|| pin.to_string())
 }
 
 /// Provider lists every capability the task needs.

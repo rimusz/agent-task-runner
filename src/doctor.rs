@@ -66,6 +66,73 @@ impl Report {
 }
 
 /// With lessons on, the reflect provider must exist and be enabled.
+/// `[telegram.assistant] providers` wins over `provider`; say so when both
+/// are set so the single pin isn't silently ignored.
+fn assistant_providers_check(checks: &mut Vec<Check>, cfg: &Config) {
+    let ast = &cfg.telegram.assistant;
+    if !ast.enabled {
+        return;
+    }
+    if ast.both_set() {
+        push(
+            checks,
+            "telegram assistant",
+            Status::Warn,
+            format!(
+                "both provider = {:?} and providers = [{}] are set; providers wins",
+                ast.provider.trim(),
+                ast.providers.join(", ")
+            ),
+            Some("remove telegram.assistant.provider (or empty providers)".into()),
+        );
+    } else {
+        push(
+            checks,
+            "telegram assistant",
+            Status::Ok,
+            format!("provider {}", ast.display()),
+            None,
+        );
+    }
+}
+
+#[cfg(test)]
+mod assistant_providers_tests {
+    use super::*;
+
+    #[test]
+    fn warns_when_both_provider_and_providers_are_set() {
+        let mut cfg = crate::config::parse_config_toml(
+            r#"
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "/bin/true"
+[[provider]]
+name = "grok"
+kind = "grok"
+cli = "/bin/true"
+"#,
+        )
+        .unwrap();
+        cfg.telegram.assistant.enabled = true;
+        let mut checks = Vec::new();
+        assistant_providers_check(&mut checks, &cfg);
+        assert!(matches!(checks[0].status, Status::Ok));
+        assert!(checks[0].detail.contains("first available"));
+        cfg.telegram.assistant.providers = vec!["grok".into(), "claude".into()];
+        cfg.telegram.assistant.provider = "claude".into();
+        let mut checks = Vec::new();
+        assistant_providers_check(&mut checks, &cfg);
+        assert!(matches!(checks[0].status, Status::Warn));
+        assert!(
+            checks[0].detail.contains("providers wins"),
+            "{}",
+            checks[0].detail
+        );
+    }
+}
+
 /// Compare judges on verify; without verify commands it can't pick a
 /// winner, and `atr add --compare` refuses that repo.
 fn compare_check(checks: &mut Vec<Check>, cfg: &Config) {
@@ -181,6 +248,7 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
     unknown_keys_check(&mut checks, cfg);
     lessons_check(&mut checks, cfg);
     compare_check(&mut checks, cfg);
+    assistant_providers_check(&mut checks, cfg);
 
     github_auth_checks(&mut checks, cfg, config_path);
     github_token_api_check(&mut checks, cfg, config_path).await;

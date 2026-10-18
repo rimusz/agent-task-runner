@@ -113,6 +113,15 @@ atr telegram test
 
 If you type a normal sentence (not a `/command`), the assistant answers. It can only propose the same commands; each write still needs Confirm.
 
+The assistant uses `[telegram.assistant] provider`, or the first available provider. To give it a fallback order, set `providers`: each turn takes the first listed provider that is enabled and not busy, cooling down, rate-limited or at quota, and moves down the list if a run fails. The "⏳ working" message, `atr status` and the dashboard name the provider actually used.
+
+```bash
+atr config set telegram.assistant.providers '["grok", "codex", "claude"]'
+atr config get telegram.assistant.providers
+```
+
+`providers` wins over `provider` (doctor warns when both are set); names must be `[[provider]]` names. See [CONFIG.md](CONFIG.md).
+
 **Dashboard.** While atr is running, open `http://127.0.0.1:7420/`. It is read-only: what is running, what is queued, recent results, and usage. No buttons. Times are in `display_timezone`, shown once in the header and not repeated after each time. Plan usage reads like `5h 0% · resets Oct 16; 7d 4% · resets Oct 17`; hover a reset date for the full time and zone.
 
 **Terminal.**

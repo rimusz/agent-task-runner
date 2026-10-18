@@ -312,7 +312,7 @@ atr picks providers in three separate places:
 |------|--------|--------------------|
 | **Driver** (planning + review) | top-level `driver = "<provider name>"` | `grok` if that provider is enabled, else the first enabled `[[provider]]` |
 | **Workers** (normal tasks) | `[[provider]]` order + `enabled` | first available provider in order |
-| **Telegram assistant** (free-text chat) | `[telegram.assistant] provider` | first available provider in order (it does **not** use `driver`) |
+| **Telegram assistant** (free-text chat) | `[telegram.assistant] providers` (ordered list), else `provider` | first available provider in order (it does **not** use `driver`) |
 
 The model is always per provider: `[[provider]] model` (empty = the CLI's own
 default). There is no per-task model override; to run a task on another model,
@@ -333,7 +333,19 @@ kind = "grok"
 [telegram.assistant]
 enabled = true
 provider = "grok"            # optional; empty = first available in order
+# providers = ["grok", "codex", "claude"]  # optional ordered list; wins over provider
 ```
+
+`providers` is an ordered preference for the assistant. Each turn uses the
+first listed provider that is enabled and not busy, cooling down,
+rate-limited or at quota. If a run on it hits a limit or fails, the turn
+moves down the list. While every listed provider is only busy or cooling,
+the turn waits (it does not use an unlisted provider). If none of them can
+run at all (all disabled or missing their CLI), it falls back to the normal
+behaviour (first available in order). Names must match a `[[provider]]`
+(load and `atr config set` refuse unknown ones). An empty or missing list
+keeps the single `provider` key. If both are set, `providers` wins and
+`atr doctor` warns.
 
 Set or change it:
 
@@ -341,7 +353,8 @@ Set or change it:
   `atr driver set grok`, `atr driver clear` (back to the default). Order and
   models: `atr providers move <name> --to 1`, `atr providers model <name> <model>`.
 - Telegram: `/config set driver codex`, `/providers model cursor <model>`,
-  `/providers move <name> <n>`, `/config set telegram.assistant.provider claude`.
+  `/providers move <name> <n>`, `/config set telegram.assistant.provider claude`,
+  `/config set telegram.assistant.providers ["grok","claude"]` (CLI: `atr config set telegram.assistant.providers '["grok","codex","claude"]'`).
 - Per task (provider only): `atr add --provider claude "…"`, `"provider"` in
   `POST /tasks` JSON, or `provider` on the MCP `add_task` tool. It's a
   preference; the provider still needs the task's capabilities.

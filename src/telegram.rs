@@ -1369,7 +1369,10 @@ fn handle_assistant(shared: &Shared, chat: i64, text: &str) -> Outgoing {
         return help_outgoing(chat);
     }
     let key = assistant_task_key(chat);
-    if !ast.provider.trim().is_empty() && cfg.provider(ast.provider.trim()).is_none() {
+    if ast.providers.is_empty()
+        && !ast.provider.trim().is_empty()
+        && cfg.provider(ast.provider.trim()).is_none()
+    {
         return fail(
             chat,
             anyhow::anyhow!(
@@ -1382,7 +1385,8 @@ fn handle_assistant(shared: &Shared, chat: i64, text: &str) -> Outgoing {
         Ok(p) => p,
         Err(e) => return fail(chat, e),
     };
-    let pin = ast.provider.trim().to_string();
+    // `providers` (ordered, availability-aware) wins over the single pin.
+    let pin = crate::scheduler::assistant_provider_now(shared).unwrap_or_default();
     let existing_sid = if pin.is_empty() {
         None
     } else {
@@ -1605,10 +1609,10 @@ fn redacted_config_view(cfg: &Config, path: &Path) -> String {
         "telegram.enabled = {}\ntelegram.assistant.enabled = {}\ntelegram.assistant.provider = {}\ntelegram.assistant.timeout = {:?}\n",
         cfg.telegram.enabled,
         cfg.telegram.assistant.enabled,
-        if cfg.telegram.assistant.provider.is_empty() {
-            "(first in order)"
+        if cfg.telegram.assistant.providers.is_empty() && cfg.telegram.assistant.provider.is_empty() {
+            "(first in order)".to_string()
         } else {
-            cfg.telegram.assistant.provider.as_str()
+            cfg.telegram.assistant.display()
         },
         cfg.telegram.assistant.timeout
     ));
