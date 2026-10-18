@@ -331,6 +331,7 @@ PY
     done
     git add -A >/dev/null 2>&1
     git -c user.name=fake -c user.email=fake@example.invalid commit -qm "change from $KIND" >/dev/null 2>&1 || true
+    { git config --show-origin --get-all remote.origin.pushurl; git config --show-origin --get core.hooksPath; git config --show-origin --get extensions.worktreeConfig; pwd; } > "$DIR/${KIND}.pushcfg" 2>&1 || true
     if git push -q origin HEAD >/dev/null 2>&1; then
       echo pushed > "$DIR/${KIND}.push"
     else
