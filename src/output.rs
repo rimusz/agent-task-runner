@@ -70,10 +70,19 @@ pub fn git_diff(wt: &Path) -> String {
 }
 
 pub fn capture(shared: &Shared, key: &str) -> Result<Value> {
+    capture_with(shared, key, None)
+}
+
+/// Like [`capture`], with the result text given instead of read from the
+/// task's own last run (a compare parent has no runs of its own).
+fn capture_with(shared: &Shared, key: &str, text: Option<&str>) -> Result<Value> {
     let Some(task) = shared.db.get_task(key)? else {
         anyhow::bail!("unknown task {key}");
     };
-    let text = last_text(shared, key);
+    let text = match text {
+        Some(t) => t.to_string(),
+        None => last_text(shared, key),
+    };
     let diff = task
         .worktree
         .as_deref()
@@ -87,7 +96,12 @@ pub fn capture(shared: &Shared, key: &str) -> Result<Value> {
 }
 
 pub fn finalize(shared: &Shared, key: &str) -> Result<()> {
-    let payload = capture(shared, key)?;
+    finalize_with_text(shared, key, None)
+}
+
+/// Deliver `key`'s output, using `text` as the result text when given.
+pub fn finalize_with_text(shared: &Shared, key: &str, text: Option<&str>) -> Result<()> {
+    let payload = capture_with(shared, key, text)?;
     let Some(task) = shared.db.get_task(key)? else {
         return Ok(());
     };

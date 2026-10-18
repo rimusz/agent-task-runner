@@ -84,6 +84,9 @@ pub async fn dispatch_available(shared: &Arc<Shared>) -> Result<()> {
                 &format!("failed {key} (task timeout)"),
                 task.shadow,
             );
+            if task.role == crate::compare::ARM_ROLE {
+                crate::compare::after_arm(shared, &key);
+            }
             continue;
         }
         let inflight = shared.inflight.lock().unwrap().clone();
@@ -269,6 +272,7 @@ pub fn fail_strict_arm(
         &format!("failed {key} (compare arm: {reason})"),
         task.shadow,
     );
+    crate::compare::after_arm(shared, key);
 }
 
 fn task_over_cap(db: &Db, cfg: &Config, key: &str) -> Result<bool> {
@@ -602,7 +606,23 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             if !worktree::is_git_repo(&repo) && repo.as_os_str().is_empty() {
                 anyhow::bail!("git workspace for {key} has no repo path");
             }
-            if cfg.cache.worktree_pool {
+            // Compare arms get their own worktree (never a pool slot), and a
+            // promoted compare parent keeps the winner's tree.
+            let own_tree = task
+                .worktree
+                .as_deref()
+                .filter(|w| !task.compare_decision.is_empty() && std::path::Path::new(w).exists());
+            if let Some(w) = own_tree {
+                std::path::PathBuf::from(w)
+            } else if task.role == crate::compare::ARM_ROLE {
+                worktree::ensure_worktree(
+                    &repo,
+                    &cfg.worktree_root,
+                    &key,
+                    &branch_prefix,
+                    &base_branch,
+                )?
+            } else if cfg.cache.worktree_pool {
                 let slot = pick_pool_slot(
                     &shared,
                     &repo,
@@ -637,8 +657,13 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             }
         }
     };
+    // Compare arms are hardened like shadow runs (no push, gh wrapper), but
+    // in their own worktree config: they share the user's repo.
+    let hardened = task.shadow || task.role == crate::compare::ARM_ROLE;
     if task.shadow {
         worktree::ensure_shadow_no_push(&wt)?;
+    } else if hardened {
+        worktree::ensure_worktree_no_push(&wt)?;
     }
     shared.db.set_worktree(&key, &wt.display().to_string())?;
 
@@ -837,7 +862,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         task.shadow,
     );
 
-    let path_prepend = if task.shadow {
+    let path_prepend = if hardened {
         let bin = wt.join(".atr").join("bin");
         crate::shadow::write_gh_wrapper(&bin).ok();
         Some(bin)
@@ -905,7 +930,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 &format!("fallback {key} {} (spawn)", provider.name),
                 task.shadow,
             );
-            if task.shadow {
+            if hardened {
                 let _ = crate::shadow::record_after_run(
                     &cfg,
                     &shared.db,
@@ -1030,7 +1055,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         );
     }
 
-    if task.shadow {
+    if hardened {
         let _ = crate::shadow::record_after_run(
             &cfg,
             &shared.db,
@@ -1241,6 +1266,9 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             crate::lessons::spawn_reflect(shared.clone(), key.clone(), signal, Some(run_id));
         }
     }
+    if task.role == crate::compare::ARM_ROLE {
+        crate::compare::after_arm(&shared, &key);
+    }
     shared.kick.notify_waiters();
     Ok(())
 }
@@ -1407,6 +1435,10 @@ fn maybe_finish_parent(shared: &Shared, child_key: &str) -> Result<()> {
     let Some(parent) = task.parent_key else {
         return Ok(());
     };
+    // Compare parents are settled by the judge (`compare::after_arm`).
+    if task.role == crate::compare::ARM_ROLE {
+        return Ok(());
+    }
     let kids = shared.db.children_of(&parent)?;
     if kids.is_empty() {
         return Ok(());

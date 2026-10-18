@@ -92,6 +92,10 @@ enum Cmd {
         /// Required provider capabilities: browser, desktop (comma-separated or repeated).
         #[arg(long, value_delimiter = ',')]
         needs: Vec<String>,
+        /// Run on two providers (e.g. grok,claude) and keep the arm that passes
+        /// verify with the smallest diff. Needs --repo and verify commands.
+        #[arg(long, conflicts_with_all = ["provider", "dir", "needs"])]
+        compare: Option<String>,
     },
     /// Show providers (with order numbers), inflight tasks, and usage.
     Status {
@@ -264,6 +268,21 @@ enum Cmd {
     Lessons {
         #[command(subcommand)]
         cmd: LessonsCmd,
+    },
+    /// Compare tasks (`atr add --compare a,b`): arms, outcomes, decision.
+    Compare {
+        #[command(subcommand)]
+        cmd: CompareCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CompareCmd {
+    /// Show a compare task's arms, outcomes, diff sizes, decision and PR URL.
+    Show {
+        key: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -580,6 +599,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             provider,
             title,
             needs,
+            compare,
         } => {
             let needs = atr::task::parse_needs(&needs)?;
             let text = if let Some(p) = prompt.filter(|s| !s.trim().is_empty()) {
@@ -634,6 +654,30 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 None => atr::task::allocate_key(&shared.db, &cfg.task_key_prefix, &title)?,
             };
             let body = format!("# {title}\n\n{text}");
+            if let Some(arms) = compare.as_deref() {
+                if workspace_kind != atr::task::WorkspaceKind::Git {
+                    anyhow::bail!("--compare needs --repo (arms are judged on their git diff)");
+                }
+                let providers = atr::compare::parse_arms(&cfg, arms)?;
+                let keys = atr::compare::add(
+                    &shared,
+                    &cfg,
+                    &atr::compare::CompareSpec {
+                        key: key.clone(),
+                        repo: repo_path.clone().unwrap_or_default(),
+                        issue: None,
+                        message: body,
+                        output_kind: output_kind.as_str().into(),
+                        output_spec: output_spec.unwrap_or_default(),
+                        title: title.clone(),
+                        labels: String::new(),
+                        providers,
+                    },
+                )?;
+                println!("{key}");
+                eprintln!("arms: {}", keys.join(", "));
+                return Ok(ExitCode::SUCCESS);
+            }
             let auth = atr::mcp::auth_header(&cfg.mcp);
             if let Ok(status) = http_create(
                 &cfg.listen,
@@ -866,6 +910,21 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let filter = tasks.then_some(atr::gc::TaskGc { repo, status });
             let report = atr::gc::run(&shared, dry_run, force, older, history, filter.as_ref())?;
             print!("{}", report.text(dry_run));
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Compare { cmd } => {
+            let shared = Shared::open(path.clone())?;
+            let cfg = shared.config.read().unwrap().clone();
+            match cmd {
+                CompareCmd::Show { key, json } => {
+                    if json {
+                        let v = atr::compare::show_json(&cfg, &shared.db, &key)?;
+                        println!("{}", serde_json::to_string_pretty(&v)?);
+                    } else {
+                        print!("{}", atr::compare::show_text(&cfg, &shared.db, &key)?);
+                    }
+                }
+            }
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Lessons { cmd } => {

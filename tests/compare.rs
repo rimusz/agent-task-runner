@@ -232,3 +232,221 @@ async fn parse_arms_validates() {
         assert!(atr::compare::parse_arms(&cfg, bad).is_err(), "{bad}");
     }
 }
+
+// ---- Compare MVP PR 2: judge, winner promotion, loser cleanup ----
+
+async fn harness2(claude: &str, grok: &str) -> Harness {
+    let h = Harness::with_providers(
+        &[
+            ("claude", true, claude),
+            ("grok", true, grok),
+            ("cursor", false, "success"),
+            ("codex", false, "success"),
+        ],
+        "127.0.0.1:0",
+    )
+    .await;
+    // A bare origin so the winner's push can be checked.
+    let origin = h.dir.path().join("origin.git");
+    git(h.dir.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git(&h.repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    std::fs::write(h.fake_dir.join("gh-allow-pr"), "").unwrap();
+    h
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let o = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+fn set_verify(h: &Harness, cmd: &str) {
+    let mut cfg = h.shared.config.write().unwrap();
+    cfg.verify.enabled = true;
+    cfg.verify.max_retries = 0;
+    cfg.verify.timeout = std::time::Duration::from_secs(5);
+    cfg.verify.commands = vec![cmd.to_string()];
+}
+
+fn lines(h: &Harness, kind: &str, n: u32) {
+    std::fs::write(h.fake_dir.join(format!("{kind}.lines")), n.to_string()).unwrap();
+}
+
+fn add_compare(h: &Harness, key: &str) -> Vec<String> {
+    let cfg = h.shared.config.read().unwrap().clone();
+    atr::compare::add(
+        &h.shared,
+        &cfg,
+        &atr::compare::CompareSpec {
+            key: key.into(),
+            repo: h.repo.display().to_string(),
+            message: "make the change".into(),
+            output_kind: "pr".into(),
+            title: "Make the change".into(),
+            providers: vec!["claude".into(), "grok".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+async fn wait_decided(h: &Harness, key: &str) -> atr::compare::Decision {
+    h.wait_until(key, 40000, |h| {
+        h.shared
+            .db
+            .get_task(key)
+            .ok()
+            .flatten()
+            .and_then(|t| serde_json::from_str::<atr::compare::Decision>(&t.compare_decision).ok())
+            .is_some_and(|d| !d.decided_at.is_empty())
+    })
+    .await;
+    let t = h.shared.db.get_task(key).unwrap().unwrap();
+    serde_json::from_str(&t.compare_decision).unwrap()
+}
+
+#[tokio::test]
+async fn smaller_passing_diff_wins_and_becomes_the_pr() {
+    let h = harness2("edit_lines", "edit_lines").await;
+    set_verify(&h, "true");
+    lines(&h, "claude", 10);
+    lines(&h, "grok", 3);
+    add_compare(&h, "demo-w1");
+    let d = wait_decided(&h, "demo-w1").await;
+    assert_eq!(d.winner.as_deref(), Some("demo-w1-b"), "{d:?}");
+    assert_eq!(d.winner_provider.as_deref(), Some("grok"));
+    assert!(d.reason.contains("smaller diff (3 vs 10"), "{}", d.reason);
+    assert!(!d.walkover);
+    assert_eq!(d.pr_url, "https://github.com/example/repo/pull/7");
+    let a = &d.arms[0];
+    assert_eq!((a.files, a.added, a.verify.as_str()), (1, 10, "passed"));
+
+    // Arms could not push while running.
+    for kind in ["claude", "grok"] {
+        let p = std::fs::read_to_string(h.fake_dir.join(format!("{kind}.push"))).unwrap();
+        assert_eq!(p.trim(), "blocked", "{kind} arm pushed");
+    }
+    // The user's repo config was never hardened (worktree-scoped config).
+    assert!(git(&h.repo, &["config", "--get", "remote.origin.pushurl"]).is_empty());
+    assert!(git(&h.repo, &["config", "--get", "core.hooksPath"]).is_empty());
+
+    // The parent took over the winner's tree, provider and session.
+    let p = h.shared.db.get_task("demo-w1").unwrap().unwrap();
+    assert_eq!(p.status, "waiting");
+    assert_eq!(p.role, "worker");
+    assert_eq!(p.provider.as_deref(), Some("grok"));
+    assert!(p.session_id.is_some());
+    assert_eq!(p.result_pr_url, d.pr_url);
+    let wt = std::path::PathBuf::from(p.worktree.clone().unwrap());
+    assert!(wt.ends_with("demo-w1-b"), "{wt:?}");
+    assert_eq!(
+        git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "atr/demo-w1"
+    );
+    // Pushed as atr/<parent>; arm branches never reached origin.
+    let origin = h.dir.path().join("origin.git");
+    let refs = git(&origin, &["for-each-ref", "--format=%(refname)"]);
+    assert!(refs.contains("refs/heads/atr/demo-w1\n"), "{refs}");
+    assert!(!refs.contains("demo-w1-a") && !refs.contains("demo-w1-b"), "{refs}");
+    // PR body carries the comparison footer.
+    let pr = std::fs::read_to_string(h.fake_dir.join("gh-pr.log")).unwrap();
+    assert!(pr.contains("atr compare"), "{pr}");
+    assert!(pr.contains("demo-w1-b 🏆"), "{pr}");
+
+    // Loser: worktree removed, local branch deleted, arm done.
+    let la = h.shared.db.get_task("demo-w1-a").unwrap().unwrap();
+    assert_eq!(la.status, "done");
+    assert!(la.worktree.is_none());
+    assert!(!h.dir.path().join("work/repo/demo-w1-a").exists());
+    assert!(git(&h.repo, &["branch", "--list", "atr/demo-w1-a"]).trim().is_empty());
+    let wb = h.shared.db.get_task("demo-w1-b").unwrap().unwrap();
+    assert_eq!(wb.status, "done");
+    assert!(wb.worktree.is_none(), "gc must not own the winner's tree via the arm");
+
+    let cfg = h.shared.config.read().unwrap().clone();
+    let show = atr::compare::show_text(&cfg, &h.shared.db, "demo-w1").unwrap();
+    assert!(show.contains("decision: demo-w1-b"), "{show}");
+    assert!(show.contains("pr: https://"), "{show}");
+    let js = atr::compare::show_json(&cfg, &h.shared.db, "demo-w1").unwrap();
+    assert_eq!(js["decision"]["winner"], "demo-w1-b");
+
+    // A follow-up on the parent resumes the winner's provider in its tree.
+    h.submit("demo-w1", "one more thing");
+    h.wait_until("demo-w1", 20000, |h| {
+        h.shared.db.list_runs(Some("demo-w1")).unwrap().len() == 1
+            && h.shared.db.get_task("demo-w1").unwrap().unwrap().status == "waiting"
+    })
+    .await;
+    let runs = h.shared.db.list_runs(Some("demo-w1")).unwrap();
+    assert_eq!(runs[0].provider, "grok");
+    let p = h.shared.db.get_task("demo-w1").unwrap().unwrap();
+    assert_eq!(p.worktree.as_deref(), Some(wt.to_str().unwrap()));
+}
+
+#[tokio::test]
+async fn arm_that_fails_verify_loses_even_with_a_smaller_diff() {
+    let h = harness2("edit_lines", "edit_lines").await;
+    set_verify(&h, "test ! -f CHANGE_claude.md");
+    lines(&h, "claude", 1);
+    lines(&h, "grok", 20);
+    add_compare(&h, "demo-w2");
+    let d = wait_decided(&h, "demo-w2").await;
+    assert_eq!(d.winner.as_deref(), Some("demo-w2-b"), "{d:?}");
+    assert_eq!(d.reason, "only arm that passed verify");
+    assert_eq!(d.arms[0].verify, "failed");
+}
+
+#[tokio::test]
+async fn walkover_when_one_arm_hits_a_limit() {
+    let h = harness2("rate_limit", "edit_lines").await;
+    set_verify(&h, "true");
+    add_compare(&h, "demo-w3");
+    let d = wait_decided(&h, "demo-w3").await;
+    assert_eq!(d.winner.as_deref(), Some("demo-w3-b"), "{d:?}");
+    assert!(d.walkover);
+    assert_eq!(d.arms[0].verify, "none");
+}
+
+#[tokio::test]
+async fn no_winner_parks_parent_in_needs_attention() {
+    let h = harness2("edit_lines", "edit_lines").await;
+    set_verify(&h, "false");
+    add_compare(&h, "demo-w4");
+    let d = wait_decided(&h, "demo-w4").await;
+    assert_eq!(d.winner, None);
+    assert_eq!(d.reason, "no arm passed verify");
+    let p = h.shared.db.get_task("demo-w4").unwrap().unwrap();
+    assert_eq!(p.status, "needs_attention");
+    assert_eq!(p.role, "compare");
+    assert!(p.result_pr_url.is_empty());
+    assert!(!h.fake_dir.join("gh-pr.log").exists());
+    // Both arm trees are kept for inspection.
+    for k in ["demo-w4-a", "demo-w4-b"] {
+        let t = h.shared.db.get_task(k).unwrap().unwrap();
+        assert!(std::path::Path::new(&t.worktree.unwrap()).exists());
+    }
+}
+
+#[tokio::test]
+async fn add_refuses_without_verify_or_with_unusable_provider() {
+    let h = harness2("success", "success").await;
+    let cfg = h.shared.config.read().unwrap().clone();
+    let spec = atr::compare::CompareSpec {
+        key: "demo-w5".into(),
+        repo: h.repo.display().to_string(),
+        message: "x".into(),
+        providers: vec!["claude".into(), "grok".into()],
+        ..Default::default()
+    };
+    let err = atr::compare::add(&h.shared, &cfg, &spec).unwrap_err();
+    assert!(err.to_string().contains("verify"), "{err}");
+    set_verify(&h, "true");
+    h.shared.db.set_enabled_override("grok", false).unwrap();
+    let cfg = h.shared.config.read().unwrap().clone();
+    let err = atr::compare::add(&h.shared, &cfg, &spec).unwrap_err();
+    assert!(err.to_string().contains("disabled"), "{err}");
+    assert!(h.shared.db.get_task("demo-w5").unwrap().is_none());
+}
