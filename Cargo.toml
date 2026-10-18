@@ -20,6 +20,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 semver = "1"
+serde_ignored = "0.1"
 serde_json = "1"
 shellexpand = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "io-std", "io-util", "time", "net", "sync", "fs"] }

@@ -65,6 +65,23 @@ impl Report {
     }
 }
 
+/// Unknown keys are ignored on load (so rollbacks work); surface them here.
+fn unknown_keys_check(checks: &mut Vec<Check>, cfg: &Config) {
+    if cfg.unknown_keys.is_empty() {
+        return;
+    }
+    let list: Vec<String> = cfg.unknown_keys.iter().map(|k| k.to_string()).collect();
+    push(
+        checks,
+        "config keys",
+        Status::Warn,
+        format!("ignored unknown key(s): {}", list.join(", ")),
+        Some(
+            "fix the typo, remove the key, or upgrade atr if it belongs to a newer version".into(),
+        ),
+    );
+}
+
 fn push(checks: &mut Vec<Check>, name: &str, status: Status, detail: String, hint: Option<String>) {
     checks.push(Check {
         name: name.to_string(),
@@ -83,6 +100,7 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
         config_path.display().to_string(),
         None,
     );
+    unknown_keys_check(&mut checks, cfg);
 
     github_auth_checks(&mut checks, cfg, config_path);
     github_token_api_check(&mut checks, cfg, config_path).await;
@@ -1085,6 +1103,34 @@ cli = "/bin/true"
         std::fs::write(&path, &text).unwrap();
         let cfg = crate::config::parse_config_toml(&text).unwrap();
         (dir, cfg, path)
+    }
+
+    #[test]
+    fn unknown_config_keys_warn_in_doctor() {
+        let (_dir, cfg, _path) =
+            mini_cfg("[compare]\nenabled = true\n[telegram]\nenabeld = false\n");
+        let mut checks = Vec::new();
+        unknown_keys_check(&mut checks, &cfg);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "config keys");
+        assert_eq!(checks[0].status, Status::Warn);
+        assert!(
+            checks[0].detail.contains("`compare`"),
+            "{}",
+            checks[0].detail
+        );
+        assert!(
+            checks[0]
+                .detail
+                .contains("`telegram.enabeld` (did you mean `enabled`?)"),
+            "{}",
+            checks[0].detail
+        );
+
+        let (_dir, cfg, _path) = mini_cfg("");
+        let mut checks = Vec::new();
+        unknown_keys_check(&mut checks, &cfg);
+        assert!(checks.is_empty());
     }
 
     #[tokio::test]

@@ -1,7 +1,11 @@
 # Configuration
 
 All policy lives in `~/.config/atr/config.toml`. Override the path with
-`--config` or `ATR_CONFIG`. Unknown keys are rejected. `atr serve` refuses to
+`--config` or `ATR_CONFIG`. Unknown keys are ignored with an info log line,
+and `atr doctor` warns about them (`config keys`, with the nearest valid name),
+so a config written for a newer atr still loads after a rollback. Keys that look
+like secrets (`api_key`, `token`, `password`, …) are still refused, and
+`atr config set` refuses to add a key it does not know. `atr serve` refuses to
 start if a required setting is empty. `repo_path` (or `[[repo]]`) is required
 only when GitHub intake is on.
 

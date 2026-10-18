@@ -14,8 +14,8 @@ except built-in OpenCode presets.
 
 `atr init` is the whole setup: write config / prompt / launcher, detect CLIs,
 install `dev.atr.serve` (macOS LaunchAgent) or the systemd user unit, run
-doctor. Example config is neutral. Unknown TOML keys are rejected with the
-nearest valid name. `[[provider]]` can be name+kind; kind fills CLI flags.
+doctor. Example config is neutral. Unknown TOML keys are ignored (doctor warns
+with the nearest valid name) so rollbacks work. `[[provider]]` can be name+kind; kind fills CLI flags.
 `atr providers` edits TOML with comments kept and SIGHUPs serve. `atr doctor`
 prints one ok/warn/FAIL line per check. `atr upgrade` / `rollback` / `service`
 / `logs` cover ops. Existing configs keep their values; init never auto-rewrites

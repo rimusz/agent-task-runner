@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawConfig {
     #[serde(default = "default_listen")]
     pub listen: String,
@@ -94,7 +93,6 @@ pub struct RawConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawCache {
     /// Reuse `.atr/wt/<provider>-<n>` folders so cwd stays cacheable.
     #[serde(default = "default_true")]
@@ -114,7 +112,6 @@ impl Default for RawCache {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawMcp {
     /// HTTP `/mcp` on the existing listener. `atr mcp` stdio is always available.
     #[serde(default = "default_true")]
@@ -149,7 +146,6 @@ impl Default for RawPlannerIn {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawPlanner {
     #[serde(default = "default_planner_mode")]
     pub mode: String,
@@ -173,7 +169,6 @@ impl Default for RawPlanner {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawReview {
     #[serde(default)]
     pub enabled: bool,
@@ -194,7 +189,6 @@ impl Default for RawReview {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct RawPlugin {
     /// Stop hook runs this command and blocks until it passes. Empty = off.
     #[serde(default)]
@@ -202,7 +196,6 @@ pub struct RawPlugin {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawSource {
     pub kind: String,
     #[serde(default = "default_true")]
@@ -227,7 +220,6 @@ pub struct SourceEntry {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawRepo {
     pub name: String,
     pub path: String,
@@ -248,7 +240,6 @@ pub struct RawRepo {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawPreset {
     pub name: String,
     pub kind: String,
@@ -259,7 +250,6 @@ pub struct RawPreset {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawUpdate {
     #[serde(default = "default_update_repo")]
     pub github_repo: String,
@@ -268,7 +258,6 @@ pub struct RawUpdate {
 /// `[notify]`: optional shell hook run for operator alerts (GitHub auth
 /// failing / recovered / token expiring). Telegram stays built in.
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct RawNotify {
     #[serde(default)]
     pub command: String,
@@ -285,7 +274,6 @@ impl Default for RawUpdate {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawHandoff {
     #[serde(default = "default_handoff_bytes")]
     pub max_bytes: usize,
@@ -309,7 +297,6 @@ pub struct HandoffConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawShadow {
     #[serde(default)]
     pub enabled: bool,
@@ -370,7 +357,6 @@ pub enum ShadowVerifyMode {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GithubConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -403,7 +389,6 @@ impl Default for GithubConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct RawTelegram {
     #[serde(default)]
     pub enabled: bool,
@@ -430,7 +415,6 @@ pub struct RawTelegram {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct RawTelegramAssistant {
     #[serde(default)]
     pub enabled: bool,
@@ -490,7 +474,6 @@ impl Default for TelegramConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawProvider {
     pub name: String,
     pub kind: String,
@@ -584,7 +567,6 @@ pub struct RawProvider {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct RawHealth {
     #[serde(default)]
     pub startup_timeout: String,
@@ -597,7 +579,6 @@ pub struct RawHealth {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawQuota {
     pub window: String,
     pub budget: f64,
@@ -651,6 +632,26 @@ pub struct Config {
     pub sources: Vec<SourceEntry>,
     pub max_prompt_bytes: u64,
     pub desktop_check: String,
+    /// Keys in the file this binary does not know (ignored; `atr doctor` warns).
+    /// Dotted paths such as `compare.enabled` or `provider.0.foo`.
+    pub unknown_keys: Vec<UnknownKey>,
+}
+
+/// A config key this binary does not recognise. Ignored on load so a config
+/// written for a newer atr still works after a rollback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownKey {
+    pub path: String,
+    pub nearest: Option<String>,
+}
+
+impl std::fmt::Display for UnknownKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.nearest {
+            Some(n) => write!(f, "`{}` (did you mean `{n}`?)", self.path),
+            None => write!(f, "`{}`", self.path),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -960,7 +961,6 @@ fn default_dashboard_bind() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawDashboard {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1166,7 +1166,6 @@ fn default_gc_runs() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawLog {
     #[serde(default)]
     pub path: String,
@@ -1204,7 +1203,6 @@ impl Default for LogConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawGc {
     /// Local `HH:MM` in display_timezone. Empty disables automatic gc.
     #[serde(default)]
@@ -1259,7 +1257,6 @@ impl Default for GcConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawVerify {
     #[serde(default)]
     pub enabled: bool,
@@ -1303,7 +1300,6 @@ impl Default for RawVerify {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawVerifyRepo {
     #[serde(default)]
     pub path: String,
@@ -1338,7 +1334,6 @@ pub struct VerifyRepo {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RawChecklist {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1568,10 +1563,150 @@ pub fn load_config(path: &Path) -> Result<Config> {
     parse_config_toml(&text)
 }
 
+/// Parse config text. Unknown keys are ignored with an info line (and listed
+/// in `Config::unknown_keys` for `atr doctor`), so a config written for a newer
+/// atr still loads on an older binary. Secret-looking unknown keys are still a
+/// hard error: secrets belong in `shadow.env`, never in config.toml.
 pub fn parse_config_toml(text: &str) -> Result<Config> {
-    match toml::from_str::<RawConfig>(text) {
-        Ok(raw) => Config::from_raw(raw),
-        Err(e) => Err(unknown_key_error(e)),
+    let (raw, unknown) = parse_raw(text)?;
+    reject_secret_keys(&unknown)?;
+    for k in &unknown {
+        tracing::info!(key = %k.path, nearest = k.nearest.as_deref().unwrap_or(""), "ignoring unknown config key");
+    }
+    let mut cfg = Config::from_raw(raw)?;
+    cfg.unknown_keys = unknown;
+    Ok(cfg)
+}
+
+/// Unknown keys in `text` (empty if it does not parse).
+pub fn unknown_keys(text: &str) -> Vec<UnknownKey> {
+    parse_raw(text).map(|(_, u)| u).unwrap_or_default()
+}
+
+fn parse_raw(text: &str) -> Result<(RawConfig, Vec<UnknownKey>)> {
+    let mut paths = Vec::new();
+    let de = toml::Deserializer::new(text);
+    let raw: RawConfig = serde_ignored::deserialize(de, |path| paths.push(path.to_string()))
+        .context("parse config toml")?;
+    let known = known_field_names();
+    let unknown = paths
+        .into_iter()
+        .map(|path| {
+            let leaf = path.rsplit('.').next().unwrap_or(&path).to_string();
+            let nearest = nearest_key(&leaf, &known).filter(|n| *n != leaf);
+            UnknownKey { path, nearest }
+        })
+        .collect();
+    Ok((raw, unknown))
+}
+
+fn reject_secret_keys(unknown: &[UnknownKey]) -> Result<()> {
+    for k in unknown {
+        let leaf = k
+            .path
+            .rsplit('.')
+            .next()
+            .unwrap_or(&k.path)
+            .to_ascii_lowercase();
+        let secretish = ["api_key", "apikey", "secret", "password", "passwd"]
+            .iter()
+            .any(|s| leaf.contains(s))
+            || leaf == "token"
+            || leaf.ends_with("_token");
+        if secretish {
+            bail!(
+                "config key `{}` looks like a secret; secrets never go in config.toml (put the value in ~/.config/atr/shadow.env and reference the env var name)",
+                k.path
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Every field name any config table accepts (for "did you mean" hints).
+fn known_field_names() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for fields in [
+        introspect::fields::<RawConfig>(),
+        introspect::fields::<RawCache>(),
+        introspect::fields::<RawMcp>(),
+        introspect::fields::<RawPlanner>(),
+        introspect::fields::<RawReview>(),
+        introspect::fields::<RawPlugin>(),
+        introspect::fields::<RawSource>(),
+        introspect::fields::<RawRepo>(),
+        introspect::fields::<RawPreset>(),
+        introspect::fields::<RawUpdate>(),
+        introspect::fields::<RawNotify>(),
+        introspect::fields::<RawHandoff>(),
+        introspect::fields::<RawShadow>(),
+        introspect::fields::<GithubConfig>(),
+        introspect::fields::<RawTelegram>(),
+        introspect::fields::<RawTelegramAssistant>(),
+        introspect::fields::<RawProvider>(),
+        introspect::fields::<RawHealth>(),
+        introspect::fields::<RawQuota>(),
+        introspect::fields::<RawDashboard>(),
+        introspect::fields::<RawLog>(),
+        introspect::fields::<RawGc>(),
+        introspect::fields::<RawVerify>(),
+        introspect::fields::<RawVerifyRepo>(),
+        introspect::fields::<RawChecklist>(),
+    ] {
+        for f in fields {
+            if !out.iter().any(|o| o == f) {
+                out.push((*f).to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Reads the field list serde derives for a struct, without any input.
+mod introspect {
+    use serde::de::{self, Deserialize, Deserializer, Visitor};
+
+    #[derive(Debug)]
+    struct Done;
+    impl std::fmt::Display for Done {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("introspect")
+        }
+    }
+    impl std::error::Error for Done {}
+    impl de::Error for Done {
+        fn custom<T: std::fmt::Display>(_: T) -> Self {
+            Done
+        }
+    }
+
+    struct Capture<'a>(&'a mut &'static [&'static str]);
+
+    impl<'de> Deserializer<'de> for Capture<'_> {
+        type Error = Done;
+        fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Done> {
+            Err(Done)
+        }
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _name: &'static str,
+            fields: &'static [&'static str],
+            _: V,
+        ) -> Result<V::Value, Done> {
+            *self.0 = fields;
+            Err(Done)
+        }
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map enum identifier ignored_any
+        }
+    }
+
+    pub fn fields<'de, T: Deserialize<'de>>() -> &'static [&'static str] {
+        let mut out: &'static [&'static str] = &[];
+        let _ = T::deserialize(Capture(&mut out));
+        out
     }
 }
 
@@ -1647,46 +1782,6 @@ pub fn paths_eq(a: &Path, b: &Path) -> bool {
         (Ok(x), Ok(y)) => x == y,
         _ => a.as_os_str() == b.as_os_str(),
     }
-}
-
-fn unknown_key_error(err: toml::de::Error) -> anyhow::Error {
-    let msg = err.to_string();
-    if let Some(key) = unknown_field_name(&msg) {
-        let known = expected_fields(&msg);
-        if let Some(near) = nearest_key(&key, &known) {
-            return anyhow::anyhow!("unknown config key `{key}`; nearest valid key is `{near}`");
-        }
-        return anyhow::anyhow!("unknown config key `{key}`");
-    }
-    anyhow::Error::new(err).context("parse config toml")
-}
-
-fn unknown_field_name(msg: &str) -> Option<String> {
-    let after = msg.split("unknown field `").nth(1)?;
-    let key = after.split('`').next()?;
-    if key.is_empty() {
-        None
-    } else {
-        Some(key.to_string())
-    }
-}
-
-fn expected_fields(msg: &str) -> Vec<String> {
-    let after = match msg.split("expected one of ").nth(1) {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-    after
-        .split('`')
-        .enumerate()
-        .filter_map(|(i, s)| {
-            if i % 2 == 1 && !s.is_empty() {
-                Some(s.to_string())
-            } else {
-                None
-            }
-        })
-        .collect()
 }
 
 fn nearest_key(got: &str, known: &[String]) -> Option<String> {
@@ -1948,6 +2043,7 @@ impl Config {
             });
         }
         Ok(Config {
+            unknown_keys: Vec::new(),
             listen: raw.listen,
             state_db: resolve_state_db(expand_path(&raw.state_db)),
             worktree_root: expand_path(&raw.worktree_root),
@@ -2627,8 +2723,8 @@ kind = "claude"
     }
 
     #[test]
-    fn unknown_config_key_names_nearest() {
-        let err = parse_config_toml(
+    fn unknown_config_key_is_ignored_with_nearest_hint() {
+        let cfg = parse_config_toml(
             r#"
 listen = "127.0.0.1:0"
 repo_path = "/tmp/repo"
@@ -2640,10 +2736,90 @@ name = "claude"
 kind = "claude"
 "#,
         )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("repoo_path"), "{err}");
-        assert!(err.contains("repo_path"), "{err}");
+        .unwrap();
+        assert_eq!(cfg.repo_path, std::path::PathBuf::from("/tmp/repo"));
+        assert_eq!(
+            cfg.unknown_keys,
+            vec![UnknownKey {
+                path: "repoo_path".into(),
+                nearest: Some("repo_path".into()),
+            }]
+        );
+        assert!(cfg.unknown_keys[0].to_string().contains("repo_path"));
+    }
+
+    #[test]
+    fn newer_sections_and_nested_keys_do_not_break_older_binaries() {
+        // A config written for a newer atr (new tables, new keys inside known
+        // tables and inside [[provider]]) must still load.
+        let cfg = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[compare]
+enabled = true
+arms = ["grok", "claude"]
+[compare.variants]
+minimal = "Prefer the smallest change."
+[lessons]
+enabled = true
+max_entries = 20
+[telegram]
+brand_new_knob = 3
+[[provider]]
+name = "claude"
+kind = "claude"
+future_flag = true
+[[repo]]
+name = "app"
+path = "/tmp/app"
+github = "o/app"
+lessons = true
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.providers.len(), 1);
+        let paths: Vec<&str> = cfg.unknown_keys.iter().map(|k| k.path.as_str()).collect();
+        assert!(paths.contains(&"compare"), "{paths:?}");
+        assert!(paths.contains(&"lessons"), "{paths:?}");
+        assert!(paths.contains(&"telegram.brand_new_knob"), "{paths:?}");
+        assert!(paths.contains(&"provider.0.future_flag"), "{paths:?}");
+        assert!(paths.contains(&"repo.0.lessons"), "{paths:?}");
+        assert_eq!(
+            unknown_keys("repo_path = \"/x\"\n"),
+            Vec::<UnknownKey>::new()
+        );
+    }
+
+    #[test]
+    fn unknown_secret_looking_key_is_still_an_error() {
+        for key in [
+            "api_key",
+            "openai_api_key",
+            "token",
+            "bot_token",
+            "password",
+        ] {
+            let err = parse_config_toml(&format!(
+                "repo_path = \"/tmp\"\n[telegram]\n{key} = \"x\"\n[[provider]]\nname = \"claude\"\nkind = \"claude\"\n"
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains(key) && err.contains("secret"), "{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn known_field_names_cover_nested_tables() {
+        let known = known_field_names();
+        for k in [
+            "repo_path",
+            "token_env",
+            "max_parallel",
+            "allowed_chat_ids",
+            "label",
+        ] {
+            assert!(known.iter().any(|f| f == k), "{k} missing");
+        }
     }
 
     #[test]
