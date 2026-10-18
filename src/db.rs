@@ -56,6 +56,10 @@ pub struct Task {
     pub result_pr_url: String,
     /// Comma list of required provider capabilities (browser, desktop).
     pub needs: String,
+    /// Compare arm: run only on `provider`, never fail over to another one.
+    pub pin_strict: bool,
+    /// Compare parent: the judge's decision as JSON (empty until judged).
+    pub compare_decision: String,
 }
 
 impl Default for Task {
@@ -91,6 +95,8 @@ impl Default for Task {
             result_diff: String::new(),
             result_pr_url: String::new(),
             needs: String::new(),
+            pin_strict: false,
+            compare_decision: String::new(),
         }
     }
 }
@@ -100,7 +106,8 @@ const TASK_SELECT: &str = "key, repo, issue, status, provider, session_id, workt
                           verify_retries, protect_tests_skip, labels, parent_key, role,
                           deps, review_rounds, provider_hint, title,
                           workspace_kind, output_kind, output_spec, source_kind,
-                          result_text, result_diff, result_pr_url, needs";
+                          result_text, result_diff, result_pr_url, needs,
+                          pin_strict, compare_decision";
 
 #[derive(Debug, Clone)]
 pub struct RunRow {
@@ -489,6 +496,14 @@ impl Db {
             "#,
         )?;
         let _ = conn.execute("ALTER TABLE runs ADD COLUMN lessons TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN pin_strict INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN compare_decision TEXT NOT NULL DEFAULT ''",
+            [],
+        );
         conn.execute_batch(
             r#"
             UPDATE tasks SET workspace_kind = CASE
@@ -732,6 +747,25 @@ impl Db {
         conn.execute(
             "UPDATE tasks SET parent_key = ?1, updated = ?2 WHERE key = ?3",
             params![parent, now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
+    /// Pin a task strictly to its provider (compare arms): no failover.
+    pub fn set_pin_strict(&self, key: &str, strict: bool) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET pin_strict = ?1, updated = ?2 WHERE key = ?3",
+            params![strict as i64, now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_compare_decision(&self, key: &str, json: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET compare_decision = ?1, updated = ?2 WHERE key = ?3",
+            params![json, now_rfc3339(), key],
         )?;
         Ok(())
     }
@@ -2409,6 +2443,8 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         result_diff: r.get::<_, Option<String>>(27)?.unwrap_or_default(),
         result_pr_url: r.get::<_, Option<String>>(28)?.unwrap_or_default(),
         needs: r.get::<_, Option<String>>(29)?.unwrap_or_default(),
+        pin_strict: r.get::<_, Option<i64>>(30)?.unwrap_or(0) != 0,
+        compare_decision: r.get::<_, Option<String>>(31)?.unwrap_or_default(),
     })
 }
 

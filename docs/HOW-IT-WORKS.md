@@ -181,6 +181,26 @@ captures the result text and diff. `atr tasks <key>` shows it even after the
 log has rotated. With `[lessons]` on it also queues a reflection (signal
 `task_timeout`), like other informative failures.
 
+## Compare (parent and arms)
+
+A compare task runs one job on two providers and keeps the better result.
+It is a parent `K` (role `compare`, status `waiting`; the scheduler never
+runs it) plus two arms `K-a` and `K-b` (role `arm`, `parent_key = K`, the
+same message, `output_kind = text` so an arm never delivers anything).
+
+Each arm has a **strict provider pin** (`tasks.pin_strict`):
+
+| Situation | Normal task | Compare arm |
+|-----------|-------------|-------------|
+| Pinned provider busy, cooling, degraded, or over quota | tries the next provider | waits in `queued` |
+| Pinned provider disabled, unknown, CLI missing, or lacking a needed capability | tries the next provider | `failed` before any run (a marker run with outcome `arm_unavailable`) |
+| Limit, auth, unavailable, server error, spawn error, `needs_attention`, stall past `stall_resumes` | fails over through `handle_failover` | `failed`, with an `arm_unavailable` event on the run |
+| Stall within `stall_resumes` | retries the same session | same (on its own provider) |
+
+So both arms can never collapse onto one provider. Arms skip the review
+loop. The judge and `atr add --compare` are documented in
+`docs/USAGE.md` once they land.
+
 ## MCP tool reference
 
 Agents can drive atr over MCP. The [README](../README.md#using-atr-from-other-agents)

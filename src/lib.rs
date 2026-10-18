@@ -3,6 +3,7 @@
 pub mod app;
 pub mod checklist;
 pub mod clock;
+pub mod compare;
 pub mod config;
 pub mod config_edit;
 pub mod dashboard;
