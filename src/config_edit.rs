@@ -64,8 +64,9 @@ pub fn preview_set(path: &Path, key: &str, value: &str) -> Result<Change> {
     let key = normalize_key(key)?;
     let mut doc = read_doc(path)?;
     let old = lookup(&doc, &key).unwrap_or_else(|| "(unset)".into());
+    let before = doc.to_string();
     set_in_doc(&mut doc, &key, &parse_value(value)?)?;
-    crate::config::parse_config_toml(&doc.to_string())?;
+    check_edit(&before, &doc.to_string())?;
     let new = lookup(&doc, &key).unwrap_or_else(|| value.to_string());
     Ok(Change { key, old, new })
 }
@@ -74,9 +75,10 @@ pub fn apply_set(path: &Path, key: &str, value: &str) -> Result<Change> {
     let change = preview_set(path, key, value)?;
     backup_config(path)?;
     let mut doc = read_doc(path)?;
+    let before = doc.to_string();
     set_in_doc(&mut doc, &change.key, &parse_value(value)?)?;
     let text = doc.to_string();
-    crate::config::parse_config_toml(&text)?;
+    check_edit(&before, &text)?;
     std::fs::write(path, text).with_context(|| format!("write {}", path.display()))?;
     sighup_ok(path);
     Ok(change)
@@ -133,10 +135,29 @@ fn key_is_known(path: &Path, key: &str) -> Result<bool> {
     if set_in_doc(&mut doc, key, &Value::from("x")).is_err() {
         return Ok(false);
     }
-    match crate::config::parse_config_toml(&doc.to_string()) {
-        Ok(_) => Ok(true),
+    let before = read_doc(path)?.to_string();
+    match check_edit(&before, &doc.to_string()) {
+        Ok(()) => Ok(true),
         Err(e) => Ok(!e.to_string().contains("unknown config key")),
     }
+}
+
+/// The edited text must parse, and the edit must not add a key this binary
+/// does not know (unknown keys already in the file, e.g. from a newer atr,
+/// are left alone).
+fn check_edit(before: &str, after: &str) -> Result<()> {
+    let cfg = crate::config::parse_config_toml(after)?;
+    let old = crate::config::unknown_keys(before);
+    if let Some(k) = cfg.unknown_keys.iter().find(|k| !old.contains(k)) {
+        match &k.nearest {
+            Some(n) => bail!(
+                "unknown config key `{}`; nearest valid key is `{n}`",
+                k.path
+            ),
+            None => bail!("unknown config key `{}`", k.path),
+        }
+    }
+    Ok(())
 }
 
 fn lookup(doc: &DocumentMut, key: &str) -> Option<String> {
@@ -293,6 +314,23 @@ model = "opus"
         let bak_text = std::fs::read_to_string(&bak).unwrap();
         assert!(bak_text.contains("127.0.0.1:0"), "{bak_text}");
         assert!(!bak_text.contains("127.0.0.1:1"), "{bak_text}");
+    }
+
+    #[test]
+    fn set_works_when_file_has_keys_from_a_newer_atr() {
+        let (_dir, path) = seed();
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("\n[compare]\nenabled = true\n");
+        std::fs::write(&path, &text).unwrap();
+        apply_set(&path, "listen", "127.0.0.1:1").unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("127.0.0.1:1"), "{after}");
+        assert!(after.contains("[compare]"), "{after}");
+        // a typo is still refused even though the file already has an unknown key
+        let err = preview_set(&path, "repoo_path", "/x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown config key"), "{err}");
     }
 
     #[test]
