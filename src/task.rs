@@ -418,7 +418,10 @@ pub fn insert_before_messages(rendered: &str, note: &str) -> String {
     if note.is_empty() {
         return rendered.to_string();
     }
-    if let Some(idx) = rendered.find("\n## Messages\n") {
+    // Search after the variable marker so a "## Messages" line inside the
+    // stable prefix (e.g. AGENTS.md) can never pull the note into it.
+    let from = rendered.find(crate::prompt::VARIABLE_MARKER).unwrap_or(0);
+    if let Some(idx) = rendered[from..].find("\n## Messages\n").map(|i| i + from) {
         format!("{}\n{}\n{}", &rendered[..idx], note, &rendered[idx + 1..])
     } else {
         format!("{rendered}\n{note}\n")

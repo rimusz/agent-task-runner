@@ -189,6 +189,20 @@ atr rollback            # previous binary / db / config
 
 Release repo is `[update] github_repo` (default `rimusz/agent-task-runner`).
 
+## Repo lessons
+
+Off by default (`[lessons] enabled = true`, or `lessons = true` in one `[[repo]]`). Short notes injected into a task's first-run prompt after the cached prefix (never plan, review or this assistant). Stored in the state DB, max 20 per repo, 4 KiB injected.
+
+| Command | Does |
+|---|---|
+| `atr lessons list [--repo R] [--json]` | show lessons with evidence and hits |
+| `atr lessons add --repo R "text"` | manual lesson (secrets and instruction-like text refused) |
+| `atr lessons pin <id>` / `unpin <id>` | pinned lessons are never pruned |
+| `atr lessons clear --repo R [--id N]` | delete one or all |
+| `atr lessons export --repo R` | markdown to paste into `AGENTS.md` via a normal PR |
+
+A task past `task_timeout` now leaves a run with outcome `task_timeout` (see `atr tasks <key>`).
+
 ## Troubleshooting
 
 | Symptom | What to check |

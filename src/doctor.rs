@@ -1108,14 +1108,14 @@ cli = "/bin/true"
     #[test]
     fn unknown_config_keys_warn_in_doctor() {
         let (_dir, cfg, _path) =
-            mini_cfg("[compare]\nenabled = true\n[telegram]\nenabeld = false\n");
+            mini_cfg("[future_table]\nenabled = true\n[telegram]\nenabeld = false\n");
         let mut checks = Vec::new();
         unknown_keys_check(&mut checks, &cfg);
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].name, "config keys");
         assert_eq!(checks[0].status, Status::Warn);
         assert!(
-            checks[0].detail.contains("`compare`"),
+            checks[0].detail.contains("`future_table`"),
             "{}",
             checks[0].detail
         );

@@ -71,6 +71,7 @@ pub async fn dispatch_available(shared: &Arc<Shared>) -> Result<()> {
         let cfg = shared.config.read().unwrap().clone();
         if task_over_cap(&shared.db, &cfg, &key)? {
             tracing::warn!(task = %key, "per-task wall clock exceeded");
+            record_task_timeout(shared, &cfg, &task);
             shared.db.set_status(&key, "failed")?;
             notify_run(
                 &cfg.telegram,
@@ -161,6 +162,39 @@ fn repo_inflight_count(
                 .unwrap_or(false)
         })
         .count() as u32
+}
+
+/// The per-task wall clock was hit: leave a durable record (a finished run
+/// with outcome `task_timeout` plus a `task_timeout` event) and capture the
+/// result/diff, so the failure survives log rotation and can be learned from.
+pub fn record_task_timeout(shared: &Shared, cfg: &Config, task: &crate::db::Task) {
+    let key = task.key.as_str();
+    let provider = task
+        .provider
+        .clone()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "atr".into());
+    let first = shared.db.first_run_started(key).ok().flatten();
+    let runs = shared.db.list_runs(Some(key)).map(|r| r.len()).unwrap_or(0);
+    let run_id = match shared.db.start_run(key, &provider, "") {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(task = %key, "record task_timeout: {e:#}");
+            return;
+        }
+    };
+    let detail = serde_json::json!({
+        "type": "task_timeout",
+        "task_timeout_secs": cfg.task_timeout.as_secs(),
+        "first_run_started": first,
+        "runs": runs,
+        "provider": provider,
+    });
+    let _ = shared
+        .db
+        .insert_event(run_id, "task_timeout", &detail.to_string());
+    let _ = shared.db.finish_run(run_id, "task_timeout", None);
+    let _ = crate::output::capture(shared, key);
 }
 
 fn task_over_cap(db: &Db, cfg: &Config, key: &str) -> Result<bool> {
@@ -657,6 +691,18 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             crate::task::workspace_note(ws_kind, &wt.display().to_string(), output_kind)
         {
             rendered = crate::task::insert_before_messages(&rendered, &note);
+        }
+        // Repo lessons go in the per-task tail (never the cached prefix), on
+        // first runs only, and never for plan/review/reflect or the assistant.
+        if let Some((block, ids)) = crate::lessons::block_for_task(
+            &cfg,
+            &shared.db,
+            &task,
+            assistant,
+            ws_kind == crate::task::WorkspaceKind::Git,
+        ) {
+            rendered = crate::task::insert_before_messages(&rendered, &block);
+            let _ = shared.db.record_lessons_injected(run_id, &ids);
         }
     }
     if assistant {
@@ -2116,6 +2162,7 @@ cli = "{cli}"
             base: String::new(),
             system_prompt_file: std::path::PathBuf::new(),
             max_parallel: 1,
+            lessons: None,
             shorthand: false,
         };
         assert_eq!(repo_inflight_count(&db, &inflight, &entry), 1);

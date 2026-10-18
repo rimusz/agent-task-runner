@@ -50,6 +50,8 @@ pub struct RawConfig {
     #[serde(default)]
     pub checklist: RawChecklist,
     #[serde(default)]
+    pub lessons: RawLessons,
+    #[serde(default)]
     pub log: RawLog,
     #[serde(default)]
     pub gc: RawGc,
@@ -237,6 +239,9 @@ pub struct RawRepo {
     /// 0 / omitted = no per-repo cap (global + provider limits still apply).
     #[serde(default)]
     pub max_parallel: u32,
+    /// Per-repo lessons opt-in/out; omitted = `[lessons] enabled`.
+    #[serde(default)]
+    pub lessons: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -613,6 +618,7 @@ pub struct Config {
     pub shadow: ShadowConfig,
     pub verify: VerifyConfig,
     pub checklist: ChecklistConfig,
+    pub lessons: LessonsConfig,
     pub log: LogConfig,
     pub gc: GcConfig,
     pub update: UpdateConfig,
@@ -724,6 +730,8 @@ pub struct RepoEntry {
     pub base: String,
     pub system_prompt_file: PathBuf,
     pub max_parallel: u32,
+    /// `[[repo]] lessons`; `None` = follow `[lessons] enabled`.
+    pub lessons: Option<bool>,
     /// True when synthesized from top-level `repo_path` + `[github]` (no `[[repo]]`).
     pub shorthand: bool,
 }
@@ -1350,6 +1358,55 @@ impl Default for RawChecklist {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawLessons {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_lessons_entries")]
+    pub max_entries: usize,
+    #[serde(default = "default_lessons_bytes")]
+    pub max_bytes: String,
+}
+
+impl Default for RawLessons {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_entries: default_lessons_entries(),
+            max_bytes: default_lessons_bytes(),
+        }
+    }
+}
+
+fn default_lessons_entries() -> usize {
+    20
+}
+
+fn default_lessons_bytes() -> String {
+    "4k".into()
+}
+
+/// `[lessons]`: short per-repo notes from earlier runs, injected into the
+/// per-task prompt tail on first runs. Off by default.
+#[derive(Debug, Clone)]
+pub struct LessonsConfig {
+    pub enabled: bool,
+    /// Max stored lessons per repo (oldest unpinned pruned first).
+    pub max_entries: usize,
+    /// Max bytes of the injected `## Repo lessons (atr)` block.
+    pub max_bytes: usize,
+}
+
+impl Default for LessonsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_entries: default_lessons_entries(),
+            max_bytes: 4096,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChecklistConfig {
     pub enabled: bool,
@@ -1652,6 +1709,7 @@ fn known_field_names() -> Vec<String> {
         introspect::fields::<RawVerify>(),
         introspect::fields::<RawVerifyRepo>(),
         introspect::fields::<RawChecklist>(),
+        introspect::fields::<RawLessons>(),
     ] {
         for f in fields {
             if !out.iter().any(|o| o == f) {
@@ -2172,6 +2230,19 @@ impl Config {
                 enabled: raw.checklist.enabled,
                 max_bytes: raw.checklist.max_bytes.max(256),
             },
+            lessons: LessonsConfig {
+                enabled: raw.lessons.enabled,
+                max_entries: raw.lessons.max_entries.clamp(1, 200),
+                max_bytes: crate::duration::parse_bytes(
+                    if raw.lessons.max_bytes.trim().is_empty() {
+                        "4k"
+                    } else {
+                        &raw.lessons.max_bytes
+                    },
+                )
+                .context("[lessons] max_bytes")?
+                .clamp(256, 64 * 1024) as usize,
+            },
             log: LogConfig {
                 path: if raw.log.path.trim().is_empty() {
                     PathBuf::new()
@@ -2231,6 +2302,7 @@ impl Config {
                                 expand_path(&r.system_prompt_file)
                             },
                             max_parallel: r.max_parallel,
+                            lessons: r.lessons,
                             shorthand: false,
                         })
                     })
@@ -2404,6 +2476,7 @@ impl Config {
             base: String::new(),
             system_prompt_file: PathBuf::new(),
             max_parallel: 0,
+            lessons: None,
             shorthand: true,
         }
     }
@@ -2461,6 +2534,15 @@ impl Config {
             return r.name;
         }
         short_repo_name(task.repo.as_deref())
+    }
+
+    /// Whether lessons apply to this task's repo: `[[repo]] lessons` wins,
+    /// else `[lessons] enabled`. Never for tasks outside a known repo.
+    pub fn lessons_enabled_for(&self, task: &crate::db::Task) -> bool {
+        match self.repo_for_task(task) {
+            Some(r) => r.lessons.unwrap_or(self.lessons.enabled),
+            None => false,
+        }
     }
 
     pub fn task_matches_repo(&self, task: &crate::db::Task, filter: &str) -> bool {
@@ -2755,13 +2837,12 @@ kind = "claude"
         let cfg = parse_config_toml(
             r#"
 repo_path = "/tmp/repo"
-[compare]
+[future_table]
 enabled = true
 arms = ["grok", "claude"]
-[compare.variants]
+[future_table.variants]
 minimal = "Prefer the smallest change."
-[lessons]
-enabled = true
+[another_future]
 max_entries = 20
 [telegram]
 brand_new_knob = 3
@@ -2773,17 +2854,17 @@ future_flag = true
 name = "app"
 path = "/tmp/app"
 github = "o/app"
-lessons = true
+future_knob = true
 "#,
         )
         .unwrap();
         assert_eq!(cfg.providers.len(), 1);
         let paths: Vec<&str> = cfg.unknown_keys.iter().map(|k| k.path.as_str()).collect();
-        assert!(paths.contains(&"compare"), "{paths:?}");
-        assert!(paths.contains(&"lessons"), "{paths:?}");
+        assert!(paths.contains(&"future_table"), "{paths:?}");
+        assert!(paths.contains(&"another_future"), "{paths:?}");
         assert!(paths.contains(&"telegram.brand_new_knob"), "{paths:?}");
         assert!(paths.contains(&"provider.0.future_flag"), "{paths:?}");
-        assert!(paths.contains(&"repo.0.lessons"), "{paths:?}");
+        assert!(paths.contains(&"repo.0.future_knob"), "{paths:?}");
         assert_eq!(
             unknown_keys("repo_path = \"/x\"\n"),
             Vec::<UnknownKey>::new()

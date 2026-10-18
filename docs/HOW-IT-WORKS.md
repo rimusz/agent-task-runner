@@ -100,6 +100,7 @@ The goal is high prompt-cache hit rates on first runs and resumes.
 | Worktree pool | Reuses `.atr/wt/<provider>-<n>` per repo+provider so cwd/git in the CLI system prompt stay byte-stable. Reset (`checkout -B`, `reset --hard`, `clean -fd`) between different tasks. `[cache] worktree_pool = false` restores one folder per task key. |
 | CLI system-prompt slot | Stable prefix (system prompt + `AGENTS.md` + provider contract) goes in a *file*, never argv/`ps`: Claude `--append-system-prompt-file`, Grok `--rules`, Codex `instructions_file`, OpenCode `--system`. Cursor has no slot; the prefix stays in the prompt file. |
 | Resume delta | Follow-ups send only the new messages (and optional handoff). The stable prefix is not re-sent. |
+| Variable tail | Per-task text (task header, workspace note, `## Repo lessons (atr)` when `[lessons]` is on, handoff, messages) goes after `----- atr variable -----`, so it never changes the prefix hash. |
 | Provider affinity | Retries and follow-ups stay on the same provider and session. Work still inside `cache_window` (Claude ~5m, others 60m) is scheduled first; remaining queued tasks for that provider are batched next. |
 | Ollama | OpenCode `keepAlive` default `24h`. At most one inflight task per model. |
 | Metrics | Headline hit% is only runs with ≥ 40k prompt tokens (`[cache] headline_min_input`). First-run and resume rates are shown separately. Short runs are listed but excluded from the headline. Same split in `atr usage`, `atr status`, and the dashboard. |
@@ -169,6 +170,15 @@ with at least 15 turns.
 `atr doctor` requires Grok **>= 1.0.52**. Detect uses the auth file or billing
 stdio — not `grok auth status` (that command does not exist) and never
 `grok login`.
+
+## Task wall clock
+
+`task_timeout` (default `4h`) caps a task's total time from its first run.
+When a queued task is past it, atr marks the task `failed`, sends
+`failed <key> (task timeout)`, and records a finished run with outcome
+`task_timeout` plus a `task_timeout` event (limit, run count, provider), and
+captures the result text and diff. `atr tasks <key>` shows it even after the
+log has rotated.
 
 ## MCP tool reference
 

@@ -128,7 +128,8 @@ github = "owner/website"
 label = "for:atr"
 ```
 
-Optional per-repo: `branch_prefix`, `base`, `system_prompt_file`, `max_parallel`.
+Optional per-repo: `branch_prefix`, `base`, `system_prompt_file`, `max_parallel`,
+`lessons` (`true`/`false`, overrides `[lessons] enabled` for that repo).
 
 ```bash
 atr repos list
@@ -136,6 +137,26 @@ atr repos add owner/website --path ~/src/website
 atr repos enable website
 atr config migrate
 ```
+
+### Lessons
+
+Per-repo notes from earlier runs, injected into the per-task part of the
+prompt (never the cached prefix) on a task's **first** run only. Resumed
+sessions already have them. Plan, review and Telegram assistant runs never get
+them. Off by default.
+
+```toml
+[lessons]
+enabled = false      # all repos; or `lessons = true` in one [[repo]]
+max_entries = 20     # stored per repo; oldest unpinned (by last use) pruned first
+max_bytes = "4k"     # cap on the injected "## Repo lessons (atr)" block
+```
+
+Lessons live in the state DB (`lessons` table), not in the repo, so they never
+show up in diffs. Manage them with `atr lessons list|add|pin|unpin|clear|export`
+([USAGE.md](USAGE.md#repo-lessons)). Each run records which lesson ids it got.
+Lessons only apply to tasks in a configured repo (`[[repo]]`, or the
+`repo_path` shorthand, whose name is `task_key_prefix`).
 
 ### CLI versions
 

@@ -75,6 +75,13 @@ status, provider, time window) and column sorting are read-only.
 Wrong provider planning or answering? `atr driver` shows the driver; see
 [Choosing the driver provider and model](CONFIG.md#choosing-the-driver-provider-and-model).
 
+**Task failed with `task timeout`.** The task passed `task_timeout` (default
+`4h`, counted from its first run). `atr tasks <key>` shows a last run with
+outcome `task_timeout`. Raise `task_timeout` if the work is legitimately long
+(simulator matrices), or split the task. With `[lessons]` on, record what went
+wrong with `atr lessons add --repo R "…"` so the next task in that repo starts
+with it.
+
 ## 3. Logs
 
 | OS | Where |
