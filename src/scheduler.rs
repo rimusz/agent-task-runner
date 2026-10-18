@@ -183,7 +183,7 @@ pub fn record_task_timeout(shared: &Arc<Shared>, cfg: &Config, task: &crate::db:
         .clone()
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| "atr".into());
-    let first = shared.db.first_run_started(key).ok().flatten();
+    let first = shared.db.wall_clock_started(key).ok().flatten();
     let runs = shared.db.list_runs(Some(key)).map(|r| r.len()).unwrap_or(0);
     let run_id = match shared.db.start_run(key, &provider, "") {
         Ok(id) => id,
@@ -276,7 +276,9 @@ pub fn fail_strict_arm(
 }
 
 fn task_over_cap(db: &Db, cfg: &Config, key: &str) -> Result<bool> {
-    let Some(first) = db.first_run_started(key)? else {
+    // Measured from the first run since the clock was last restarted (retry
+    // or a new turn), never from task creation.
+    let Some(first) = db.wall_clock_started(key)? else {
         return Ok(false);
     };
     let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&first) else {

@@ -173,7 +173,14 @@ stdio — not `grok auth status` (that command does not exist) and never
 
 ## Task wall clock
 
-`task_timeout` (default `4h`) caps a task's total time from its first run.
+`task_timeout` (default `4h`) caps one attempt of a task, measured from the
+first run since the clock was last restarted (`tasks.clock_started`). The
+clock restarts on `atr retry` (Telegram `/retry`, `POST /tasks/<key>/retry`)
+and when a new message arrives for a finished task (`waiting`, `done`,
+`failed`, `needs_attention`, `cancelled`), so a long-lived Telegram chat or an
+old issue does not time out because it started days ago. Internal requeues
+within an attempt (verify retries, review rounds, stall resumes, failover)
+keep counting.
 When a queued task is past it, atr marks the task `failed`, sends
 `failed <key> (task timeout)`, and records a finished run with outcome
 `task_timeout` plus a `task_timeout` event (limit, run count, provider), and

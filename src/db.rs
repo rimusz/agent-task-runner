@@ -60,6 +60,9 @@ pub struct Task {
     pub pin_strict: bool,
     /// Compare parent: the judge's decision as JSON (empty until judged).
     pub compare_decision: String,
+    /// When the per-task wall clock (`task_timeout`) was last restarted
+    /// (retry or a new turn on a finished task); empty = first run.
+    pub clock_started: String,
 }
 
 impl Default for Task {
@@ -97,6 +100,7 @@ impl Default for Task {
             needs: String::new(),
             pin_strict: false,
             compare_decision: String::new(),
+            clock_started: String::new(),
         }
     }
 }
@@ -107,7 +111,7 @@ const TASK_SELECT: &str = "key, repo, issue, status, provider, session_id, workt
                           deps, review_rounds, provider_hint, title,
                           workspace_kind, output_kind, output_spec, source_kind,
                           result_text, result_diff, result_pr_url, needs,
-                          pin_strict, compare_decision";
+                          pin_strict, compare_decision, clock_started";
 
 #[derive(Debug, Clone)]
 pub struct RunRow {
@@ -502,6 +506,10 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE tasks ADD COLUMN compare_decision TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN clock_started TEXT NOT NULL DEFAULT ''",
             [],
         );
         conn.execute_batch(
@@ -1871,6 +1879,34 @@ impl Db {
         Ok(matches!(status.as_deref(), Some("running")))
     }
 
+    /// Restart the per-task wall clock: only runs started from now on count
+    /// toward `task_timeout`.
+    pub fn restart_task_clock(&self, key: &str) -> Result<()> {
+        let conn = self.lock();
+        let now = now_rfc3339();
+        conn.execute(
+            "UPDATE tasks SET clock_started = ?1, updated = ?1 WHERE key = ?2",
+            params![now, key],
+        )?;
+        Ok(())
+    }
+
+    /// Start of the current wall-clock window: the first run started at or
+    /// after the task's `clock_started` (all runs when it was never reset).
+    pub fn wall_clock_started(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        let v = conn
+            .query_row(
+                "SELECT MIN(r.started) FROM runs r JOIN tasks t ON t.key = r.task_key
+                 WHERE r.task_key = ?1 AND r.started >= t.clock_started",
+                params![key],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(v)
+    }
+
     pub fn first_run_started(&self, key: &str) -> Result<Option<String>> {
         let conn = self.lock();
         let v = conn
@@ -2457,6 +2493,7 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         needs: r.get::<_, Option<String>>(29)?.unwrap_or_default(),
         pin_strict: r.get::<_, Option<i64>>(30)?.unwrap_or(0) != 0,
         compare_decision: r.get::<_, Option<String>>(31)?.unwrap_or_default(),
+        clock_started: r.get::<_, Option<String>>(32)?.unwrap_or_default(),
     })
 }
 

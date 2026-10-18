@@ -14,6 +14,15 @@ const CLAUDE_ONLY: &[(&str, bool, &str)] = &[
     ("codex", false, "success"),
 ];
 
+fn requeue_internal(h: &Harness, key: &str) {
+    h.shared
+        .db
+        .enqueue_message(key, "keep going", "verify")
+        .unwrap();
+    h.shared.db.set_status(key, "queued").unwrap();
+    h.shared.kick.notify_waiters();
+}
+
 fn add_lesson(h: &Harness, text: &str) -> i64 {
     let cfg = h.shared.config.read().unwrap().clone();
     atr::lessons::add(
@@ -134,7 +143,9 @@ async fn wall_clock_hit_records_task_timeout_run_and_event() {
     h.submit("demo-321", "long task");
     h.wait_status("demo-321", &["waiting"], 10000).await;
     h.shared.config.write().unwrap().task_timeout = std::time::Duration::from_millis(1);
-    h.submit("demo-321", "keep going");
+    // An internal requeue (here: a verify follow-up) within the same
+    // attempt; a new user turn or retry would restart the clock.
+    requeue_internal(&h, "demo-321");
     h.wait_status("demo-321", &["failed"], 10000).await;
     let runs = h.shared.db.list_runs(Some("demo-321")).unwrap();
     let last = runs.last().unwrap();
@@ -336,7 +347,9 @@ async fn wall_clock_hit_queues_a_task_timeout_reflection() {
     h.submit("demo-431", "long task");
     h.wait_status("demo-431", &["waiting"], 10000).await;
     h.shared.config.write().unwrap().task_timeout = std::time::Duration::from_millis(1);
-    h.submit("demo-431", "keep going");
+    // An internal requeue (here: a verify follow-up) within the same
+    // attempt; a new user turn or retry would restart the clock.
+    requeue_internal(&h, "demo-431");
     h.wait_status("demo-431", &["failed"], 10000).await;
     h.wait_until("demo-431", 10000, |h| {
         !h.shared.db.list_lessons(Some("demo")).unwrap().is_empty()

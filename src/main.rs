@@ -199,7 +199,8 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Re-queue a finished, failed or cancelled task (same as Telegram /retry).
+    /// Re-queue a finished, failed or cancelled task as a fresh attempt (same as
+    /// Telegram /retry): wall clock restarts, provider re-picked from config.
     Retry { key: String },
     /// Pause intake: GitHub, shadow and inbox pollers stop picking up work (same as Telegram /pause).
     Pause,
