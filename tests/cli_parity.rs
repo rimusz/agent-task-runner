@@ -92,3 +92,55 @@ fn pause_resume_and_retry_without_service() {
     assert!(!ok, "{out}");
     assert!(out.contains("unknown task"), "{out}");
 }
+
+#[test]
+fn lessons_round_trip_without_service() {
+    let (dir, cfg) = setup();
+    let root = dir.path().display().to_string();
+    let (ok, out) = atr(&dir, &cfg, &["lessons", "list"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("no lessons"), "{out}");
+    let (ok, out) = atr(
+        &dir,
+        &cfg,
+        &[
+            "lessons",
+            "add",
+            "--repo",
+            &root,
+            "Run npm ci before the tests.",
+        ],
+    );
+    assert!(ok, "{out}");
+    assert!(out.contains("added lesson #1"), "{out}");
+    assert!(out.contains("lessons are off"), "{out}");
+    let value = format!("{}{}", "abcdefgh", "12345678");
+    let secret = format!("export MY_TOKEN={value}");
+    let (ok, out) = atr(&dir, &cfg, &["lessons", "add", "--repo", &root, &secret]);
+    assert!(!ok, "secret must be refused: {out}");
+    assert!(!out.contains(&value), "{out}");
+    let (ok, out) = atr(&dir, &cfg, &["lessons", "add", "--repo", "nope", "x"]);
+    assert!(!ok, "{out}");
+    let (ok, out) = atr(&dir, &cfg, &["lessons", "pin", "1"]);
+    assert!(ok && out.contains("pinned lesson #1"), "{out}");
+    let (ok, out) = atr(&dir, &cfg, &["lessons", "pin", "99"]);
+    assert!(!ok, "{out}");
+    let (ok, out) = atr(&dir, &cfg, &["lessons", "list", "--json"]);
+    assert!(ok, "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v[0]["text"], "Run npm ci before the tests.");
+    assert_eq!(v[0]["signal"], "manual");
+    assert_eq!(v[0]["pinned"], true);
+    let (ok, out) = atr(&dir, &cfg, &["lessons", "export", "--repo", &root]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("- Run npm ci before the tests. (pinned)"),
+        "{out}"
+    );
+    let (ok, out) = atr(&dir, &cfg, &["lessons", "unpin", "1"]);
+    assert!(ok && out.contains("unpinned"), "{out}");
+    let (ok, out) = atr(&dir, &cfg, &["lessons", "clear", "--repo", &root]);
+    assert!(ok && out.contains("removed 1 lesson(s)"), "{out}");
+    let (ok, out) = atr(&dir, &cfg, &["lessons", "list"]);
+    assert!(ok && out.contains("no lessons"), "{out}");
+}

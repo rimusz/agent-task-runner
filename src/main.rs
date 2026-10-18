@@ -260,6 +260,44 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ShadowCmd,
     },
+    /// Per-repo lessons injected into first-run prompts (`[lessons]`, off by default).
+    Lessons {
+        #[command(subcommand)]
+        cmd: LessonsCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum LessonsCmd {
+    /// List stored lessons (all repos, or one).
+    List {
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a manual lesson (scrubbed for secrets; signal `manual`).
+    Add {
+        #[arg(long)]
+        repo: String,
+        text: String,
+    },
+    /// Delete one lesson (`--id`) or every lesson of a repo.
+    Clear {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        id: Option<i64>,
+    },
+    /// Pin a lesson so pruning never drops it.
+    Pin { id: i64 },
+    /// Unpin a lesson.
+    Unpin { id: i64 },
+    /// Print a repo's lessons as markdown (to promote into AGENTS.md by hand).
+    Export {
+        #[arg(long)]
+        repo: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -828,6 +866,71 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let filter = tasks.then_some(atr::gc::TaskGc { repo, status });
             let report = atr::gc::run(&shared, dry_run, force, older, history, filter.as_ref())?;
             print!("{}", report.text(dry_run));
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Lessons { cmd } => {
+            let shared = Shared::open(path.clone())?;
+            let cfg = shared.config.read().unwrap().clone();
+            let repo_name = |r: &str| -> String {
+                cfg.resolve_repo_filter(r)
+                    .map(|e| e.name)
+                    .unwrap_or_else(|| r.trim().to_string())
+            };
+            match cmd {
+                LessonsCmd::List { repo, json } => {
+                    let repo = repo.as_deref().map(repo_name);
+                    let rows = shared.db.list_lessons(repo.as_deref())?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&rows)?);
+                    } else {
+                        print!("{}", atr::lessons::list_text(&rows));
+                    }
+                }
+                LessonsCmd::Add { repo, text } => {
+                    let Some(entry) = cfg.resolve_repo_filter(&repo) else {
+                        let names: Vec<String> =
+                            cfg.effective_repos().into_iter().map(|r| r.name).collect();
+                        bail!("unknown repo {repo:?}; configured: {}", names.join(", "));
+                    };
+                    let env = atr::lessons::shadow_env_values(&path);
+                    let id = atr::lessons::add(
+                        &shared.db,
+                        &cfg,
+                        &env,
+                        &atr::db::NewLesson {
+                            repo: &entry.name,
+                            text: &text,
+                            signal: "manual",
+                            ..Default::default()
+                        },
+                        atr::lessons::MAX_MANUAL_CHARS,
+                    )?;
+                    println!("added lesson #{id} for {}", entry.name);
+                    if !entry.lessons.unwrap_or(cfg.lessons.enabled) {
+                        println!(
+                            "note: lessons are off for {}; turn on with `atr config set lessons.enabled true` or `lessons = true` in its [[repo]]",
+                            entry.name
+                        );
+                    }
+                }
+                LessonsCmd::Clear { repo, id } => {
+                    let name = repo_name(&repo);
+                    let n = shared.db.clear_lessons(&name, id)?;
+                    println!("removed {n} lesson(s) from {name}");
+                }
+                LessonsCmd::Pin { id } | LessonsCmd::Unpin { id } => {
+                    let pin = matches!(cmd, LessonsCmd::Pin { .. });
+                    if !shared.db.set_lesson_pinned(id, pin)? {
+                        bail!("no lesson #{id}");
+                    }
+                    println!("{} lesson #{id}", if pin { "pinned" } else { "unpinned" });
+                }
+                LessonsCmd::Export { repo } => {
+                    let name = repo_name(&repo);
+                    let rows = shared.db.list_lessons(Some(&name))?;
+                    print!("{}", atr::lessons::export_markdown(&name, &rows));
+                }
+            }
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Shadow { cmd } => match cmd {

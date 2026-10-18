@@ -472,6 +472,25 @@ impl Db {
         );
         conn.execute_batch(
             r#"
+            CREATE TABLE IF NOT EXISTS lessons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                text TEXT NOT NULL,
+                task_key TEXT NOT NULL DEFAULT '',
+                run_id INTEGER,
+                signal TEXT NOT NULL,
+                created TEXT NOT NULL,
+                last_hit TEXT,
+                hits INTEGER NOT NULL DEFAULT 0,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                shadow INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS lessons_repo ON lessons(repo);
+            "#,
+        )?;
+        let _ = conn.execute("ALTER TABLE runs ADD COLUMN lessons TEXT", []);
+        conn.execute_batch(
+            r#"
             UPDATE tasks SET workspace_kind = CASE
                 WHEN workspace_kind != '' THEN workspace_kind
                 WHEN repo IS NULL OR repo = '' THEN 'none'
@@ -2549,6 +2568,213 @@ pub fn ts_in_future(s: Option<&str>, now: chrono::DateTime<Utc>) -> bool {
         .unwrap_or(false)
 }
 
+/// One stored lesson: a short, evidence-backed note for a repo. `task_key`,
+/// `run_id` and `signal` come from atr's own records (or `manual`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Lesson {
+    pub id: i64,
+    pub repo: String,
+    pub text: String,
+    pub task_key: String,
+    pub run_id: Option<i64>,
+    pub signal: String,
+    pub created: String,
+    pub last_hit: Option<String>,
+    pub hits: i64,
+    pub pinned: bool,
+    pub shadow: bool,
+}
+
+/// Fields for a new lesson.
+#[derive(Debug, Clone, Default)]
+pub struct NewLesson<'a> {
+    pub repo: &'a str,
+    pub text: &'a str,
+    pub task_key: &'a str,
+    pub run_id: Option<i64>,
+    pub signal: &'a str,
+    pub shadow: bool,
+}
+
+const LESSON_COLS: &str =
+    "id, repo, text, task_key, run_id, signal, created, last_hit, hits, pinned, shadow";
+
+fn lesson_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Lesson> {
+    Ok(Lesson {
+        id: r.get(0)?,
+        repo: r.get(1)?,
+        text: r.get(2)?,
+        task_key: r.get(3)?,
+        run_id: r.get(4)?,
+        signal: r.get(5)?,
+        created: r.get(6)?,
+        last_hit: r.get(7)?,
+        hits: r.get(8)?,
+        pinned: r.get::<_, i64>(9)? != 0,
+        shadow: r.get::<_, i64>(10)? != 0,
+    })
+}
+
+impl Db {
+    /// Insert a lesson, then prune the repo to `max_entries` (oldest unpinned
+    /// by `max(created, last_hit)` first). Returns the new id.
+    pub fn add_lesson(&self, l: &NewLesson<'_>, max_entries: usize) -> Result<i64> {
+        let conn = self.lock();
+        conn.execute(
+            r#"INSERT INTO lessons (repo, text, task_key, run_id, signal, created, shadow)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+            params![
+                l.repo,
+                l.text,
+                l.task_key,
+                l.run_id,
+                l.signal,
+                now_rfc3339(),
+                l.shadow as i64
+            ],
+        )?;
+        let id = conn.last_insert_rowid();
+        prune_lessons_locked(&conn, l.repo, max_entries, Some(id))?;
+        Ok(id)
+    }
+
+    /// Lessons for one repo (or all), pinned first, then newest first.
+    pub fn list_lessons(&self, repo: Option<&str>) -> Result<Vec<Lesson>> {
+        let conn = self.lock();
+        let order =
+            "ORDER BY repo, pinned DESC, MAX(created, COALESCE(last_hit, '')) DESC, id DESC";
+        let rows = match repo {
+            Some(r) => {
+                let mut st = conn.prepare(&format!(
+                    "SELECT {LESSON_COLS} FROM lessons WHERE repo = ?1 {order}"
+                ))?;
+                let v = st
+                    .query_map(params![r], lesson_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                v
+            }
+            None => {
+                let mut st = conn.prepare(&format!("SELECT {LESSON_COLS} FROM lessons {order}"))?;
+                let v = st
+                    .query_map([], lesson_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                v
+            }
+        };
+        Ok(rows)
+    }
+
+    pub fn get_lesson(&self, id: i64) -> Result<Option<Lesson>> {
+        let conn = self.lock();
+        let mut st = conn.prepare(&format!("SELECT {LESSON_COLS} FROM lessons WHERE id = ?1"))?;
+        let mut rows = st.query_map(params![id], lesson_from_row)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Delete one lesson (`id`) or every lesson of `repo`. Returns rows removed.
+    pub fn clear_lessons(&self, repo: &str, id: Option<i64>) -> Result<usize> {
+        let conn = self.lock();
+        let n = match id {
+            Some(id) => conn.execute(
+                "DELETE FROM lessons WHERE repo = ?1 AND id = ?2",
+                params![repo, id],
+            )?,
+            None => conn.execute("DELETE FROM lessons WHERE repo = ?1", params![repo])?,
+        };
+        Ok(n)
+    }
+
+    /// Pin or unpin. Returns false when the id does not exist.
+    pub fn set_lesson_pinned(&self, id: i64, pinned: bool) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE lessons SET pinned = ?1 WHERE id = ?2",
+            params![pinned as i64, id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Mark lessons as injected into a run: bump hits/last_hit and record the
+    /// ids on the run (`runs.lessons`, comma-separated).
+    pub fn record_lessons_injected(&self, run_id: i64, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.lock();
+        let now = now_rfc3339();
+        for id in ids {
+            conn.execute(
+                "UPDATE lessons SET hits = hits + 1, last_hit = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+        }
+        let list = ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        conn.execute(
+            "UPDATE runs SET lessons = ?1 WHERE id = ?2",
+            params![list, run_id],
+        )?;
+        Ok(())
+    }
+
+    /// Lesson ids injected into a run.
+    pub fn run_lessons(&self, run_id: i64) -> Result<Vec<i64>> {
+        let conn = self.lock();
+        let v: Option<String> = conn
+            .query_row(
+                "SELECT lessons FROM runs WHERE id = ?1",
+                params![run_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(v.unwrap_or_default()
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect())
+    }
+
+    /// Per-repo lesson counts (for status/dashboard; never the text).
+    pub fn lesson_counts(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.lock();
+        let mut st =
+            conn.prepare("SELECT repo, COUNT(*) FROM lessons GROUP BY repo ORDER BY repo")?;
+        let v = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(v)
+    }
+}
+
+fn prune_lessons_locked(
+    conn: &Connection,
+    repo: &str,
+    max_entries: usize,
+    keep: Option<i64>,
+) -> Result<()> {
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM lessons WHERE repo = ?1",
+        params![repo],
+        |r| r.get(0),
+    )?;
+    let over = total - max_entries.max(1) as i64;
+    if over <= 0 {
+        return Ok(());
+    }
+    conn.execute(
+        r#"DELETE FROM lessons WHERE id IN (
+               SELECT id FROM lessons
+               WHERE repo = ?1 AND pinned = 0 AND id != ?3
+               ORDER BY MAX(created, COALESCE(last_hit, '')) ASC, id ASC
+               LIMIT ?2)"#,
+        params![repo, over, keep.unwrap_or(-1)],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2565,6 +2791,77 @@ mod tests {
     }
 
     use super::*;
+
+    fn new_lesson<'a>(repo: &'a str, text: &'a str) -> NewLesson<'a> {
+        NewLesson {
+            repo,
+            text,
+            signal: "manual",
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lessons_prune_oldest_unpinned_and_keep_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        let a = db.add_lesson(&new_lesson("app", "a"), 3).unwrap();
+        let b = db.add_lesson(&new_lesson("app", "b"), 3).unwrap();
+        let c = db.add_lesson(&new_lesson("app", "c"), 3).unwrap();
+        db.add_lesson(&new_lesson("other", "x"), 3).unwrap();
+        assert!(db.set_lesson_pinned(a, true).unwrap());
+        // b was hit recently, so c (older activity) goes first once over cap.
+        {
+            let conn = db.lock();
+            conn.execute(
+                "UPDATE lessons SET created = '2026-01-01T00:00:00Z' WHERE repo = 'app'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE lessons SET last_hit = '2026-06-01T00:00:00Z' WHERE id = ?1",
+                params![b],
+            )
+            .unwrap();
+        }
+        let d = db.add_lesson(&new_lesson("app", "d"), 3).unwrap();
+        let ids: Vec<i64> = db
+            .list_lessons(Some("app"))
+            .unwrap()
+            .iter()
+            .map(|l| l.id)
+            .collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&a), "pinned kept");
+        assert!(ids.contains(&b), "recently hit kept");
+        assert!(ids.contains(&d), "new one kept");
+        assert!(!ids.contains(&c), "oldest unpinned pruned");
+        assert_eq!(ids[0], a, "pinned listed first");
+        assert_eq!(db.list_lessons(Some("other")).unwrap().len(), 1);
+        assert_eq!(db.list_lessons(None).unwrap().len(), 4);
+        assert_eq!(
+            db.lesson_counts().unwrap(),
+            vec![("app".into(), 3), ("other".into(), 1)]
+        );
+    }
+
+    #[test]
+    fn lessons_clear_pin_and_run_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        let a = db.add_lesson(&new_lesson("app", "a"), 20).unwrap();
+        let b = db.add_lesson(&new_lesson("app", "b"), 20).unwrap();
+        assert!(!db.set_lesson_pinned(999, true).unwrap());
+        db.upsert_task("app-1", "", None).unwrap();
+        let run = db.start_run("app-1", "claude", "").unwrap();
+        db.record_lessons_injected(run, &[a, b]).unwrap();
+        assert_eq!(db.run_lessons(run).unwrap(), vec![a, b]);
+        assert_eq!(db.get_lesson(a).unwrap().unwrap().hits, 1);
+        assert_eq!(db.clear_lessons("app", Some(a)).unwrap(), 1);
+        assert_eq!(db.clear_lessons("other", None).unwrap(), 0);
+        assert_eq!(db.clear_lessons("app", None).unwrap(), 1);
+        assert!(db.list_lessons(Some("app")).unwrap().is_empty());
+    }
     use chrono::Duration as ChronoDuration;
 
     #[test]

@@ -157,6 +157,21 @@ Telegram command to CLI:
 | `/tokens` | `atr github token list` | none |
 | `/ui` | `atr ui --print` | `GET /` |
 
+### Repo lessons
+
+Short notes from earlier runs in a repo, for example "run `npm ci` before the tests in a fresh checkout". atr adds them to the start of a task's first run in that repo, after the cached prompt prefix, so prompt caching is unaffected. Lessons are off by default: turn them on for every repo with `[lessons] enabled = true`, or for a single repo with `lessons = true` in its `[[repo]]` block (see [CONFIG.md](CONFIG.md#lessons)).
+
+```bash
+atr lessons list [--repo R] [--json]
+atr lessons add --repo R "Run npm ci before npm test; a fresh checkout has no node_modules."
+atr lessons pin 3            # never pruned
+atr lessons unpin 3
+atr lessons clear --repo R [--id 3]
+atr lessons export --repo R  # markdown, to copy into AGENTS.md by hand
+```
+
+Lessons are refused if they look like they contain a secret (token prefixes, `KEY=value`, `Bearer …`, private keys, URLs with passwords, values from `shadow.env`) or like instructions (`git push`, `gh pr create`, "ignore previous instructions", …). There is no Telegram command for lessons yet.
+
 ### Using atr from other agents
 
 Other coding agents can give atr work too.

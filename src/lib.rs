@@ -21,6 +21,7 @@ pub mod handoff;
 pub mod http;
 pub mod inbox;
 pub mod init;
+pub mod lessons;
 pub mod logrotate;
 pub mod mcp;
 pub mod notify;
