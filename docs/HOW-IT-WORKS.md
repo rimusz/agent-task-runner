@@ -178,7 +178,8 @@ When a queued task is past it, atr marks the task `failed`, sends
 `failed <key> (task timeout)`, and records a finished run with outcome
 `task_timeout` plus a `task_timeout` event (limit, run count, provider), and
 captures the result text and diff. `atr tasks <key>` shows it even after the
-log has rotated.
+log has rotated. With `[lessons]` on it also queues a reflection (signal
+`task_timeout`), like other informative failures.
 
 ## MCP tool reference
 

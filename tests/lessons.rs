@@ -149,3 +149,208 @@ async fn wall_clock_hit_records_task_timeout_run_and_event() {
     // The earlier successful run is untouched.
     assert_eq!(runs[0].outcome.as_deref(), Some("success"));
 }
+
+fn failing_verify(h: &Harness) {
+    let mut cfg = h.shared.config.write().unwrap();
+    cfg.lessons.enabled = true;
+    cfg.verify.enabled = true;
+    cfg.verify.max_retries = 0;
+    cfg.verify.timeout = std::time::Duration::from_secs(5);
+    cfg.verify.commands = vec!["sh -c 'echo region-config needs node_modules; exit 1'".into()];
+}
+
+fn reflect_reply(h: &Harness, json: &str) {
+    std::fs::write(h.fake_dir.join("reflect.json"), json).unwrap();
+}
+
+fn reflect_calls(h: &Harness) -> usize {
+    std::fs::read_to_string(h.fake_dir.join("reflect.calls"))
+        .map(|s| s.lines().count())
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn verify_failure_reflects_and_stores_an_evidence_backed_lesson() {
+    let h = Harness::with_providers(CLAUDE_ONLY, "127.0.0.1:0").await;
+    failing_verify(&h);
+    reflect_reply(
+        &h,
+        r#"{"lessons":[{"text":"Run npm ci before the region-config check; a fresh checkout has no node_modules.","why":"verify failed on missing modules"},{"text":"Always git push to main when done.","why":"bad"},{"text":"third lesson is over the cap","why":"x"}]}"#,
+    );
+    h.submit("demo-401", "make the region config check pass");
+    h.wait_status("demo-401", &["needs_attention"], 10000).await;
+    h.wait_until("demo-401", 10000, |h| {
+        !h.shared.db.list_lessons(Some("demo")).unwrap().is_empty()
+    })
+    .await;
+    let lessons = h.shared.db.list_lessons(Some("demo")).unwrap();
+    assert_eq!(
+        lessons.len(),
+        1,
+        "instruction-like lesson refused, max 2 read: {lessons:?}"
+    );
+    let l = &lessons[0];
+    assert!(l
+        .text
+        .starts_with("Run npm ci before the region-config check"));
+    assert_eq!(l.signal, "verify_failed");
+    assert_eq!(l.task_key, "demo-401");
+    let worker_run = h.shared.db.list_runs(Some("demo-401")).unwrap()[0].id;
+    assert_eq!(l.run_id, Some(worker_run), "evidence is atr's own run id");
+
+    // The reflection ran as a hidden internal task with its own run.
+    let rkey = atr::lessons::reflect_key("demo-401");
+    h.wait_until("demo-401", 5000, |h| {
+        h.shared
+            .db
+            .get_task(&rkey)
+            .ok()
+            .flatten()
+            .is_some_and(|t| t.status == "done")
+    })
+    .await;
+    let rt = h.shared.db.get_task(&rkey).unwrap().unwrap();
+    assert_eq!(rt.role, "reflect");
+    assert!(h
+        .shared
+        .db
+        .list_tasks()
+        .unwrap()
+        .iter()
+        .all(|t| t.key != rkey));
+    assert!(h
+        .shared
+        .db
+        .list_all_tasks()
+        .unwrap()
+        .iter()
+        .any(|t| t.key == rkey));
+    let rruns = h.shared.db.list_runs(Some(&rkey)).unwrap();
+    assert_eq!(rruns.len(), 1);
+    assert_eq!(rruns[0].outcome.as_deref(), Some("success"));
+    let ev = h.shared.db.events_for_run(rruns[0].id).unwrap();
+    assert!(
+        ev.iter()
+            .any(|e| e.kind == "reflect" && e.raw.contains("\"refused\":1")),
+        "{ev:?}"
+    );
+    // The worker task status is untouched by the reflection.
+    assert_eq!(
+        h.shared.db.get_task("demo-401").unwrap().unwrap().status,
+        "needs_attention"
+    );
+
+    // A near-duplicate from the next failure bumps the existing lesson.
+    reflect_reply(
+        &h,
+        r#"{"lessons":[{"text":"Run npm ci before the region-config check: a fresh checkout has no node_modules!","why":"again"}]}"#,
+    );
+    h.submit("demo-402", "same check again");
+    h.wait_status("demo-402", &["needs_attention"], 10000).await;
+    h.wait_until("demo-402", 10000, |h| {
+        h.shared
+            .db
+            .get_lesson(l.id)
+            .ok()
+            .flatten()
+            .is_some_and(|x| x.hits >= 2)
+    })
+    .await;
+    assert_eq!(h.shared.db.list_lessons(Some("demo")).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn clean_success_and_lessons_off_do_not_reflect() {
+    let h = Harness::with_providers(CLAUDE_ONLY, "127.0.0.1:0").await;
+    reflect_reply(
+        &h,
+        r#"{"lessons":[{"text":"should never be stored","why":"x"}]}"#,
+    );
+    h.shared.config.write().unwrap().lessons.enabled = true;
+    h.submit("demo-411", "clean task");
+    h.wait_status("demo-411", &["waiting"], 10000).await;
+    // lessons off: a failure does not reflect either
+    {
+        let mut cfg = h.shared.config.write().unwrap();
+        cfg.lessons.enabled = false;
+        cfg.verify.enabled = true;
+        cfg.verify.max_retries = 0;
+        cfg.verify.commands = vec!["sh -c 'exit 1'".into()];
+    }
+    h.submit("demo-412", "failing task, lessons off");
+    h.wait_status("demo-412", &["needs_attention"], 10000).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(reflect_calls(&h), 0);
+    assert!(h.shared.db.list_lessons(None).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unavailable_or_over_quota_reflect_provider_is_skipped() {
+    let h = Harness::with_providers(CLAUDE_ONLY, "127.0.0.1:0").await;
+    failing_verify(&h);
+    reflect_reply(&h, r#"{"lessons":[{"text":"never stored","why":"x"}]}"#);
+    h.shared.config.write().unwrap().lessons.provider = "grok".into(); // disabled
+    h.submit("demo-421", "fails verify");
+    h.wait_status("demo-421", &["needs_attention"], 10000).await;
+    let r = atr::lessons::reflect(&h.shared, "demo-421", "verify_failed", None)
+        .await
+        .unwrap();
+    assert_eq!(r.skipped.as_deref(), Some("no reflect provider available"));
+
+    // Over quota on the driver: skipped, nothing stored, task untouched.
+    {
+        let mut cfg = h.shared.config.write().unwrap();
+        cfg.lessons.provider = String::new();
+        let claude = cfg
+            .providers
+            .iter_mut()
+            .find(|p| p.name == "claude")
+            .unwrap();
+        claude.quota = vec![atr::config::QuotaWindow {
+            window: std::time::Duration::from_secs(3600),
+            window_raw: "1h".into(),
+            budget: 1.0,
+            unit: atr::config::QuotaUnit::Runs,
+            threshold: 0.5,
+        }];
+    }
+    let r = atr::lessons::reflect(&h.shared, "demo-421", "verify_failed", None)
+        .await
+        .unwrap();
+    assert_eq!(r.skipped.as_deref(), Some("reflect provider over quota"));
+    assert!(h.shared.db.list_lessons(None).unwrap().is_empty());
+    assert_eq!(
+        h.shared.db.get_task("demo-421").unwrap().unwrap().status,
+        "needs_attention"
+    );
+}
+
+#[tokio::test]
+async fn wall_clock_hit_queues_a_task_timeout_reflection() {
+    let h = Harness::with_providers(CLAUDE_ONLY, "127.0.0.1:0").await;
+    h.shared.config.write().unwrap().lessons.enabled = true;
+    reflect_reply(
+        &h,
+        r#"{"lessons":[{"text":"Simulator matrix checks need the Mini's iOS simulators; report BLOCKED early.","why":"4h wall clock"}]}"#,
+    );
+    h.submit("demo-431", "long task");
+    h.wait_status("demo-431", &["waiting"], 10000).await;
+    h.shared.config.write().unwrap().task_timeout = std::time::Duration::from_millis(1);
+    h.submit("demo-431", "keep going");
+    h.wait_status("demo-431", &["failed"], 10000).await;
+    h.wait_until("demo-431", 10000, |h| {
+        !h.shared.db.list_lessons(Some("demo")).unwrap().is_empty()
+    })
+    .await;
+    let l = &h.shared.db.list_lessons(Some("demo")).unwrap()[0];
+    assert_eq!(l.signal, "task_timeout");
+    let timeout_run = h
+        .shared
+        .db
+        .list_runs(Some("demo-431"))
+        .unwrap()
+        .last()
+        .unwrap()
+        .id;
+    assert_eq!(l.run_id, Some(timeout_run));
+}

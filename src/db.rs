@@ -685,7 +685,19 @@ impl Db {
         Ok(t)
     }
 
+    /// Tasks for display and scheduling. Internal reflect tasks
+    /// (`role = 'reflect'`, `<key>-reflect`) are hidden; see [`Db::list_all_tasks`].
     pub fn list_tasks(&self) -> Result<Vec<Task>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {TASK_SELECT} FROM tasks WHERE role != 'reflect' ORDER BY updated DESC"
+        ))?;
+        let rows = stmt.query_map([], row_to_task)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Every task row, including internal reflect tasks (for gc).
+    pub fn list_all_tasks(&self) -> Result<Vec<Task>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
             "SELECT {TASK_SELECT} FROM tasks ORDER BY updated DESC"
@@ -2735,6 +2747,27 @@ impl Db {
             .split(',')
             .filter_map(|s| s.trim().parse().ok())
             .collect())
+    }
+
+    /// A near-duplicate lesson came up again: count it as a hit (refreshes ttl).
+    pub fn bump_lesson(&self, id: i64) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE lessons SET hits = hits + 1, last_hit = ?1 WHERE id = ?2",
+            params![now_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Drop unpinned lessons whose last activity (`max(created, last_hit)`)
+    /// is before `cutoff` (RFC3339). Returns rows removed.
+    pub fn expire_lessons(&self, cutoff: &str) -> Result<usize> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "DELETE FROM lessons WHERE pinned = 0 AND MAX(created, COALESCE(last_hit, '')) < ?1",
+            params![cutoff],
+        )?;
+        Ok(n)
     }
 
     /// Per-repo lesson counts (for status/dashboard; never the text).

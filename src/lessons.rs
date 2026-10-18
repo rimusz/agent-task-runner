@@ -7,10 +7,13 @@
 //! never into plan / review / reflect runs or the Telegram assistant. Lesson
 //! text is scrubbed for secrets and instruction-like content before storing.
 
-use crate::config::Config;
+use crate::app::Shared;
+use crate::config::{Config, Provider};
 use crate::db::{Db, Lesson, NewLesson, Task};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use serde_json::Value;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 /// Header of the injected block (also used by tests to find it).
 pub const BLOCK_HEADER: &str = "## Repo lessons (atr)";
@@ -311,9 +314,461 @@ pub fn block_for_task(
     if !cfg.lessons_enabled_for(task) {
         return None;
     }
+    let _ = db.expire_lessons(&cutoff(cfg.lessons.ttl));
     let repo = cfg.task_repo_name(task);
     let lessons = db.list_lessons(Some(&repo)).ok()?;
     render_block(&lessons, cfg.lessons.max_bytes)
+}
+
+fn cutoff(ttl: std::time::Duration) -> String {
+    let d = chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::days(30));
+    (chrono::Utc::now() - d).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+// ---------------------------------------------------------------------------
+// Automatic reflection
+// ---------------------------------------------------------------------------
+
+/// First line of every reflect prompt (fake CLIs in tests key off it).
+pub const REFLECT_MARKER: &str = "atr reflect: lessons for future runs in this repo";
+/// At most this many lessons per reflection.
+pub const MAX_REFLECT_LESSONS: usize = 2;
+/// Max characters per reflected lesson.
+pub const MAX_REFLECT_CHARS: usize = 240;
+/// Turn cap for the reflect run.
+pub const REFLECT_MAX_TURNS: u32 = 3;
+/// Two lessons at or above this normalized-token Jaccard are duplicates.
+pub const DEDUP_JACCARD: f64 = 0.6;
+/// Cap on the task record handed to the reflect run.
+const REFLECT_INPUT_BYTES: usize = 16 * 1024;
+
+pub const REFLECT_SCHEMA: &str = r#"{"type":"object","properties":{"lessons":{"type":"array","maxItems":2,"items":{"type":"object","properties":{"text":{"type":"string","maxLength":240},"why":{"type":"string"}},"required":["text"]}}},"required":["lessons"]}"#;
+
+/// Which signal (if any) a finished run gives, from the task status the
+/// scheduler just set, the run's final outcome and the task's verify/review
+/// counters *before* this run. Quota/auth problems and cancels never reflect.
+pub fn signal_after_run(
+    status: &str,
+    final_outcome: &str,
+    verify_retries_before: i64,
+    review_rounds_before: i64,
+) -> Option<&'static str> {
+    match status {
+        "needs_attention" => Some(match final_outcome {
+            "verify_failed" => "verify_failed",
+            "tests_modified" => "tests_modified",
+            "success" => "review_request_changes",
+            "stalled" => "stalled",
+            _ => "needs_attention",
+        }),
+        "failed" => match final_outcome {
+            "stalled" => Some("stalled"),
+            "needs_attention" => Some("needs_attention"),
+            _ => None,
+        },
+        "waiting" | "done" if final_outcome == "success" => {
+            if verify_retries_before > 0 {
+                Some("verify_retry_passed")
+            } else if review_rounds_before > 0 {
+                Some("review_request_changes")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Key of the hidden internal task a reflection runs under.
+pub fn reflect_key(key: &str) -> String {
+    format!("{key}-reflect")
+}
+
+fn tokens(text: &str) -> std::collections::HashSet<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 3)
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Normalized-token Jaccard similarity (0..=1).
+pub fn jaccard(a: &str, b: &str) -> f64 {
+    let (a, b) = (tokens(a), tokens(b));
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    let inter = a.intersection(&b).count() as f64;
+    let union = a.union(&b).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+/// Lesson texts from a reflect reply: strict `{"lessons":[{"text":…}]}`,
+/// also unwrapped from `structuredOutput` / `result` wrappers.
+pub fn parse_reflection(text: &str) -> Result<Vec<String>> {
+    fn from_value(v: &Value) -> Option<Vec<String>> {
+        let arr = v.get("lessons")?.as_array()?;
+        Some(
+            arr.iter()
+                .filter_map(|l| {
+                    l.get("text")
+                        .and_then(|t| t.as_str())
+                        .or_else(|| l.as_str())
+                        .map(|t| t.trim().to_string())
+                })
+                .filter(|t| !t.is_empty())
+                .collect(),
+        )
+    }
+    let v = crate::plan::first_json_value(text).context("reflect reply has no JSON")?;
+    if let Some(l) = from_value(&v) {
+        return Ok(l);
+    }
+    for key in ["structuredOutput", "structured_output", "result"] {
+        if let Some(inner) = v.get(key) {
+            if let Some(l) = from_value(inner) {
+                return Ok(l);
+            }
+            if let Some(s) = inner.as_str() {
+                if let Ok(iv) = crate::plan::first_json_value(s) {
+                    if let Some(l) = from_value(&iv) {
+                        return Ok(l);
+                    }
+                }
+            }
+        }
+    }
+    bail!("reflect reply has no lessons array")
+}
+
+/// What a reflection did (also stored as the reflect run's event).
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize)]
+pub struct ReflectReport {
+    pub signal: String,
+    pub provider: String,
+    pub stored: Vec<i64>,
+    pub deduped: Vec<i64>,
+    pub refused: usize,
+    pub skipped: Option<String>,
+}
+
+/// Store reflected lesson texts: cap count and length, scrub, dedupe
+/// against the repo's lessons (Jaccard ≥ 0.6 bumps the existing one).
+pub fn store_reflected(
+    db: &Db,
+    cfg: &Config,
+    env_values: &[String],
+    repo: &str,
+    task_key: &str,
+    evidence_run: Option<i64>,
+    signal: &str,
+    shadow: bool,
+    texts: &[String],
+    report: &mut ReflectReport,
+) -> Result<()> {
+    for text in texts.iter().take(MAX_REFLECT_LESSONS) {
+        let Ok(clean) = scrub(text, env_values) else {
+            report.refused += 1;
+            continue;
+        };
+        if clean.chars().count() > MAX_REFLECT_CHARS {
+            report.refused += 1;
+            continue;
+        }
+        let existing = db.list_lessons(Some(repo))?;
+        if let Some(dup) = existing
+            .iter()
+            .find(|l| jaccard(&l.text, &clean) >= DEDUP_JACCARD)
+        {
+            db.bump_lesson(dup.id)?;
+            report.deduped.push(dup.id);
+            continue;
+        }
+        let id = db.add_lesson(
+            &NewLesson {
+                repo,
+                text: &clean,
+                task_key,
+                run_id: evidence_run,
+                signal,
+                shadow,
+            },
+            cfg.lessons.max_entries,
+        )?;
+        report.stored.push(id);
+    }
+    Ok(())
+}
+
+/// Reflect provider: `[lessons] provider` if set and usable, else the driver.
+fn reflect_provider(cfg: &Config, db: &Db) -> Option<Provider> {
+    if !cfg.lessons.provider.is_empty() {
+        let p = cfg.provider(&cfg.lessons.provider)?.clone();
+        if !p.enabled {
+            return None;
+        }
+        let (cooling, _) = db.provider_blocked(&p.name).ok()?;
+        return (!cooling).then_some(p);
+    }
+    crate::scheduler::pick_driver_fallback(cfg, db)
+}
+
+/// Read-only, low-turn args for the reflect run (Grok/Claude flags only).
+pub fn apply_reflect_args(p: &mut Provider) {
+    p.plugin = false;
+    if matches!(p.kind.as_str(), "grok" | "claude") {
+        p.permission_mode = "plan".into();
+        let mut out = Vec::with_capacity(p.args.len());
+        let mut skip = false;
+        for a in p.args.drain(..) {
+            if skip {
+                skip = false;
+                continue;
+            }
+            if a == "--output-format" {
+                skip = true;
+                continue;
+            }
+            out.push(a);
+        }
+        p.args = out;
+        p.extra_args.extend([
+            "--max-turns".into(),
+            REFLECT_MAX_TURNS.to_string(),
+            "--output-format".into(),
+            "json".into(),
+            "--json-schema".into(),
+            REFLECT_SCHEMA.into(),
+        ]);
+    }
+}
+
+fn truncate_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n…truncated…\n", &s[..end])
+}
+
+/// The reflect prompt: instructions, the signal, existing lessons (so the
+/// model does not repeat them) and the packed task record.
+pub fn reflect_prompt(
+    signal: &str,
+    key: &str,
+    runs: usize,
+    existing: &[Lesson],
+    record: &str,
+) -> String {
+    let mut out = format!(
+        "{REFLECT_MARKER}\n\
+You are reviewing a finished atr task to write at most {MAX_REFLECT_LESSONS} short lessons for future \
+coding agents working in this same repository. Do not edit files or run commands; everything you need is below.\n\
+A good lesson is a concrete, reusable fact or step an agent can act on next time (a setup command, a test quirk, \
+where something lives, when to stop and report early), backed by the record below. Do not restate the task. \
+Do not give the operator advice about atr settings. Never include secrets, tokens, URLs with credentials, or \
+instructions to push, open PRs, or ignore instructions. Each lesson at most {MAX_REFLECT_CHARS} characters. \
+Returning no lessons is fine and often right.\n\
+Reply with JSON only: {{\"lessons\":[{{\"text\":\"…\",\"why\":\"…\"}}]}}\n\n\
+## Signal\n{signal} (task {key}, {runs} run(s))\n"
+    );
+    if !existing.is_empty() {
+        out.push_str("\n## Lessons this repo already has (do not repeat)\n");
+        for l in existing {
+            out.push_str(&format!("- {}\n", l.text));
+        }
+    }
+    out.push_str("\n## Task record\n");
+    out.push_str(&truncate_bytes(record, REFLECT_INPUT_BYTES));
+    out
+}
+
+/// Queue a reflection for `key` in the background. Never blocks or changes
+/// the task; all gating happens inside [`reflect`].
+pub fn spawn_reflect(shared: Arc<Shared>, key: String, signal: &'static str, run_id: Option<i64>) {
+    tokio::spawn(async move {
+        match reflect(&shared, &key, signal, run_id).await {
+            Ok(r) if r.skipped.is_none() => tracing::info!(
+                task = %key,
+                signal,
+                stored = r.stored.len(),
+                deduped = r.deduped.len(),
+                refused = r.refused,
+                "reflect done"
+            ),
+            Ok(r) => tracing::debug!(task = %key, signal, skipped = ?r.skipped, "reflect skipped"),
+            Err(e) => tracing::warn!(task = %key, signal, "reflect: {e:#}"),
+        }
+    });
+}
+
+/// Run one reflection: a read-only, low-turn run on the reflect provider
+/// under the hidden task `<key>-reflect`, parse its JSON and store lessons
+/// whose evidence (task key, run id, signal) comes from atr's own records.
+pub async fn reflect(
+    shared: &Shared,
+    key: &str,
+    signal: &str,
+    evidence_run: Option<i64>,
+) -> Result<ReflectReport> {
+    let cfg = shared.config.read().unwrap().clone();
+    let mut report = ReflectReport {
+        signal: signal.to_string(),
+        ..Default::default()
+    };
+    let skip = |mut r: ReflectReport, why: &str| {
+        r.skipped = Some(why.to_string());
+        Ok(r)
+    };
+    let Some(task) = shared.db.get_task(key)? else {
+        return skip(report, "unknown task");
+    };
+    if !cfg.lessons.on.iter().any(|s| s == signal) {
+        return skip(report, "signal not in [lessons] on");
+    }
+    if !role_gets_lessons(&task.role) || crate::telegram::is_assistant_key(key) {
+        return skip(report, "role");
+    }
+    let git = crate::task::WorkspaceKind::parse(&task.workspace_kind)
+        .unwrap_or_else(|_| crate::task::infer_workspace_kind(task.repo.as_deref().unwrap_or("")))
+        == crate::task::WorkspaceKind::Git;
+    if !git || !cfg.lessons_enabled_for(&task) {
+        return skip(report, "lessons off for this repo");
+    }
+    let Some(mut provider) = reflect_provider(&cfg, &shared.db) else {
+        return skip(report, "no reflect provider available");
+    };
+    report.provider = provider.name.clone();
+    if crate::quota::over_quota(&shared.db, &provider, &crate::clock::Clock::system())
+        .unwrap_or(false)
+    {
+        return skip(report, "reflect provider over quota");
+    }
+    let repo = cfg.task_repo_name(&task);
+    let _ = shared.db.expire_lessons(&cutoff(cfg.lessons.ttl));
+
+    let runs = shared.db.list_runs(Some(key)).unwrap_or_default();
+    let last = runs.last();
+    let wt = task
+        .worktree
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let record = crate::handoff::build_for_switch(
+        &cfg,
+        &shared.db,
+        key,
+        &task,
+        &wt,
+        last.map(|r| r.provider.as_str()).unwrap_or("unknown"),
+        last.and_then(|r| r.outcome.as_deref()).unwrap_or(signal),
+        None,
+        last.map(|r| r.id),
+    )
+    .unwrap_or_default();
+    let existing = shared.db.list_lessons(Some(&repo))?;
+    let prompt = reflect_prompt(signal, key, runs.len(), &existing, &record);
+
+    // Hidden internal task so the run shows up in usage and quotas.
+    let rkey = reflect_key(key);
+    shared.db.upsert_task_spec(
+        &rkey,
+        "",
+        None,
+        Some("none"),
+        Some("text"),
+        None,
+        Some("cli"),
+    )?;
+    shared.db.set_task_role(&rkey, "reflect")?;
+    shared.db.set_status(&rkey, "running")?;
+    let root = cfg
+        .state_db
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let dir = root.join("reflect").join(&rkey);
+    std::fs::create_dir_all(&dir)?;
+    apply_reflect_args(&mut provider);
+    let run_id = shared
+        .db
+        .start_run(&rkey, &provider.name, &provider.model)?;
+    let turn_id = shared.db.start_turn(run_id, &rkey)?;
+    let files_dir = crate::runner::runtime_files_dir(&cfg.state_db, &rkey, &dir, true);
+    let result = crate::runner::run_cli(
+        &shared.db,
+        &cfg,
+        &provider,
+        &dir,
+        &prompt,
+        None,
+        true,
+        run_id,
+        turn_id,
+        &rkey,
+        Arc::new(Mutex::new(None)),
+        None,
+        None,
+        None,
+        true,
+        &files_dir,
+    )
+    .await;
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = shared.db.finish_run(run_id, "failed", None);
+            let _ = shared.db.finish_turn(turn_id, "failed");
+            let _ = shared.db.set_status(&rkey, "failed");
+            return Err(e);
+        }
+    };
+    shared
+        .db
+        .finish_run(run_id, &result.outcome, result.exit_code)?;
+    shared.db.finish_turn(turn_id, &result.outcome)?;
+    if result.outcome != "success" {
+        shared.db.set_status(&rkey, "failed")?;
+        return skip(report, &format!("reflect run {}", result.outcome));
+    }
+    let events = shared.db.events_for_run(run_id).unwrap_or_default();
+    let reply = crate::handoff::last_assistant_text(&events)
+        .filter(|t| t.contains("lessons"))
+        .unwrap_or_else(|| result.snippet.clone());
+    let texts = match parse_reflection(&reply).or_else(|_| parse_reflection(&result.snippet)) {
+        Ok(t) => t,
+        Err(e) => {
+            shared.db.set_status(&rkey, "done")?;
+            return skip(report, &format!("{e:#}"));
+        }
+    };
+    let env = shadow_env_values(&shared.config_path);
+    store_reflected(
+        &shared.db,
+        &cfg,
+        &env,
+        &repo,
+        key,
+        evidence_run,
+        signal,
+        task.shadow,
+        &texts,
+        &mut report,
+    )?;
+    let _ = shared.db.insert_event(
+        run_id,
+        "reflect",
+        &serde_json::to_string(&report).unwrap_or_default(),
+    );
+    shared.db.set_status(&rkey, "done")?;
+    Ok(report)
 }
 
 /// Markdown export for promoting lessons into AGENTS.md by hand.
@@ -533,6 +988,195 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn signals_map_outcomes_and_skip_quota_auth_cancel() {
+        assert_eq!(
+            signal_after_run("needs_attention", "verify_failed", 0, 0),
+            Some("verify_failed")
+        );
+        assert_eq!(
+            signal_after_run("needs_attention", "tests_modified", 0, 0),
+            Some("tests_modified")
+        );
+        assert_eq!(
+            signal_after_run("needs_attention", "success", 0, 2),
+            Some("review_request_changes")
+        );
+        assert_eq!(
+            signal_after_run("needs_attention", "stalled", 0, 0),
+            Some("stalled")
+        );
+        assert_eq!(
+            signal_after_run("needs_attention", "limit", 0, 0),
+            Some("needs_attention")
+        );
+        assert_eq!(signal_after_run("failed", "stalled", 0, 0), Some("stalled"));
+        for o in ["limit", "auth", "cancelled", "failed"] {
+            assert_eq!(signal_after_run("failed", o, 0, 0), None, "{o}");
+        }
+        assert_eq!(
+            signal_after_run("waiting", "success", 1, 0),
+            Some("verify_retry_passed")
+        );
+        assert_eq!(
+            signal_after_run("waiting", "success", 0, 1),
+            Some("review_request_changes")
+        );
+        assert_eq!(
+            signal_after_run("waiting", "success", 0, 0),
+            None,
+            "clean success"
+        );
+        assert_eq!(
+            signal_after_run("queued", "verify_failed", 0, 0),
+            None,
+            "retry pending"
+        );
+    }
+
+    #[test]
+    fn jaccard_threshold() {
+        let a = "Run npm ci before the region-config check; a fresh checkout has no node_modules.";
+        let b = "Run npm ci before the region-config check: a fresh checkout has no node_modules!";
+        assert!(jaccard(a, b) >= DEDUP_JACCARD);
+        assert!(jaccard(a, "Simulator checks need the Mini's iOS simulators.") < DEDUP_JACCARD);
+    }
+
+    #[test]
+    fn parse_reflection_accepts_plain_wrapped_and_fenced() {
+        let plain = r#"{"lessons":[{"text":" a ","why":"w"},{"text":""}]}"#;
+        assert_eq!(parse_reflection(plain).unwrap(), vec!["a".to_string()]);
+        let wrapped = r#"{"type":"result","structuredOutput":{"lessons":[{"text":"b"}]}}"#;
+        assert_eq!(parse_reflection(wrapped).unwrap(), vec!["b".to_string()]);
+        let in_result = r#"{"result":"{\"lessons\":[{\"text\":\"c\"}]}"}"#;
+        assert_eq!(parse_reflection(in_result).unwrap(), vec!["c".to_string()]);
+        let fenced = "Here:\n```json\n{\"lessons\":[]}\n```";
+        assert!(parse_reflection(fenced).unwrap().is_empty());
+        assert!(parse_reflection("no json here").is_err());
+        assert!(parse_reflection(r#"{"verdict":"approve"}"#).is_err());
+    }
+
+    #[test]
+    fn store_reflected_caps_scrubs_and_dedupes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        let cfg = crate::config::parse_config_toml(
+            "[[provider]]\nname = \"claude\"\nkind = \"claude\"\n",
+        )
+        .unwrap();
+        let mut r = ReflectReport::default();
+        let texts = vec![
+            "x".repeat(MAX_REFLECT_CHARS + 1),
+            "Use npm ci in fresh checkouts.".to_string(),
+            "third is ignored (max 2)".to_string(),
+        ];
+        store_reflected(
+            &db,
+            &cfg,
+            &[],
+            "app",
+            "app-1",
+            Some(7),
+            "verify_failed",
+            true,
+            &texts,
+            &mut r,
+        )
+        .unwrap();
+        assert_eq!(r.refused, 1);
+        assert_eq!(r.stored.len(), 1);
+        let l = db.get_lesson(r.stored[0]).unwrap().unwrap();
+        assert_eq!(
+            (l.task_key.as_str(), l.run_id, l.signal.as_str(), l.shadow),
+            ("app-1", Some(7), "verify_failed", true)
+        );
+        let mut r2 = ReflectReport::default();
+        let fake = format!("token {}{}", "ghp_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8");
+        let again = vec!["Use npm ci in fresh checkouts!".to_string(), fake];
+        store_reflected(
+            &db,
+            &cfg,
+            &[],
+            "app",
+            "app-2",
+            Some(8),
+            "verify_failed",
+            false,
+            &again,
+            &mut r2,
+        )
+        .unwrap();
+        assert_eq!(r2.deduped, vec![l.id]);
+        assert_eq!(r2.refused, 1);
+        assert_eq!(db.get_lesson(l.id).unwrap().unwrap().hits, 1);
+        assert_eq!(db.list_lessons(Some("app")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn expire_drops_stale_unpinned_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        let nl = |text: &'static str| NewLesson {
+            repo: "app",
+            text,
+            signal: "manual",
+            ..Default::default()
+        };
+        db.add_lesson(&nl("a"), 20).unwrap();
+        let pinned = db.add_lesson(&nl("b"), 20).unwrap();
+        db.add_lesson(&nl("c"), 20).unwrap();
+        db.set_lesson_pinned(pinned, true).unwrap();
+        let ttl = std::time::Duration::from_secs(30 * 86_400);
+        assert_eq!(db.expire_lessons(&cutoff(ttl)).unwrap(), 0, "all fresh");
+        // A cutoff in the future makes every lesson stale: only pinned survives.
+        let future = (chrono::Utc::now() + chrono::Duration::days(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        assert_eq!(db.expire_lessons(&future).unwrap(), 2);
+        let left: Vec<i64> = db
+            .list_lessons(Some("app"))
+            .unwrap()
+            .iter()
+            .map(|l| l.id)
+            .collect();
+        assert_eq!(left, vec![pinned]);
+    }
+
+    #[test]
+    fn reflect_prompt_has_marker_signal_and_existing() {
+        let p = reflect_prompt(
+            "verify_failed",
+            "app-1",
+            2,
+            &[lesson(1, "Use npm ci.")],
+            "## Provider handoff\nrecord",
+        );
+        assert!(p.starts_with(REFLECT_MARKER));
+        assert!(p.contains("verify_failed (task app-1, 2 run(s))"));
+        assert!(p.contains("- Use npm ci."));
+        assert!(p.contains("record"));
+        assert!(p.contains("{\"lessons\":["));
+        let big = "y".repeat(40_000);
+        assert!(reflect_prompt("stalled", "k", 1, &[], &big).len() < 20_000);
+    }
+
+    #[test]
+    fn reflect_args_only_touch_grok_and_claude() {
+        let cfg = crate::config::parse_config_toml(
+            "[[provider]]\nname = \"claude\"\nkind = \"claude\"\n[[provider]]\nname = \"cursor\"\nkind = \"cursor\"\n",
+        )
+        .unwrap();
+        let mut c = cfg.provider("claude").unwrap().clone();
+        apply_reflect_args(&mut c);
+        assert_eq!(c.permission_mode, "plan");
+        assert!(c.extra_args.iter().any(|a| a == "--max-turns"));
+        assert_eq!(c.args.iter().filter(|a| *a == "--output-format").count(), 0);
+        let mut k = cfg.provider("cursor").unwrap().clone();
+        let before = k.extra_args.clone();
+        apply_reflect_args(&mut k);
+        assert_eq!(k.extra_args, before);
+        assert!(!k.plugin);
     }
 
     #[test]

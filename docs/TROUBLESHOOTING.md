@@ -17,6 +17,7 @@ broken. Each non-ok line prints a `fix:` hint.
 |---|---|---|---|
 | `config` | — | config could not load | `atr init`, or fix the TOML error it prints |
 | `config keys` | the file has keys this atr does not know (they are ignored); the line names each one and the nearest valid key | — | Fix the typo, delete the key, or upgrade atr if the key belongs to a newer version (normal after a rollback) |
+| `lessons` | lessons are on but the reflect provider (`[lessons] provider`, else the driver) is missing or disabled: only manual lessons get added | — | Set `[lessons] provider` to an enabled provider, or enable the driver |
 | `gh auth` | `gh auth status` fails in this shell but a token is in `shadow.env` | no `gh` login and no token | Use a token (below). A failed `gh auth status` over SSH on macOS is usually just the locked keychain. |
 | `gh token` | token lacks Contents/Issues/PRs/Metadata | no token anywhere | Fine-grained PAT, see [GITHUB.md](GITHUB.md) |
 | `github token api [owner]` (one per token) | token expires within 14 days, or api.github.com unreachable | 401 (revoked/expired), or no access to a watched repo, or no token | Make a new PAT, set `ATR_GH_TOKEN` in `~/.config/atr/shadow.env`, `atr service restart` |

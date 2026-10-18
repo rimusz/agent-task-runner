@@ -178,6 +178,25 @@ EOF
   esac
 }
 
+# atr lessons reflect run (its --json-schema names "lessons"): reply with
+# $DIR/reflect.json when the test wrote one.
+REFLECT=0
+for a in "${args[@]}"; do
+  if [[ "$a" == *'"lessons"'* ]]; then
+    REFLECT=1
+  fi
+done
+if [[ "$REFLECT" == "1" && -f "$DIR/reflect.json" ]]; then
+  echo "reflect" >> "$DIR/reflect.calls"
+  python3 - "$(cat "$DIR/reflect.json")" "$sid" <<'PY'
+import json, sys
+text, sid = sys.argv[1], sys.argv[2]
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
+print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":text,"session_id":sid,"total_cost_usd":0.001,"usage":{"input_tokens":30,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":9}}), flush=True)
+PY
+  exit 0
+fi
+
 case "$ACTION" in
   stall)
     # Real Grok only prints the session id on the final result. A killed

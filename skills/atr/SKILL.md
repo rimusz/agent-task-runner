@@ -201,7 +201,7 @@ Off by default (`[lessons] enabled = true`, or `lessons = true` in one `[[repo]]
 | `atr lessons clear --repo R [--id N]` | delete one or all |
 | `atr lessons export --repo R` | markdown to paste into `AGENTS.md` via a normal PR |
 
-A task past `task_timeout` now leaves a run with outcome `task_timeout` (see `atr tasks <key>`).
+With lessons on, atr reflects after informative failures (verify failed, stalled, needs attention, task timeout, success after a verify retry or review): a read-only 3-turn run on `[lessons] provider` (default: the driver) under a hidden `<key>-reflect` task, at most 2 lessons of ≤ 240 chars, near-duplicates bumped instead of added, unpinned lessons expire after `ttl` (30d). A task past `task_timeout` leaves a run with outcome `task_timeout` (see `atr tasks <key>`).
 
 ## Troubleshooting
 
