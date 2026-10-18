@@ -49,7 +49,7 @@ Operators with a shell use the CLI; it shares the same code paths. `atr pause`/`
 | `/task <key>` | `atr tasks <key>` | `GET /tasks/<key>` |
 | `/add <prompt>` | `atr add <prompt>` | `POST /tasks` |
 | `/cancel <key> [force]` | `atr cancel <key> [--force]` | `POST /tasks/<key>/cancel` |
-| `/retry <key>` | `atr retry <key>` | `POST /tasks/<key>/retry` |
+| `/retry <key>` | `atr retry <key>` (fresh attempt: wall clock restarts, provider re-picked from current config unless strictly pinned) | `POST /tasks/<key>/retry` |
 | `/pause` | `atr pause` | `POST /intake/pause` |
 | `/resume` | `atr resume` | `POST /intake/resume` |
 | `/config get <key>` | `atr config get <key>` | none |

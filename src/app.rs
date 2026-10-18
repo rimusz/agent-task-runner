@@ -201,6 +201,22 @@ impl Shared {
         let running = self.inflight.lock().unwrap().contains_key(key)
             || self.db.task_is_running(key)?
             || self.db.open_run_for_task(key)?.is_some();
+        // A new turn on a finished task restarts its wall clock (internal
+        // follow-ups such as review/verify/plan do not).
+        if !running
+            && !matches!(
+                source,
+                "review" | "verify" | "shadow" | "shadow-comment" | "plan" | "compare"
+            )
+            && existing.as_ref().is_some_and(|t| {
+                matches!(
+                    t.status.as_str(),
+                    "waiting" | "done" | "failed" | "needs_attention" | "cancelled"
+                )
+            })
+        {
+            self.db.restart_task_clock(key)?;
+        }
         self.db.enqueue_message(key, body, source)?;
         if running {
             tracing::info!(task = %key, source, "queued follow-up; live run not interrupted");
@@ -230,8 +246,33 @@ impl Shared {
         if t.status == "running" || self.inflight.lock().unwrap().contains_key(key) {
             bail!("task {key} is running");
         }
+        // A retry is a fresh attempt: restart the wall clock, and (unless the
+        // task is strictly pinned, e.g. a compare arm) pick the provider again
+        // from the current config instead of sticking to the last one.
+        self.db.restart_task_clock(key)?;
+        if !t.pin_strict {
+            self.reresolve_provider(&t)?;
+        }
         self.db.set_status(key, "queued")?;
         self.kick.notify_waiters();
+        Ok(())
+    }
+
+    /// Drop the task's current provider pin and failover history so the
+    /// scheduler chooses again from the current config. A Telegram assistant
+    /// task is re-pinned to what `[telegram.assistant]` picks now. Per-provider
+    /// sessions are kept (`task_sessions`), so returning to a provider resumes.
+    fn reresolve_provider(&self, t: &crate::db::Task) -> Result<()> {
+        self.db.set_tried(&t.key, None)?;
+        self.db.set_stall_retries(&t.key, 0)?;
+        self.db.set_provider_session(&t.key, None, None)?;
+        if crate::telegram::is_assistant_key(&t.key) {
+            if let Some(p) = crate::scheduler::assistant_provider_now(self) {
+                let sid = self.db.task_session(&t.key, &p).ok().flatten();
+                self.db
+                    .set_provider_session(&t.key, Some(&p), sid.as_deref())?;
+            }
+        }
         Ok(())
     }
 
