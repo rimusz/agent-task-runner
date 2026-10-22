@@ -61,6 +61,20 @@ fn deny(code: StatusCode, error: String) -> Option<Response> {
     Some((code, Json(json!({"ok": false, "error": error}))).into_response())
 }
 
+/// 401 with the RFC 6750 challenge. No `resource_metadata`, so static-token
+/// clients are not steered into OAuth discovery.
+fn unauthorized(error: &str) -> Option<Response> {
+    let body = Json(json!({"ok": false, "error": error}));
+    Some(
+        (
+            StatusCode::UNAUTHORIZED,
+            [("www-authenticate", r#"Bearer realm="atr""#)],
+            body,
+        )
+            .into_response(),
+    )
+}
+
 /// Origin + bearer check shared by `/mcp` and the write routes.
 /// 403 foreign browser Origin, 503 no token configured, 401 missing/bad token.
 fn auth_failure(cfg: &crate::config::Config, headers: &HeaderMap) -> Option<Response> {
@@ -79,10 +93,10 @@ fn auth_failure(cfg: &crate::config::Config, headers: &HeaderMap) -> Option<Resp
         .and_then(|v| v.to_str().ok())
         .and_then(crate::mcp::bearer_token);
     let Some(got) = got else {
-        return deny(StatusCode::UNAUTHORIZED, "missing bearer token".into());
+        return unauthorized("missing bearer token");
     };
     if !crate::mcp::tokens_equal(&got, &want) {
-        return deny(StatusCode::UNAUTHORIZED, "invalid bearer token".into());
+        return unauthorized("invalid bearer token");
     }
     None
 }
@@ -475,19 +489,13 @@ async fn mcp_post(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: B
         return deny;
     }
     let raw = String::from_utf8_lossy(&body);
-    let replies = crate::mcp::handle_raw(&shared, &raw).await;
-    if replies.is_empty() {
+    let Some(payload) = crate::mcp::handle_message(&shared, &raw).await else {
         return StatusCode::ACCEPTED.into_response();
-    }
+    };
     let accept = headers
         .get("accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let payload = if replies.len() == 1 {
-        replies.into_iter().next().unwrap()
-    } else {
-        serde_json::Value::Array(replies)
-    };
     if accept.contains("text/event-stream") && !accept.contains("application/json") {
         let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
         return (
@@ -653,6 +661,64 @@ token_file = "{token}"
         let sse_body = sse.into_string().unwrap();
         assert!(sse_body.contains("event: message"), "{sse_body}");
         assert!(!sse_body.contains("http-mcp-test-token"), "{sse_body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_http_streamable_compliance_for_remote_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("mcp.token");
+        write_token_file(&token_path, "http-mcp-compat-token").unwrap();
+        let extra = format!(
+            "\n[mcp]\nenabled = true\ntoken_env = \"ATR_MCP_HTTP_TEST_UNSET\"\ntoken_file = \"{}\"\n",
+            token_path.display()
+        );
+        let s = shared(dir.path(), &extra);
+        let base = listen(s).await;
+        let url = format!("{base}/mcp");
+        let post = |body: &str| {
+            ureq::post(&url)
+                .set("Authorization", "Bearer http-mcp-compat-token")
+                .set("Accept", "application/json, text/event-stream")
+                .set("Content-Type", "application/json")
+                .send_string(body)
+                .unwrap()
+        };
+        // 401 carries a Bearer challenge without OAuth resource metadata.
+        let missing = ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .send_string(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#)
+            .unwrap_err();
+        let ureq::Error::Status(401, resp) = missing else {
+            panic!("expected 401");
+        };
+        let challenge = resp.header("www-authenticate").unwrap_or("").to_string();
+        assert!(challenge.starts_with("Bearer"), "{challenge}");
+        assert!(!challenge.contains("resource_metadata"), "{challenge}");
+        // A batch is answered with an array, even with a single reply left.
+        let batch = post(
+            r#"[{"jsonrpc":"2.0","id":7,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/initialized"}]"#,
+        );
+        assert_eq!(batch.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&batch.into_string().unwrap()).unwrap();
+        assert_eq!(v.as_array().map(|a| a.len()), Some(1), "{v}");
+        assert_eq!(v[0]["id"], 7);
+        // A client's JSON-RPC response needs no reply: 202, no body.
+        let reply = post(r#"{"jsonrpc":"2.0","id":9,"result":{}}"#);
+        assert_eq!(reply.status(), 202);
+        let only = post(r#"[{"jsonrpc":"2.0","id":9,"error":{"code":-1,"message":"x"}}]"#);
+        assert_eq!(only.status(), 202);
+        // An empty batch is an invalid request.
+        let empty = post("[]");
+        let v: serde_json::Value = serde_json::from_str(&empty.into_string().unwrap()).unwrap();
+        assert_eq!(v["error"]["code"], -32600, "{v}");
+        // No OAuth discovery documents: a static-token client must not be pushed into OAuth.
+        for path in [
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-authorization-server",
+        ] {
+            let err = ureq::get(&format!("{base}{path}")).call().unwrap_err();
+            assert_eq!(status(err), 404, "{path}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

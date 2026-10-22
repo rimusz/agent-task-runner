@@ -217,7 +217,7 @@ pub async fn serve_stdio(shared: Arc<Shared>) -> Result<()> {
         if raw.trim().is_empty() {
             continue;
         }
-        for resp in handle_raw(&shared, &raw).await {
+        if let Some(resp) = handle_message(&shared, &raw).await {
             let mut line = serde_json::to_string(&resp)?;
             line.push('\n');
             stdout.write_all(line.as_bytes()).await?;
@@ -256,21 +256,37 @@ async fn read_stdio_message(reader: &mut BufReader<tokio::io::Stdin>) -> Result<
     }
 }
 
-/// Handle a POST body (one object or a batch array). Empty vec = notifications only.
-pub async fn handle_raw(shared: &Shared, raw: &str) -> Vec<Value> {
+/// Handle one wire message (an object or a JSON-RPC batch array) and return
+/// the wire reply: an object for a single request, an array for a batch, or
+/// `None` when the input held only notifications or client responses
+/// (Streamable HTTP answers that case with 202 Accepted).
+pub async fn handle_message(shared: &Shared, raw: &str) -> Option<Value> {
     let Ok(v) = serde_json::from_str::<Value>(raw.trim()) else {
-        return vec![rpc_error(Value::Null, -32700, "parse error")];
+        return Some(rpc_error(Value::Null, -32700, "parse error"));
     };
-    if let Some(arr) = v.as_array() {
-        let mut out = Vec::new();
-        for item in arr {
-            if let Some(r) = dispatch(shared, item).await {
-                out.push(r);
-            }
-        }
-        return out;
+    let Some(arr) = v.as_array() else {
+        return dispatch(shared, &v).await;
+    };
+    if arr.is_empty() {
+        return Some(rpc_error(Value::Null, -32600, "invalid request"));
     }
-    dispatch(shared, &v).await.into_iter().collect()
+    let mut out = Vec::new();
+    for item in arr {
+        if let Some(r) = dispatch(shared, item).await {
+            out.push(r);
+        }
+    }
+    // A batch is answered with an array, even when only one reply remains.
+    (!out.is_empty()).then_some(Value::Array(out))
+}
+
+/// Replies as a flat list (batch arrays unwrapped). Empty = nothing to send.
+pub async fn handle_raw(shared: &Shared, raw: &str) -> Vec<Value> {
+    match handle_message(shared, raw).await {
+        Some(Value::Array(items)) => items,
+        Some(one) => vec![one],
+        None => Vec::new(),
+    }
 }
 
 async fn dispatch(shared: &Shared, msg: &Value) -> Option<Value> {
@@ -278,6 +294,10 @@ async fn dispatch(shared: &Shared, msg: &Value) -> Option<Value> {
         return Some(rpc_error(Value::Null, -32600, "invalid request"));
     }
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    // A client's JSON-RPC response (to a server request) needs no reply.
+    if method.is_empty() && (msg.get("result").is_some() || msg.get("error").is_some()) {
+        return None;
+    }
     let id = msg.get("id").cloned();
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     let id = id?;
@@ -980,6 +1000,40 @@ cli = "/bin/true"
         )
         .await;
         assert_eq!(bad[0]["result"]["isError"], true, "{}", bad[0]);
+    }
+
+    #[tokio::test]
+    async fn message_shapes_batch_and_client_responses() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path());
+        let one = handle_message(&s, r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#)
+            .await
+            .unwrap();
+        assert!(one.is_object(), "{one}");
+        let batch = handle_message(
+            &s,
+            r#"[{"jsonrpc":"2.0","id":2,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/initialized"}]"#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(batch.as_array().map(|a| a.len()), Some(1), "{batch}");
+        assert!(
+            handle_message(&s, r#"{"jsonrpc":"2.0","id":3,"result":{}}"#)
+                .await
+                .is_none()
+        );
+        assert!(handle_message(
+            &s,
+            r#"[{"jsonrpc":"2.0","method":"notifications/initialized"}]"#
+        )
+        .await
+        .is_none());
+        let empty = handle_message(&s, "[]").await.unwrap();
+        assert_eq!(empty["error"]["code"], -32600, "{empty}");
+        let no_method = handle_message(&s, r#"{"jsonrpc":"2.0","id":4}"#)
+            .await
+            .unwrap();
+        assert_eq!(no_method["error"]["code"], -32600, "{no_method}");
     }
 
     #[tokio::test]
