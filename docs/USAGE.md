@@ -39,14 +39,22 @@ atr add "fix the typo in notes.txt" --dir ~/notes       # edit a plain folder in
 atr add "fix the README typo" --repo ~/src/my-repo --output pr   # git worktree, opens a PR
 ```
 
-**MCP.** Run `atr mcp` as an MCP server in your agent. `add_task` needs `body` (`title` is optional and defaults to the first prompt line). With neither `dir` nor `repo`, workspace is `none`, matching CLI and HTTP. Optional `dir`, `repo`, `workspace`, `output`, `provider`. Returns a task key. `wait_task` waits for that key to finish (`timeout_seconds`, default 120, max 3600). `get_result` returns the answer text, diff, and PR URL.
+**MCP.** Run `atr mcp` as an MCP server in your agent. `add_task` needs `body` (`title` is optional and defaults to the first prompt line). With neither `dir` nor `repo`, workspace is `none`, matching CLI and HTTP. Optional `dir`, `repo`, `workspace`, `output`, `provider`. Optional `idempotency_key`: a retry with the same key and the same request returns the existing task (`replayed: true`); the same key with a different body, workspace, output, or files is a conflict. Optional `files`: `[{name, content_base64}]` or `[{name, text}]` — each file is written into the task worktree under that filename when the worktree is ready. Returns a task key. `wait_task` waits for that key to finish (`timeout_seconds`, default 120, max 3600). `get_result` returns the answer text, diff, and PR URL.
 
-**HTTP.** While atr is running, POST JSON to the local API (default `127.0.0.1:7420`). It returns the new task `key`; read the result from `GET /tasks/{key}/result`.
+**HTTP.** While atr is running, POST JSON to the local API (default `127.0.0.1:7420`). It returns the new task `key`; read the result from `GET /tasks/{key}/result`. Writes need `Authorization: Bearer` (same token as `/mcp`). Optional header `Idempotency-Key` (JSON field `idempotency_key` is a fallback): a retry with the same key and the same request returns the existing task (`replayed: true`); the same key with a different body, workspace, output, or files is HTTP 409. Optional `files` (alias `attachments`): `[{name, content_base64}]` or `[{name, text}]` — each file lands in the worktree under that filename when the worktree is ready.
 
 ```bash
 curl -s -X POST http://127.0.0.1:7420/tasks \
+  -H "Authorization: Bearer $ATR_MCP_TOKEN" \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: sum-once' \
   -d '{"title":"Sum","body":"what is 2+2?","workspace":"none","output":"text"}'
+
+# Attach a file by name (text or base64). It appears in the worktree as brief.md.
+curl -s -X POST http://127.0.0.1:7420/tasks \
+  -H "Authorization: Bearer $ATR_MCP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Read brief","body":"summarize brief.md","workspace":"none","output":"text","files":[{"name":"brief.md","text":"hello attach"}]}'
 ```
 
 **Telegram.** Send `/add` followed by a prompt, for example `/add what is 2+2?`. Telegram tasks are answer-only and the reply comes back to the chat.
@@ -202,7 +210,7 @@ Compare needs verify commands for the repo (`[verify]`, see [CONFIG.md](CONFIG.m
 
 Other coding agents can give atr work too.
 
-- **On this machine:** run `atr mcp` and add it as an MCP server in Claude Code, Cursor, Codex, or Grok Build. `add_task` accepts workspace (`git` / `dir` / `none`) and output; `wait_task` blocks until the task finishes (or times out); `get_result` returns text, diff, and PR URL. Snippets and the tool list: [HOW-IT-WORKS.md](HOW-IT-WORKS.md#mcp-tool-reference). Local Agent Plugin: [plugins/atr-operator](../plugins/atr-operator/README.md).
+- **On this machine:** run `atr mcp` and add it as an MCP server in Claude Code, Cursor, Codex, or Grok Build. `add_task` accepts workspace (`git` / `dir` / `none`), output, optional `idempotency_key`, and optional `files`; `wait_task` blocks until the task finishes (or times out); `get_result` returns text, diff, and PR URL. Snippets and the tool list: [HOW-IT-WORKS.md](HOW-IT-WORKS.md#mcp-tool-reference). Local Agent Plugin: [plugins/atr-operator](../plugins/atr-operator/README.md).
 - **GitHub-label method:** label an issue `for:atr`. Comments become follow-ups. Use this when the other agent lives on GitHub.
 
 `atr serve` must be running either way.

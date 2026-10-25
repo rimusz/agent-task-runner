@@ -153,7 +153,7 @@ Every change or destructive action still needs inline **Confirm** (old → new).
 
 ## Other agents (MCP)
 
-`atr mcp` is stdio. HTTP is `POST /mcp` on `listen` with `Authorization: Bearer $ATR_MCP_TOKEN` (or the 0600 token file). atr never prints the token. Tools: `add_task` (`body` required; `title` optional from the first prompt line; workspace `none` when neither `dir` nor `repo`; output), `wait_task`, `get_result` (text, diff, PR URL), list/steer/cancel, status, repos, providers, usage, doctor, read-only config. GitHub-label method still works without MCP (`for:atr`). `atr add "prompt"` / `--dir` / `--repo` enqueue a task without an issue. Prompts and inbox files are capped at 256 KiB by default.
+`atr mcp` is stdio. HTTP is `POST /mcp` on `listen` with `Authorization: Bearer $ATR_MCP_TOKEN` (or the 0600 token file). atr never prints the token. Tools: `add_task` (`body` required; `title` optional from the first prompt line; workspace `none` when neither `dir` nor `repo`; output; optional `idempotency_key` replays the same create, conflicts if the body/files differ; optional `files` `[{name, content_base64|text}]` land in the worktree by filename), `wait_task`, `get_result` (text, diff, PR URL), list/steer/cancel, status, repos, providers, usage, doctor, read-only config. `POST /tasks` takes the same `files` JSON and header `Idempotency-Key`. GitHub-label method still works without MCP (`for:atr`). `atr add "prompt"` / `--dir` / `--repo` enqueue a task without an issue. Prompts, inbox files, and each attached file are capped at 256 KiB by default.
 
 ```bash
 atr mcp

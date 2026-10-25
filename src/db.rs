@@ -166,6 +166,14 @@ pub struct Message {
 }
 
 #[derive(Debug, Clone)]
+pub struct IdempotencyRow {
+    pub id_key: String,
+    pub request_hash: String,
+    pub task_key: String,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct UsageDay {
     pub provider: String,
     pub day: String,
@@ -528,6 +536,18 @@ impl Db {
                 WHEN issue IS NOT NULL THEN 'github'
                 ELSE 'cli'
             END;
+            "#,
+        )?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS idempotency (
+                id_key TEXT PRIMARY KEY,
+                request_hash TEXT NOT NULL,
+                task_key TEXT NOT NULL,
+                outcome TEXT NOT NULL DEFAULT '',
+                created TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idempotency_task ON idempotency(task_key);
             "#,
         )?;
         drop(conn);
@@ -969,8 +989,60 @@ impl Db {
             params![key],
         );
         let _ = conn.execute("DELETE FROM runs WHERE task_key = ?1", params![key]);
+        let _ = conn.execute("DELETE FROM idempotency WHERE task_key = ?1", params![key]);
         conn.execute("DELETE FROM tasks WHERE key = ?1", params![key])?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(())
+    }
+
+    pub fn get_idempotency(&self, id_key: &str) -> Result<Option<IdempotencyRow>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id_key, request_hash, task_key, outcome FROM idempotency WHERE id_key = ?1",
+            params![id_key],
+            row_to_idempotency,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Insert a reservation. `Ok(None)` means this caller owns the key.
+    /// `Ok(Some(row))` is the existing row (compare `request_hash`).
+    pub fn insert_idempotency(
+        &self,
+        id_key: &str,
+        request_hash: &str,
+        task_key: &str,
+    ) -> Result<Option<IdempotencyRow>> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO idempotency (id_key, request_hash, task_key, outcome, created) VALUES (?1, ?2, ?3, '', ?4)",
+            params![id_key, request_hash, task_key, now_rfc3339()],
+        )?;
+        if n == 1 {
+            return Ok(None);
+        }
+        conn.query_row(
+            "SELECT id_key, request_hash, task_key, outcome FROM idempotency WHERE id_key = ?1",
+            params![id_key],
+            row_to_idempotency,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn complete_idempotency(&self, id_key: &str, outcome: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE idempotency SET outcome = ?1 WHERE id_key = ?2",
+            params![outcome, id_key],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_idempotency(&self, id_key: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM idempotency WHERE id_key = ?1", params![id_key])?;
         Ok(())
     }
 
@@ -2640,6 +2712,15 @@ fn row_to_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
         run_id: r.get(0)?,
         kind: r.get(1)?,
         raw: r.get(2)?,
+    })
+}
+
+fn row_to_idempotency(r: &rusqlite::Row<'_>) -> rusqlite::Result<IdempotencyRow> {
+    Ok(IdempotencyRow {
+        id_key: r.get(0)?,
+        request_hash: r.get(1)?,
+        task_key: r.get(2)?,
+        outcome: r.get(3)?,
     })
 }
 

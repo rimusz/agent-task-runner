@@ -177,6 +177,14 @@ Writes (`POST /tasks`, `/messages`, `/cancel`, `/retry`, `/intake/pause`,
 `ATR_MCP_TOKEN`. A 401 means a missing/wrong token in the client. Reads and the
 dashboard stay open. See [REMOTE-ACCESS.md](REMOTE-ACCESS.md).
 
+`POST /tasks` with `Idempotency-Key` (or MCP `add_task` `idempotency_key`): a
+retry of the same key and the same request returns the existing task
+(`replayed: true`). The same key with a different body, workspace, output, or
+files is **409** (`idempotency key reused with a different request`). Use a
+new key for a new task. Attached files land in the worktree under their
+filename when the run starts; names are a single path component (no
+directories, not `.git` / `.atr`).
+
 `atr pause`, `atr resume` and `atr retry` use these routes. "atr serve not
 reachable … saved for the next start" means the service was down (or `listen`
 points elsewhere): the change is in the state database and applies when it

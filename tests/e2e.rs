@@ -1979,3 +1979,82 @@ async fn telegram_assistant_uses_fake_cli_and_counts_usage() {
     assert_eq!(task2.session_id, sid, "one conversation resumes");
     assert_eq!(h.shared.db.list_runs(Some("tg42")).unwrap().len(), 2);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_idempotency_key_is_one_task_and_one_run() {
+    let h = Harness::with_providers(
+        &[
+            ("claude", true, "success"),
+            ("grok", false, "success"),
+            ("cursor", false, "success"),
+            ("codex", false, "success"),
+        ],
+        "127.0.0.1:0",
+    )
+    .await;
+    let url = format!("http://{}/tasks", h.addr);
+    let auth = format!("Bearer {}", common::HTTP_TOKEN);
+    let payload = serde_json::json!({
+        "body": "do the work",
+        "repo": h.repo.display().to_string(),
+        "workspace": "git",
+        "output": "text",
+    });
+    let first = ureq::post(&url)
+        .set("Authorization", &auth)
+        .set("Idempotency-Key", "e2e-idem-1")
+        .send_json(payload.clone())
+        .unwrap();
+    assert_eq!(first.status(), 200);
+    let a: serde_json::Value = first.into_json().unwrap();
+    let key = a["key"].as_str().unwrap().to_string();
+    let second = ureq::post(&url)
+        .set("Authorization", &auth)
+        .set("Idempotency-Key", "e2e-idem-1")
+        .send_json(payload)
+        .unwrap();
+    assert_eq!(second.status(), 200);
+    let b: serde_json::Value = second.into_json().unwrap();
+    assert_eq!(b["key"], key);
+    assert_eq!(b["replayed"], true);
+    assert_eq!(h.shared.db.list_tasks().unwrap().len(), 1);
+    assert_eq!(h.shared.db.all_messages(&key).unwrap().len(), 1);
+    h.wait_status(&key, &["waiting"], 8000).await;
+    assert_eq!(h.shared.db.list_runs(Some(&key)).unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_attached_file_lands_in_worktree_by_name() {
+    let h = Harness::with_providers(
+        &[
+            ("claude", true, "success"),
+            ("grok", false, "success"),
+            ("cursor", false, "success"),
+            ("codex", false, "success"),
+        ],
+        "127.0.0.1:0",
+    )
+    .await;
+    let url = format!("http://{}/tasks", h.addr);
+    let auth = format!("Bearer {}", common::HTTP_TOKEN);
+    let resp = ureq::post(&url)
+        .set("Authorization", &auth)
+        .send_json(serde_json::json!({
+            "body": "do the work",
+            "repo": h.repo.display().to_string(),
+            "workspace": "git",
+            "output": "text",
+            "files": [{"name": "brief.md", "text": "hello attach"}],
+        }))
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.into_json().unwrap();
+    let key = v["key"].as_str().unwrap().to_string();
+    h.wait_status(&key, &["waiting"], 8000).await;
+    let task = h.shared.db.get_task(&key).unwrap().unwrap();
+    let wt = std::path::Path::new(task.worktree.as_ref().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(wt.join("brief.md")).unwrap(),
+        "hello attach"
+    );
+}
