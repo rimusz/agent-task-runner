@@ -52,12 +52,16 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   is a follow-up. Exit-code contract: 0 accepted, 75 = task busy → message
   **queued** (not resent, not superseding), 1 = error. `GET /tasks/{key}` and
   `GET /tasks/{key}/result` read status and the stored result.
+  Optional header `Idempotency-Key` (JSON field fallback) persists the create
+  so a retry after a successful enqueue returns the same task; the same key
+  with a different request is 409. Optional `files` are stored under the state
+  directory and copied into the worktree by filename once the tree exists.
 - **CLI:** `atr add` (prompt + `--dir` / `--repo` / neither) and `atr submit`.
 - **MCP:** `atr mcp` is stdio (local agents or SSH). Streamable HTTP is
   `POST /mcp` on the existing listener (localhost by default; Tailscale bind
   is optional). HTTP requires a bearer token from `mcp.token_env` (default
   `ATR_MCP_TOKEN`) or `mcp.token_file` (0600). atr never prints the token.
-  Tools enqueue (`add_task` with optional title, workspace git/dir/none, output), `wait_task`, `get_result`
+  Tools enqueue (`add_task` with optional title, workspace git/dir/none, output, `idempotency_key`, `files`), `wait_task`, `get_result`
   (text, diff, PR URL), list, status (timeline + last output), steer, cancel,
   list repos/providers, usage, doctor, and read-only `config_get` (secrets
   redacted). Resources: `atr://status`, `atr://dashboard`. Config cannot be

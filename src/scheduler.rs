@@ -750,6 +750,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         worktree::ensure_worktree_no_push(&wt)?;
     }
     shared.db.set_worktree(&key, &wt.display().to_string())?;
+    crate::intake::materialize_attachments(&cfg.state_db, &key, &wt)?;
 
     if task.role == "plan" {
         crate::plan::apply_plan_args(&mut provider, cfg.planner.max_turns);

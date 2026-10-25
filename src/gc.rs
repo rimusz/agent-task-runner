@@ -183,12 +183,18 @@ pub fn run_with(
                 anyhow::bail!("--status must be failed or done");
             }
         }
-        prune_tasks(db, dry_run, filter, &mut report)?;
+        prune_tasks(db, &cfg.state_db, dry_run, filter, &mut report)?;
     }
     Ok(report)
 }
 
-fn prune_tasks(db: &Db, dry_run: bool, filter: &TaskGc, report: &mut GcReport) -> Result<()> {
+fn prune_tasks(
+    db: &Db,
+    state_db: &Path,
+    dry_run: bool,
+    filter: &TaskGc,
+    report: &mut GcReport,
+) -> Result<()> {
     report.task_gc = true;
     for t in db.list_all_tasks()? {
         if !filter.matches(&t) {
@@ -201,6 +207,7 @@ fn prune_tasks(db: &Db, dry_run: bool, filter: &TaskGc, report: &mut GcReport) -
         report.tasks.push(t.key.clone());
         if !dry_run {
             db.delete_task(&t.key)?;
+            crate::intake::remove_attachments(state_db, &t.key);
         }
     }
     Ok(())

@@ -276,6 +276,12 @@ with the reason in `<name>.error.txt` if it could not be parsed or queued
 enqueue a generic task. `GET /tasks/{key}` and `GET /tasks/{key}/result` read
 it back. Output kinds: `reply` (default, answer the source), `pr`,
 `issue_comment`, `branch`, `patch`, `text`, `webhook`.
+`POST /tasks` accepts optional header `Idempotency-Key` (JSON `idempotency_key`
+is a fallback) and optional `files` / `attachments` (`name` plus `text` or
+`content_base64`). A replay of the same key and request returns the existing
+task; a different body or files with the same key is HTTP 409. Attached files
+land in the worktree by filename when the run starts. MCP `add_task` has the
+same `idempotency_key` and `files` arguments.
 
 ## Submit and the local API
 

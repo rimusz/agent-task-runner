@@ -288,11 +288,17 @@ token_file = "~/.config/atr/mcp.token"
 Tools: `add_task` (`body` required; `title` optional, derived from the prompt;
 workspace defaults to `none` when neither `dir` nor `repo` is set; optional
 `workspace` git/dir/none, `dir`, `repo`, `output`,
-`webhook`, `patch`), `wait_task` (block until waiting/done/failed or
+`webhook`, `patch`, `idempotency_key`, `files`), `wait_task` (block until waiting/done/failed or
 `timeout_seconds`), `get_result` (text, diff, PR URL), `list_tasks`,
 `task_status` (timeline + last output), `steer_task`, `cancel_task`,
 `list_repos`, `list_providers` (with usage), `usage_summary`, `doctor`, and
 read-only `config_get` (secrets redacted).
+`idempotency_key` on `add_task` (HTTP: header `Idempotency-Key` on `POST /tasks`)
+replays a successful create with the same request identity (same body, workspace,
+output, files, and the other create fields). Reusing the key with a different
+request is a conflict (HTTP 409; MCP `isError`). `files` is
+`[{name, content_base64|text}]` — when the worktree is ready, each file is
+written under that filename (basename only).
 Config cannot be changed over MCP. Resources: `atr://status`, `atr://dashboard`.
 
 `atr serve` must be running for queued work to dispatch. `atr mcp` stdio talks

@@ -158,6 +158,11 @@ struct TaskIn {
     /// Required capabilities: `"browser"`, `"desktop"`, or a list.
     #[serde(default, deserialize_with = "crate::task::de_needs")]
     needs: Vec<String>,
+    /// Optional; the `Idempotency-Key` header wins when both are set.
+    #[serde(default, alias = "idempotencyKey")]
+    idempotency_key: Option<String>,
+    #[serde(default, alias = "attachments")]
+    files: Vec<crate::intake::FileIn>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -178,6 +183,7 @@ struct MessageIn {
 
 async fn create_task(
     State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
     Json(payload): Json<TaskIn>,
 ) -> impl IntoResponse {
     let Some(body) = payload.body.filter(|s| !s.trim().is_empty()) else {
@@ -187,111 +193,64 @@ async fn create_task(
         );
     };
     let cfg = shared.config.read().unwrap().clone();
-    if let Err(e) = crate::task::check_prompt_bytes(&body, cfg.max_prompt_bytes) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"ok": false, "error": e.to_string()})),
-        );
-    }
-    let title = payload
-        .title
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| crate::task::title_from_prompt(&body));
-    let (workspace_kind, repo_path, allow_empty) = match crate::task::resolve_intake_workspace(
-        payload.dir.as_deref(),
-        payload.repo.as_deref(),
-        payload.workspace.as_deref(),
-        |r| {
-            cfg.resolve_repo_filter(r)
-                .map(|e| e.path.display().to_string())
-        },
-    ) {
-        Ok(v) => v,
+    let files = match crate::intake::parse_files(payload.files, cfg.max_prompt_bytes) {
+        Ok(f) => f,
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"ok": false, "error": e.to_string()})),
+                Json(json!({"ok": false, "error": e})),
             )
         }
     };
-    let output_kind = match payload.output.as_deref() {
-        Some(o) => match crate::task::OutputKind::parse(o) {
-            Ok(k) => k,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"ok": false, "error": e.to_string()})),
-                )
-            }
-        },
-        None => crate::task::OutputKind::Reply,
-    };
-    let output_spec = payload.webhook.or(payload.patch);
-    let key = match payload.key.filter(|s| !s.trim().is_empty()) {
-        Some(k) => k,
-        None => match crate::task::allocate_key(&shared.db, &cfg.task_key_prefix, &title) {
-            Ok(k) => k,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"ok": false, "error": e.to_string()})),
-                )
-            }
-        },
-    };
-    drop(cfg);
-    let text = format!("# {title}\n\n{body}");
-    let hint = payload.provider.clone();
-    match shared.submit_with(
-        &key,
-        &text,
-        payload.source.as_deref().unwrap_or("http"),
-        repo_path.as_deref(),
-        payload.issue,
-        payload.shadow,
-        payload.tests_ok,
-        crate::app::SubmitOpts {
-            workspace_kind: Some(workspace_kind.as_str().into()),
-            output_kind: Some(output_kind.as_str().into()),
-            output_spec,
-            source_kind: Some(
-                payload
-                    .source
-                    .as_deref()
-                    .and_then(|s| crate::task::SourceKind::parse(s).ok())
-                    .unwrap_or(crate::task::SourceKind::Http)
-                    .as_str()
-                    .into(),
-            ),
-            title: Some(title.clone()),
-            allow_empty_repo: allow_empty,
-            provider_hint: hint.clone(),
-            needs: payload.needs.clone(),
+    let header_key = headers.get("idempotency-key").and_then(|v| v.to_str().ok());
+    let idempotency_key =
+        crate::intake::pick_idempotency_key(header_key, payload.idempotency_key.as_deref());
+    let source = payload.source.clone();
+    match crate::intake::create(
+        &shared,
+        crate::intake::CreateIn {
+            body,
+            title: payload.title,
+            key: payload.key,
+            repo: payload.repo,
+            dir: payload.dir,
+            workspace: payload.workspace,
+            output: payload.output,
+            webhook: payload.webhook,
+            patch: payload.patch,
+            provider: payload.provider,
+            needs: payload.needs,
+            source: source.clone().unwrap_or_else(|| "http".into()),
+            source_kind: source
+                .as_deref()
+                .and_then(|s| crate::task::SourceKind::parse(s).ok())
+                .unwrap_or(crate::task::SourceKind::Http)
+                .as_str()
+                .into(),
+            issue: payload.issue,
+            shadow: payload.shadow,
+            tests_ok: payload.tests_ok,
+            files,
+            idempotency_key,
+            repo_named_prefix: false,
         },
     ) {
-        Ok(outcome) => match outcome {
-            SubmitOutcome::Accepted => (
-                StatusCode::OK,
-                Json(json!({
-                    "ok": true,
-                    "status": "accepted",
-                    "key": key,
-                    "workspace": workspace_kind.as_str(),
-                    "output": output_kind.as_str(),
-                })),
-            ),
-            SubmitOutcome::Queued => (
-                StatusCode::ACCEPTED,
-                Json(json!({
-                    "ok": true,
-                    "status": "queued",
-                    "key": key,
-                    "workspace": workspace_kind.as_str(),
-                    "output": output_kind.as_str(),
-                })),
-            ),
-        },
-        Err(e) => (
+        Ok(out) => {
+            let code = if out.status == "queued" {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            };
+            (code, Json(out.to_json()))
+        }
+        Err(crate::intake::CreateError::BadRequest(e)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": e})),
+        ),
+        Err(crate::intake::CreateError::Conflict(e)) => {
+            (StatusCode::CONFLICT, Json(json!({"ok": false, "error": e})))
+        }
+        Err(crate::intake::CreateError::Internal(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"ok": false, "error": e.to_string()})),
         ),
@@ -300,9 +259,10 @@ async fn create_task(
 
 async fn get_task(State(shared): State<Arc<Shared>>, Path(key): Path<String>) -> impl IntoResponse {
     match shared.db.get_task(&key) {
-        Ok(Some(t)) => (
-            StatusCode::OK,
-            Json(json!({
+        Ok(Some(t)) => {
+            let cfg = shared.config.read().unwrap().clone();
+            let files = crate::intake::list_attachment_names(&cfg.state_db, &t.key);
+            let mut body = json!({
                 "ok": true,
                 "key": t.key,
                 "status": t.status,
@@ -312,8 +272,12 @@ async fn get_task(State(shared): State<Arc<Shared>>, Path(key): Path<String>) ->
                 "repo": t.repo,
                 "issue": t.issue,
                 "title": t.title,
-            })),
-        ),
+            });
+            if !files.is_empty() {
+                body["files"] = json!(files);
+            }
+            (StatusCode::OK, Json(body))
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({"ok": false, "error": format!("unknown task {key}")})),
@@ -1000,6 +964,80 @@ token_file = "{token}"
         assert_eq!(c.status(), 200);
         let t = s.db.get_task("http-life").unwrap().unwrap();
         assert_ne!(t.status, "queued");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_task_idempotency_key_replays_and_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), "");
+        let base = listen(s.clone()).await;
+        let url = format!("{base}/tasks");
+        let body = r#"{"body":"what is 2+2?","workspace":"none","output":"text"}"#;
+        let first = ureq::post(&url)
+            .set("Authorization", &format!("Bearer {TEST_TOKEN}"))
+            .set("Content-Type", "application/json")
+            .set("Idempotency-Key", "http-idem-1")
+            .send_string(body)
+            .unwrap();
+        assert_eq!(first.status(), 200);
+        let a: serde_json::Value = serde_json::from_str(&first.into_string().unwrap()).unwrap();
+        let key = a["key"].as_str().unwrap().to_string();
+        assert_ne!(a["replayed"], true);
+
+        let second = ureq::post(&url)
+            .set("Authorization", &format!("Bearer {TEST_TOKEN}"))
+            .set("Content-Type", "application/json")
+            .set("Idempotency-Key", "http-idem-1")
+            .send_string(body)
+            .unwrap();
+        assert_eq!(second.status(), 200);
+        let b: serde_json::Value = serde_json::from_str(&second.into_string().unwrap()).unwrap();
+        assert_eq!(b["key"], key);
+        assert_eq!(b["replayed"], true);
+        assert_eq!(s.db.list_tasks().unwrap().len(), 1);
+        assert_eq!(s.db.all_messages(&key).unwrap().len(), 1);
+
+        let (code, text) = status_body(
+            ureq::post(&url)
+                .set("Authorization", &format!("Bearer {TEST_TOKEN}"))
+                .set("Content-Type", "application/json")
+                .set("Idempotency-Key", "http-idem-1")
+                .send_string(r#"{"body":"a different prompt","workspace":"none","output":"text"}"#)
+                .unwrap_err(),
+        );
+        assert_eq!(code, 409);
+        assert!(text.contains("different request"), "{text}");
+        assert_eq!(s.db.list_tasks().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_task_files_land_in_worktree_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), "");
+        let base = listen(s.clone()).await;
+        let resp = ureq::post(&format!("{base}/tasks"))
+            .set("Authorization", &format!("Bearer {TEST_TOKEN}"))
+            .set("Content-Type", "application/json")
+            .send_string(
+                r#"{"body":"read brief.md","workspace":"none","output":"text","files":[{"name":"brief.md","text":"hello attach"}]}"#,
+            )
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+        let key = v["key"].as_str().unwrap();
+        let cfg = s.config.read().unwrap().clone();
+        let got = ureq::get(&format!("{base}/tasks/{key}"))
+            .call()
+            .unwrap()
+            .into_string()
+            .unwrap();
+        assert!(got.contains("brief.md"), "{got}");
+        let wt = crate::worktree::ensure_none_workspace(&cfg.worktree_root, key).unwrap();
+        crate::intake::materialize_attachments(&cfg.state_db, key, &wt).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(wt.join("brief.md")).unwrap(),
+            "hello attach"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

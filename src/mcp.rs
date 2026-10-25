@@ -2,7 +2,7 @@
 //! HTTP requires a bearer token. atr never prints that token.
 
 use crate::app::Shared;
-use crate::config::{Config, McpConfig};
+use crate::config::McpConfig;
 use crate::github_auth::redact_secrets;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -16,7 +16,7 @@ pub const PROTOCOL_VERSION: &str = "2025-03-26";
 const TOOLS: &[(&str, &str)] = &[
     (
         "add_task",
-        "Enqueue a new atr task. Optional workspace (git repo, local dir, or none), output, key, and provider/driver hint.",
+        "Enqueue a new atr task. Optional workspace (git repo, local dir, or none), output, key, provider/driver hint, idempotency_key (replay the same create), and files (name + content_base64 or text; land in the worktree by filename).",
     ),
     (
         "list_tasks",
@@ -368,7 +368,20 @@ fn tool_schema(name: &str) -> Value {
                 "key": {"type": "string"},
                 "provider": {"type": "string", "description": "Provider or driver hint"},
                 "needs": {"type": "array", "items": {"type": "string", "enum": ["browser", "desktop"]}, "description": "Required provider capabilities; desktop tasks wait for a logged-in, unlocked graphical session"},
-                "hint": {"type": "string"}
+                "hint": {"type": "string"},
+                "idempotency_key": {"type": "string", "description": "Optional. Same key + same request returns the existing task; same key + different body/files is a conflict."},
+                "files": {
+                    "type": "array",
+                    "description": "Files to place in the task worktree by filename when the worktree is ready.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "content_base64": {"type": "string"},
+                            "text": {"type": "string"}
+                        }
+                    }
+                }
             },
             "required": ["body"]
         }),
@@ -541,100 +554,33 @@ fn arg_needs(args: &Value) -> Result<Vec<String>, String> {
 fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
     let body = arg_str(args, &["body", "prompt", "text", "message"]).ok_or("missing body")?;
     let cfg = shared.config.read().unwrap().clone();
-    crate::task::check_prompt_bytes(&body, cfg.max_prompt_bytes).map_err(|e| e.to_string())?;
-    let title = arg_str(args, &["title"]).unwrap_or_else(|| crate::task::title_from_prompt(&body));
-    let repo_filter = arg_str(args, &["repo"]);
-    let dir = arg_str(args, &["dir", "path"]);
-    let workspace_in = arg_str(args, &["workspace"]);
-    let output_in = arg_str(args, &["output"]);
-    let webhook = arg_str(args, &["webhook"]);
-    let patch = arg_str(args, &["patch"]);
-    let entry = repo_filter
-        .as_deref()
-        .and_then(|f| cfg.resolve_repo_filter(f));
-    let (workspace_kind, repo_path, allow_empty) = crate::task::resolve_intake_workspace(
-        dir.as_deref(),
-        repo_filter.as_deref(),
-        workspace_in.as_deref(),
-        |r| {
-            cfg.resolve_repo_filter(r)
-                .map(|e| e.path.display().to_string())
+    let files = crate::intake::files_from_args(args, cfg.max_prompt_bytes)?;
+    let out = crate::intake::create(
+        shared,
+        crate::intake::CreateIn {
+            body,
+            title: arg_str(args, &["title"]),
+            key: arg_str(args, &["key"]),
+            repo: arg_str(args, &["repo"]),
+            dir: arg_str(args, &["dir", "path"]),
+            workspace: arg_str(args, &["workspace"]),
+            output: arg_str(args, &["output"]),
+            webhook: arg_str(args, &["webhook"]),
+            patch: arg_str(args, &["patch"]),
+            provider: arg_str(args, &["provider", "hint", "driver"]),
+            needs: arg_needs(args)?,
+            source: "mcp".into(),
+            source_kind: "mcp".into(),
+            issue: None,
+            shadow: false,
+            tests_ok: false,
+            files,
+            idempotency_key: arg_str(args, &["idempotency_key", "idempotencyKey"]),
+            repo_named_prefix: true,
         },
     )
-    .map_err(|e| e.to_string())?;
-    let output_kind = output_in
-        .as_deref()
-        .map(crate::task::OutputKind::parse)
-        .transpose()
-        .map_err(|e| e.to_string())?
-        .unwrap_or(crate::task::OutputKind::Reply);
-    if output_kind.needs_git() && workspace_kind != crate::task::WorkspaceKind::Git {
-        return Err(format!(
-            "output {} needs a git workspace",
-            output_kind.as_str()
-        ));
-    }
-    let output_spec = webhook.or(patch).unwrap_or_default();
-    let key = match arg_str(args, &["key"]) {
-        Some(k) => k,
-        None => unique_key(shared, &cfg, entry.as_ref(), &title)?,
-    };
-    let needs = arg_needs(args)?;
-    let text = format!("# {title}\n\n{body}");
-    let outcome = shared
-        .submit_with(
-            &key,
-            &text,
-            "mcp",
-            repo_path.as_deref(),
-            None,
-            false,
-            false,
-            crate::app::SubmitOpts {
-                workspace_kind: Some(workspace_kind.as_str().into()),
-                output_kind: Some(output_kind.as_str().into()),
-                output_spec: if output_spec.is_empty() {
-                    None
-                } else {
-                    Some(output_spec)
-                },
-                source_kind: Some("mcp".into()),
-                title: Some(title.clone()),
-                allow_empty_repo: allow_empty,
-                provider_hint: arg_str(args, &["provider", "hint", "driver"]),
-                needs,
-            },
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(json!({
-        "ok": true,
-        "key": key,
-        "status": match outcome {
-            crate::SubmitOutcome::Accepted => "accepted",
-            crate::SubmitOutcome::Queued => "queued",
-        },
-        "title": title,
-        "workspace": workspace_kind.as_str(),
-        "output": output_kind.as_str(),
-    }))
-}
-
-fn unique_key(
-    shared: &Shared,
-    cfg: &Config,
-    entry: Option<&crate::config::RepoEntry>,
-    title: &str,
-) -> Result<String, String> {
-    let prefix = entry
-        .map(|e| {
-            if e.shorthand {
-                cfg.task_key_prefix.clone()
-            } else {
-                e.name.clone()
-            }
-        })
-        .unwrap_or_else(|| cfg.task_key_prefix.clone());
-    crate::task::allocate_key(&shared.db, &prefix, title).map_err(|e| e.to_string())
+    .map_err(|e| e.as_str())?;
+    Ok(out.to_json())
 }
 
 pub fn slugify(title: &str) -> String {
@@ -1196,6 +1142,58 @@ cli = "/bin/true"
         assert_eq!(add[0]["result"]["isError"], true);
         let text = add[0]["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("bytes"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn add_task_idempotency_key_replays_same_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path());
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_task","arguments":{"body":"what is 2+2?","workspace":"none","output":"text","idempotency_key":"mcp-idem-1"}}}"#;
+        let a = handle_raw(&s, req).await;
+        assert_eq!(a[0]["result"]["isError"], false, "{}", a[0]);
+        let first: serde_json::Value =
+            serde_json::from_str(a[0]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let key = first["key"].as_str().unwrap().to_string();
+        let b = handle_raw(&s, req).await;
+        let second: serde_json::Value =
+            serde_json::from_str(b[0]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(second["key"], key);
+        assert_eq!(second["replayed"], true);
+        assert_eq!(s.db.list_tasks().unwrap().len(), 1);
+        assert_eq!(s.db.all_messages(&key).unwrap().len(), 1);
+
+        let conflict = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add_task","arguments":{"body":"nope","workspace":"none","output":"text","idempotency_key":"mcp-idem-1"}}}"#,
+        )
+        .await;
+        assert_eq!(conflict[0]["result"]["isError"], true);
+        let text = conflict[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("different request"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn add_task_files_land_in_worktree_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path());
+        let add = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_task","arguments":{"title":"Attach","body":"read notes.txt","workspace":"none","output":"text","files":[{"name":"notes.txt","text":"from mcp"}]}}}"#,
+        )
+        .await;
+        assert_eq!(add[0]["result"]["isError"], false, "{}", add[0]);
+        let v: serde_json::Value =
+            serde_json::from_str(add[0]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let key = v["key"].as_str().unwrap();
+        let cfg = s.config.read().unwrap().clone();
+        let wt = crate::worktree::ensure_none_workspace(&cfg.worktree_root, key).unwrap();
+        crate::intake::materialize_attachments(&cfg.state_db, key, &wt).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(wt.join("notes.txt")).unwrap(),
+            "from mcp"
+        );
     }
 
     #[tokio::test]
