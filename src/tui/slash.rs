@@ -58,6 +58,15 @@ pub(crate) fn is_bare_slash(line: &str) -> bool {
     line.trim() == "/"
 }
 
+/// `/provider` and `/model` stay in overlays / the under-input strip.
+/// Do not append them (or their confirmations) to the chat transcript.
+pub(crate) fn quiet_transcript(line: &str) -> bool {
+    matches!(
+        parse_slash(line),
+        Some(Slash::Provider(_)) | Some(Slash::Model(_))
+    )
+}
+
 /// Prefix + fuzzy filter for the `/` menu. Empty when the line is not
 /// an in-progress atr-local command (has args, or is a provider slash).
 pub(crate) fn filter_host_commands(typed: &str) -> Vec<&'static HostCommand> {
@@ -323,6 +332,19 @@ mod tests {
             parse_slash("/provider grok"),
             Some(Slash::Provider(Some("grok".into())))
         );
+        assert!(quiet_transcript("/provider"));
+        assert!(quiet_transcript("/provider codex"));
+        assert!(quiet_transcript("/model"));
+        assert!(quiet_transcript("/model gpt-6.1-sol"));
+        assert!(quiet_transcript("/m"));
+        assert!(quiet_transcript("/atr provider"));
+        assert!(quiet_transcript("/atr /provider grok"));
+        assert!(quiet_transcript("/atr model"));
+        assert!(quiet_transcript("/atr /model gpt-6.1-sol"));
+        assert!(!quiet_transcript("/help"));
+        assert!(!quiet_transcript("/status"));
+        assert!(!quiet_transcript("/cli"));
+        assert!(!quiet_transcript("hello"));
         assert_eq!(parse_slash("/model"), Some(Slash::Model(None)));
         assert_eq!(
             parse_slash("/model grok-code"),

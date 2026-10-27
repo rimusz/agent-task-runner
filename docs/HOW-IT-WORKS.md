@@ -18,7 +18,9 @@ never auto-dispatches `cli-*` TUI sessions. The TUI is a session host:
 `--model` override; never a chat turn; the TUI overlay does not dump the
 catalog into the transcript). The under-input strip stays in sync with
 the session provider/model (`/provider` and `/model` are the switchers;
-`/model` lists real CLI ids — never `Available` / help prose).
+`/model` lists real CLI ids — never `Available` / help prose;
+Codex reads `~/.codex/models_cache.json` slugs;
+host `/provider` `/model` stay off the transcript).
 Ctrl+C quits atr; Esc dismisses menus only.
 `/new` `/quit` `/status` `/help`
 `/cli` stay in atr; other `/…` lines may be proxied. `/cli` opens the

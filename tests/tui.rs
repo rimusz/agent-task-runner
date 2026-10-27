@@ -342,6 +342,36 @@ async fn model_slash_claude_uses_aliases_not_help_prose() {
     );
 }
 
+#[tokio::test]
+async fn model_slash_codex_lists_more_than_config_row() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", false, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", true, "success"),
+    ])
+    .await;
+    let switch = tui::preview_line(&shared, "cli-default", "/provider codex").unwrap();
+    assert!(switch.starts_with("note"), "{switch}");
+    let list = tui::preview_line(&shared, "cli-default", "/model").unwrap();
+    assert!(list.starts_with("model-picker"), "{list}");
+    assert!(list.contains("gpt-6.1-sol"), "{list}");
+    assert!(list.contains("gpt-6-luna"), "{list}");
+    let ids = list
+        .lines()
+        .filter(|l| {
+            l.split_whitespace()
+                .next()
+                .is_some_and(|n| n.parse::<usize>().is_ok())
+        })
+        .count();
+    assert!(
+        ids > 1,
+        "codex /model must not be a single config row: {list}"
+    );
+    assert!(!list.contains("Available models"), "{list}");
+}
+
 #[test]
 fn composer_path_line_tildes_home() {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/tester".into());

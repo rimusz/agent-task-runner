@@ -67,8 +67,9 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   optional `[tui] providers` → global `[[provider]]` order. `/provider`
   and `/model` are atr-local (list/pick). `/model` sets a per-session
   `--model` override from config / detect / a cached CLI `models` catalog
-  (Grok / OpenCode / Cursor `id - Label`; Claude aliases; Codex has no
-  non-interactive list). Refresh is off the UI thread — never
+  (Grok / OpenCode / Cursor `id - Label`; Claude aliases; Codex reads
+  `~/.codex/models_cache.json` slugs — never spawn its TUI). Host
+  `/provider` `/model` do not append to the transcript. Refresh is off the UI thread — never
   forwarded as a headless chat prompt. The TUI overlay does not dump the
   catalog into the transcript. The under-input strip shows the same
   session `provider / model` as `/status` (plus tok/cache and workspace

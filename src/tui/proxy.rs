@@ -6,7 +6,8 @@
 //! that CLI's own interactive TUI. This module maps what we can without
 //! inventing a second catalog:
 //!
-//! * `/model` is atr-local (see [`collect_models`]): never a chat turn
+//! * `/model` is atr-local (see [`collect_models`]): never a chat turn.
+//!   Codex reads `~/.codex/models_cache.json` slugs (never spawn its TUI).
 //! * `/cli` → spawn the provider CLI *without* `-p` / `exec` / json, on
 //!   the session worktree, resuming when we have an id
 
@@ -88,6 +89,77 @@ pub(crate) const CLAUDE_ALIASES: &[&str] = &[
     "opusplan",
 ];
 
+/// Last-resort Codex ids when `~/.codex/models_cache.json` (and the
+/// picker catalog) are missing. `codex models` is a TUI — never spawn it.
+pub(crate) const CODEX_ALIASES: &[&str] = &[
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6-sol",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5-codex",
+];
+
+/// `$CODEX_HOME` if set, else `$HOME/.codex`.
+pub(crate) fn codex_catalog_home() -> Option<PathBuf> {
+    if let Some(h) = std::env::var_os("CODEX_HOME").filter(|h| !h.is_empty()) {
+        return Some(PathBuf::from(h));
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex"))
+}
+
+/// Slugs from a Codex on-disk catalog (`models[].slug` only).
+pub(crate) fn parse_codex_catalog(text: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let Some(models) = v.get("models").and_then(|m| m.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for m in models {
+        let Some(slug) = m.get("slug").and_then(|s| s.as_str()) else {
+            continue;
+        };
+        let slug = slug.trim();
+        if accept_model_name("codex", slug) {
+            push_id(&mut out, slug);
+        }
+    }
+    out
+}
+
+/// Preferred: `home/models_cache.json`. Fallback:
+/// `home/model-catalogs/codex_picker_catalog.json`.
+pub(crate) fn codex_catalog_slugs_in(home: &Path) -> Vec<String> {
+    let cache = home.join("models_cache.json");
+    if let Ok(text) = std::fs::read_to_string(&cache) {
+        let slugs = parse_codex_catalog(&text);
+        if !slugs.is_empty() {
+            return slugs;
+        }
+    }
+    let picker = home
+        .join("model-catalogs")
+        .join("codex_picker_catalog.json");
+    if let Ok(text) = std::fs::read_to_string(&picker) {
+        let slugs = parse_codex_catalog(&text);
+        if !slugs.is_empty() {
+            return slugs;
+        }
+    }
+    Vec::new()
+}
+
+fn codex_catalog_slugs() -> Vec<String> {
+    codex_catalog_home()
+        .map(|h| codex_catalog_slugs_in(&h))
+        .unwrap_or_default()
+}
+
 pub(crate) fn collect_models(
     shared: &Shared,
     key: &str,
@@ -152,6 +224,18 @@ pub(crate) fn collect_models(
     if kind == "claude" {
         for a in CLAUDE_ALIASES {
             push((*a).to_string(), "alias");
+        }
+    }
+    if kind == "codex" {
+        let slugs = codex_catalog_slugs();
+        if slugs.is_empty() {
+            for a in CODEX_ALIASES {
+                push((*a).to_string(), "alias");
+            }
+        } else {
+            for s in slugs {
+                push(s, "catalog");
+            }
         }
     }
     if models_argv(&kind).is_some() {
@@ -744,6 +828,117 @@ Available models:
             "codex TUI error is not a catalog: {codex:?}"
         );
         assert_no_junk(&codex);
+    }
+
+    #[test]
+    fn codex_fallback_is_more_than_config_placeholder() {
+        let ids: Vec<&str> = include_str!("../../tests/fixtures/models/codex_aliases.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        assert!(ids.len() > 1, "{ids:?}");
+        assert!(ids.contains(&"gpt-6.1-sol"), "{ids:?}");
+        assert!(ids.contains(&"gpt-6-luna"), "{ids:?}");
+        assert_eq!(ids, CODEX_ALIASES);
+        for id in CODEX_ALIASES {
+            assert!(accept_model_name("codex", id), "{id}");
+        }
+        assert!(CODEX_ALIASES.len() > 1);
+    }
+
+    #[test]
+    fn parse_codex_models_cache_slugs_only() {
+        let ids = parse_codex_catalog(include_str!(
+            "../../tests/fixtures/models/codex_models_cache.json"
+        ));
+        assert!(ids.len() >= 5, "{ids:?}");
+        assert!(ids.len() > 1, "must not be a single config row: {ids:?}");
+        for want in [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6.1-terra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+            "codex-auto-review",
+        ] {
+            assert!(ids.iter().any(|s| s == want), "missing {want} in {ids:?}");
+        }
+        for bad in [
+            "GPT-6.1-Sol",
+            "GPT-6.1 Terra",
+            "GPT-6-Astra",
+            "Codex Auto Review",
+        ] {
+            assert!(
+                !ids.iter().any(|s| s == bad),
+                "display_name leaked into {ids:?}"
+            );
+        }
+        assert_no_junk(&ids);
+        assert!(parse_codex_catalog("not json").is_empty());
+        assert!(parse_codex_catalog("{}").is_empty());
+        assert!(parse_codex_catalog(r#"{"models":[]}"#).is_empty());
+    }
+
+    #[test]
+    fn parse_codex_picker_catalog_slugs() {
+        let ids = parse_codex_catalog(include_str!(
+            "../../tests/fixtures/models/codex_picker_catalog.json"
+        ));
+        assert!(ids.len() >= 5, "{ids:?}");
+        assert!(ids.iter().any(|s| s == "gpt-5.5"), "{ids:?}");
+        assert!(ids.iter().any(|s| s == "gpt-5.3-codex-spark"), "{ids:?}");
+        assert!(
+            ids.iter().any(|s| s == "clinepass/cline-pass-glm-5.2"),
+            "{ids:?}"
+        );
+        assert_no_junk(&ids);
+    }
+
+    #[test]
+    fn codex_catalog_slugs_in_prefers_cache_then_picker() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::write(
+            home.join("models_cache.json"),
+            include_str!("../../tests/fixtures/models/codex_models_cache.json"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.join("model-catalogs")).unwrap();
+        std::fs::write(
+            home.join("model-catalogs")
+                .join("codex_picker_catalog.json"),
+            include_str!("../../tests/fixtures/models/codex_picker_catalog.json"),
+        )
+        .unwrap();
+        let ids = codex_catalog_slugs_in(home);
+        assert!(ids.len() >= 5, "{ids:?}");
+        assert!(ids.iter().any(|s| s == "gpt-6.1-sol"), "{ids:?}");
+        assert!(
+            !ids.iter().any(|s| s == "gpt-5.4"),
+            "cache must win over picker: {ids:?}"
+        );
+        assert!(!ids.iter().any(|s| s.contains(' ')), "{ids:?}");
+
+        let only_picker = tempfile::tempdir().unwrap();
+        let ph = only_picker.path();
+        std::fs::create_dir_all(ph.join("model-catalogs")).unwrap();
+        std::fs::write(
+            ph.join("model-catalogs").join("codex_picker_catalog.json"),
+            include_str!("../../tests/fixtures/models/codex_picker_catalog.json"),
+        )
+        .unwrap();
+        let fallback = codex_catalog_slugs_in(ph);
+        assert!(fallback.iter().any(|s| s == "gpt-5.5"), "{fallback:?}");
+        assert!(fallback.len() > 1, "{fallback:?}");
+
+        let empty = tempfile::tempdir().unwrap();
+        assert!(codex_catalog_slugs_in(empty.path()).is_empty());
     }
 
     #[test]

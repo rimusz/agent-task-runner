@@ -535,20 +535,19 @@ fn apply_picker_filter(picker: &mut Picker) {
 }
 
 fn picker_apply(
-    app: &mut App,
+    _app: &mut App,
     shared: &Shared,
     key: &str,
     ws: &Workspace,
     kind: PickerKind,
     name: &str,
 ) -> Result<()> {
-    let step = match kind {
+    // Overlay pick: strip already shows the new provider/model.
+    // Do not push You/System confirmations into the transcript.
+    let _step = match kind {
         PickerKind::Provider => super::apply_provider_pick(shared, key, ws, name)?,
         PickerKind::Model => super::apply_model_pick(shared, key, ws, name)?,
     };
-    if let Step::Note(msg) = step {
-        app.push(Role::System, msg);
-    }
     Ok(())
 }
 
@@ -560,13 +559,17 @@ fn submit_line(
     pin: Option<&str>,
     line: &str,
 ) -> Result<Option<LoopEnd>> {
-    app.push(Role::You, line.to_string());
+    let quiet = slash::quiet_transcript(line);
+    if !quiet {
+        app.push(Role::You, line.to_string());
+    }
     apply_step(
         app,
         shared,
         key,
         ws,
         pin,
+        quiet,
         step_line(shared, key, ws, pin, line)?,
     )
 }
@@ -577,18 +580,23 @@ fn apply_step(
     key: &str,
     ws: &Workspace,
     pin: Option<&str>,
+    quiet: bool,
     step: Step,
 ) -> Result<Option<LoopEnd>> {
     match step {
         Step::Quit => Ok(Some(LoopEnd::Quit(ExitCode::SUCCESS))),
         Step::Note(msg) => {
-            app.push(Role::System, msg);
+            if !quiet {
+                app.push(Role::System, msg);
+            }
             Ok(None)
         }
         Step::OpenProviderPicker => {
             let list = slash::list_providers(shared, key);
             if list.is_empty() {
-                app.push(Role::System, slash::provider_pick_usage(&list));
+                if !quiet {
+                    app.push(Role::System, slash::provider_pick_usage(&list));
+                }
                 return Ok(None);
             }
             let sel = list.iter().position(|p| p.current).unwrap_or(0);
@@ -614,7 +622,9 @@ fn apply_step(
             let (kind, _, pname) = proxy::current_kind_cli(shared, key)
                 .unwrap_or_else(|| ("?".into(), Default::default(), "none".into()));
             if list.is_empty() && proxy::models_argv(&kind).is_none() {
-                app.push(Role::System, slash::model_empty_hint(&pname, &kind));
+                if !quiet {
+                    app.push(Role::System, slash::model_empty_hint(&pname, &kind));
+                }
                 return Ok(None);
             }
             let sel = list.iter().position(|m| m.current).unwrap_or(0);
