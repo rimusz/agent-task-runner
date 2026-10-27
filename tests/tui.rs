@@ -143,7 +143,7 @@ async fn model_slash_is_atr_local_for_claude() {
     assert_eq!(tui::classify_line("/model"), "model");
     assert_eq!(tui::classify_line("/model sonnet"), "model");
     let kind = tui::preview_line(&shared, "cli-default", "/model").unwrap();
-    assert_eq!(kind, "model-picker", "{kind}");
+    assert!(kind.starts_with("model-picker"), "{kind}");
     assert!(
         shared.db.list_runs(Some("cli-default")).unwrap().is_empty(),
         "bare /model must not enqueue a turn"
@@ -166,6 +166,101 @@ async fn model_slash_is_atr_local_for_claude() {
         tui::preview_line(&shared, "cli-default", "/compact").unwrap(),
         "turn"
     );
+}
+
+#[tokio::test]
+async fn model_slash_lists_real_grok_ids_not_prose() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", true, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    // Last run is claude so a last-run-first footer would disagree with
+    // /model after the session moves to grok.
+    let code = tui::run_oneshot(shared.clone(), opts("warmup", Some("claude"), None))
+        .await
+        .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    assert_eq!(shared.db.list_runs(Some("cli-default")).unwrap().len(), 1);
+
+    let switch = tui::preview_line(&shared, "cli-default", "/provider grok").unwrap();
+    assert!(switch.starts_with("note"), "{switch}");
+    assert!(switch.contains("grok"), "{switch}");
+    assert_eq!(
+        tui::session_provider_now(&shared, "cli-default").as_deref(),
+        Some("grok")
+    );
+
+    let footer = tui::footer_line(&shared, "cli-default");
+    assert!(footer.contains("grok /"), "{footer}");
+
+    let list = tui::preview_line(&shared, "cli-default", "/model").unwrap();
+    assert!(list.starts_with("model-picker"), "{list}");
+    assert!(
+        list.contains("Models for grok"),
+        "header must match session provider in footer: {list}\nfooter={footer}"
+    );
+    assert_eq!(
+        shared.db.list_runs(Some("cli-default")).unwrap().len(),
+        1,
+        "bare /model must not enqueue a turn"
+    );
+    for want in [
+        "grok-4.7",
+        "grok-4.7-build-fast",
+        "grok-4.6",
+        "grok-4.5",
+        "cline-pass-glm-5.2",
+        "cursor-composer-2.5",
+        "deepseek-v4-flash",
+        "cursor-grok-4.7",
+    ] {
+        assert!(list.contains(want), "missing {want} in {list}");
+    }
+    for bad in ["You", "Default", "Available"] {
+        let leaked = list.lines().any(|line| {
+            line.split_whitespace()
+                .any(|tok| tok.eq_ignore_ascii_case(bad))
+        });
+        assert!(!leaked, "prose token {bad:?} leaked into {list}");
+    }
+
+    let set = tui::preview_line(&shared, "cli-default", "/model grok-4.7").unwrap();
+    assert!(set.starts_with("note"), "{set}");
+    assert!(set.contains("grok-4.7"), "{set}");
+    assert_eq!(
+        tui::session_model(&shared.db, "cli-default").as_deref(),
+        Some("grok-4.7")
+    );
+    let footer = tui::footer_line(&shared, "cli-default");
+    assert!(footer.contains("grok / grok-4.7"), "{footer}");
+    assert_eq!(
+        shared.db.list_runs(Some("cli-default")).unwrap().len(),
+        1,
+        "/model <id> must not enqueue a turn"
+    );
+
+    let list = tui::preview_line(&shared, "cli-default", "/model").unwrap();
+    let num = list
+        .lines()
+        .find_map(|line| {
+            let mut parts = line.split_whitespace();
+            let n = parts.next()?.parse::<usize>().ok()?;
+            let name = parts.next()?;
+            (name == "grok-4.7-build-fast").then_some(n)
+        })
+        .unwrap_or_else(|| panic!("grok-4.7-build-fast not numbered in {list}"));
+    let by_num = tui::preview_line(&shared, "cli-default", &format!("/model {num}")).unwrap();
+    assert!(by_num.starts_with("note"), "{by_num}");
+    assert_eq!(
+        tui::session_model(&shared.db, "cli-default").as_deref(),
+        Some("grok-4.7-build-fast")
+    );
+    let footer = tui::footer_line(&shared, "cli-default");
+    assert!(footer.contains("grok / grok-4.7-build-fast"), "{footer}");
+    assert_eq!(shared.db.list_runs(Some("cli-default")).unwrap().len(), 1);
 }
 
 #[tokio::test]

@@ -13,7 +13,7 @@
 use crate::app::Shared;
 use crate::config::Provider;
 use crate::tui::slash::ModelChoice;
-use crate::tui::{session_model, tui_provider_now, Workspace};
+use crate::tui::{session_model, Workspace};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -99,27 +99,55 @@ pub(crate) fn collect_models(shared: &Shared, key: &str, ws: &Workspace) -> Vec<
     out
 }
 
+/// Model ids from `grok models` / `opencode models` (and similar).
+///
+/// Grok 1.0.70 prints a login banner plus bulleted ids:
+/// `Default model: grok-4.7` / `  * grok-4.7 (default)` / `  - grok-4.6`.
+/// First-whitespace-token parsing would keep `You` / `Default` / `Available`
+/// and drop the real ids (the first token is `*` or `-`).
 pub(crate) fn parse_cli_model_ids(text: &str) -> Vec<String> {
-    let mut out = crate::detect::parse_models(text);
+    let text = crate::detect::strip_ansi(text);
+    let mut out = crate::detect::parse_models(&text);
     for line in text.lines() {
-        let tok = line.split_whitespace().next().unwrap_or("");
-        if !looks_like_model_id(tok) {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if !out.iter().any(|e| e == tok) {
-            out.push(tok.to_string());
+        let line = line
+            .trim_start_matches(['*', '-', '•', '·', '–', '—'])
+            .trim();
+        for raw in line.split_whitespace() {
+            let tok = normalize_model_token(raw);
+            if looks_like_cli_model_id(tok) && !out.iter().any(|e| e == tok) {
+                out.push(tok.to_string());
+            }
         }
     }
     out
 }
 
-fn looks_like_model_id(s: &str) -> bool {
-    if s.len() < 2 || s.starts_with('-') || s.starts_with('#') {
+fn normalize_model_token(s: &str) -> &str {
+    s.trim_matches(|c: char| {
+        !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_' | '.' | '/' | ':')
+    })
+}
+
+fn looks_like_cli_model_id(s: &str) -> bool {
+    if s.len() < 2 {
         return false;
     }
-    s.chars()
+    if !s
+        .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':'))
-        && s.chars().any(|c| c.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    if !s.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    // Banner words (`You`, `Default`, `Available`) are alphabetic only.
+    // Vendor ids have a hyphen, a slash (`provider/model`), or a digit.
+    s.contains('-') || s.contains('/') || s.chars().any(|c| c.is_ascii_digit())
 }
 
 pub(crate) fn run_models_list(cli: &Path, kind: &str, cwd: &Path) -> Result<String> {
@@ -153,12 +181,7 @@ pub(crate) fn run_models_list(cli: &Path, kind: &str, cwd: &Path) -> Result<Stri
 
 pub(crate) fn current_kind_cli(shared: &Shared, key: &str) -> Option<(String, PathBuf, String)> {
     let cfg = shared.config.read().unwrap().clone();
-    let name = tui_provider_now(shared, key).or_else(|| {
-        cfg.providers
-            .iter()
-            .find(|p| p.enabled)
-            .map(|p| p.name.clone())
-    })?;
+    let name = crate::tui::session_provider_now(shared, key)?;
     let p = cfg.provider(&name)?;
     Some((p.kind.clone(), p.cli.clone(), p.name.clone()))
 }
@@ -286,12 +309,81 @@ mod tests {
     use super::*;
     use crate::config::Provider;
 
+    const GROK_MODELS_SAMPLE: &str = "\
+You are logged in with grok.com.
+
+Default model: grok-4.7
+
+Available models:
+  * grok-4.7 (default)
+  - grok-4.7-build-fast
+  - grok-4.6
+  - grok-4.5
+  - cline-pass-glm-5.2
+  - cline-pass-deepseek-v4-pro
+  - cline-pass-mimo-v2.5-pro
+  - cline-pass-kimi-k3
+  - cline-pass-qwen3.8-max
+  - cline-pass-minimax-m3
+  - cursor-composer-2.5
+  - deepseek-v4-flash
+  - cursor-claude-opus-5-5
+  - cursor-gpt-5.6-sol
+  - cursor-grok-4.7
+";
+
     #[test]
     fn parse_cli_model_ids_accepts_simple_and_slash_ids() {
         let ids = parse_cli_model_ids("test-model\ntest-model-2\nmoonshotai/kimi-k2.6\n# skip\n");
         assert!(ids.iter().any(|s| s == "test-model"), "{ids:?}");
         assert!(ids.iter().any(|s| s == "test-model-2"), "{ids:?}");
         assert!(ids.iter().any(|s| s == "moonshotai/kimi-k2.6"), "{ids:?}");
+    }
+
+    #[test]
+    fn parse_grok_models_prose_and_bullets() {
+        let ids = parse_cli_model_ids(GROK_MODELS_SAMPLE);
+        for want in [
+            "grok-4.7",
+            "grok-4.7-build-fast",
+            "grok-4.6",
+            "grok-4.5",
+            "cline-pass-glm-5.2",
+            "cline-pass-deepseek-v4-pro",
+            "cline-pass-mimo-v2.5-pro",
+            "cline-pass-kimi-k3",
+            "cline-pass-qwen3.8-max",
+            "cline-pass-minimax-m3",
+            "cursor-composer-2.5",
+            "deepseek-v4-flash",
+            "cursor-claude-opus-5-5",
+            "cursor-gpt-5.6-sol",
+            "cursor-grok-4.7",
+        ] {
+            assert!(ids.iter().any(|s| s == want), "missing {want} in {ids:?}");
+        }
+        for bad in [
+            "You",
+            "are",
+            "logged",
+            "in",
+            "with",
+            "Default",
+            "Available",
+            "models",
+            "default",
+            "grok.com",
+        ] {
+            assert!(
+                !ids.iter().any(|s| s.eq_ignore_ascii_case(bad)),
+                "prose token {bad:?} leaked into {ids:?}"
+            );
+        }
+        assert_eq!(
+            ids.iter().filter(|s| *s == "grok-4.7").count(),
+            1,
+            "{ids:?}"
+        );
     }
 
     #[test]

@@ -121,6 +121,33 @@ pub fn launch_provider(opts_provider: Option<&str>) -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// Provider the next turn / `/model` list should use — same value as
+/// the footer. Pin / hint / `[tui] providers`, then last run, then the
+/// first enabled provider. Not "last run first" (that disagreed with
+/// `/model` when the session had moved on).
+pub fn session_provider_now(shared: &Shared, key: &str) -> Option<String> {
+    if let Some(p) = tui_provider_now(shared, key) {
+        return Some(p);
+    }
+    if let Ok(runs) = shared.db.list_runs(Some(key)) {
+        if let Some(p) = runs
+            .last()
+            .map(|r| r.provider.clone())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(p);
+        }
+    }
+    shared
+        .config
+        .read()
+        .unwrap()
+        .providers
+        .iter()
+        .find(|p| p.enabled)
+        .map(|p| p.name.clone())
+}
+
 /// Provider this TUI session would use now: session pin, then
 /// `[tui] providers`, else `None` (first available at dispatch).
 pub fn tui_provider_now(shared: &Shared, key: &str) -> Option<String> {
@@ -398,7 +425,10 @@ pub fn preview_line(shared: &Shared, key: &str, line: &str) -> Result<String> {
     match step_line(shared, key, &ws, None, line)? {
         Step::Turn(_) => Ok("turn".into()),
         Step::Note(s) => Ok(format!("note\n{s}")),
-        Step::OpenModelPicker => Ok("model-picker".into()),
+        Step::OpenModelPicker => Ok(format!(
+            "model-picker\n{}",
+            model_picker_text(shared, key, &ws)
+        )),
         Step::OpenProviderPicker => Ok("provider-picker".into()),
         Step::Quit => Ok("quit".into()),
         Step::NativeCli => Ok("cli".into()),
@@ -735,20 +765,9 @@ pub(crate) fn collect_result(shared: &Shared, key: &str) -> TurnResult {
 
 pub fn footer_line(shared: &Shared, key: &str) -> String {
     let cfg = shared.config.read().unwrap().clone();
-    let task = shared.db.get_task(key).ok().flatten();
     let runs = shared.db.list_runs(Some(key)).unwrap_or_default();
     let last = runs.last();
-    let provider = last
-        .map(|r| r.provider.clone())
-        .or_else(|| task.as_ref().and_then(|t| t.provider.clone()))
-        .or_else(|| tui_provider_now(shared, key))
-        .unwrap_or_else(|| {
-            cfg.providers
-                .iter()
-                .find(|p| p.enabled)
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| "—".into())
-        });
+    let provider = session_provider_now(shared, key).unwrap_or_else(|| "—".into());
     let model = session_model(&shared.db, key)
         .or_else(|| last.and_then(|r| r.model.clone()).filter(|s| !s.is_empty()))
         .or_else(|| {
