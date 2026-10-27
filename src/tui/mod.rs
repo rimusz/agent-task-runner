@@ -21,6 +21,7 @@
 //! `atr init`) when config is missing, then continues. Non-TTY / CI
 //! fails with a pointer to `atr init` / `atr init --yes`.
 
+mod history;
 mod proxy;
 mod slash;
 mod ui;
@@ -330,7 +331,7 @@ pub(crate) fn step_line(
     line: &str,
 ) -> Result<Step> {
     let line = line.trim();
-    if line.is_empty() {
+    if line.is_empty() || slash::is_bare_slash(line) {
         return Ok(Step::Note(String::new()));
     }
     match slash::parse_slash(line) {
@@ -397,7 +398,11 @@ fn model_picker_text(shared: &Shared, key: &str, ws: &Workspace) -> String {
 
 /// What a TUI line would do. Tests lock `/model` out of the turn path.
 pub fn classify_line(line: &str) -> &'static str {
-    match slash::parse_slash(line.trim()) {
+    let line = line.trim();
+    if slash::is_bare_slash(line) {
+        return "slash-menu";
+    }
+    match slash::parse_slash(line) {
         None => "chat",
         Some(slash::Slash::Help) => "help",
         Some(slash::Slash::Quit) => "quit",
@@ -856,6 +861,8 @@ mod tests {
         assert_eq!(classify_line("/compact"), "proxy");
         assert_eq!(classify_line("hello"), "chat");
         assert_eq!(classify_line("/provider"), "provider");
+        assert_eq!(classify_line("/"), "slash-menu");
+        assert_eq!(classify_line(" / "), "slash-menu");
     }
 
     #[test]

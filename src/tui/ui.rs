@@ -3,6 +3,7 @@
 //! Does not open the alternate screen for `atr ask`. Slash handling is
 //! [`super::step_line`] — atr-local host commands plus provider proxy.
 
+use super::history::InputHistory;
 use super::proxy;
 use super::slash;
 use super::{
@@ -90,12 +91,26 @@ struct App {
     follow: bool,
     busy: bool,
     picker: Option<Picker>,
+    slash_menu: Option<SlashMenu>,
+    history: InputHistory,
     status: String,
+}
+
+struct SlashMenu {
+    items: Vec<SlashRow>,
+    state: ListState,
+}
+
+struct SlashRow {
+    name: String,
+    hint: String,
 }
 
 struct Picker {
     title: String,
     items: Vec<String>,
+    all: Vec<String>,
+    filter: String,
     state: ListState,
     kind: PickerKind,
 }
@@ -122,7 +137,7 @@ struct Msg {
 impl App {
     fn new(shared: &Shared, key: &str) -> Self {
         let welcome = format!(
-            "{}\nType a message. /help lists atr commands; other /slashes go to the provider.",
+            "{}\nType a message. / for atr commands · ↑↓ history · /cli for the provider TUI.",
             super::banner_text(shared, key).trim_end()
         );
         Self {
@@ -136,6 +151,8 @@ impl App {
             follow: true,
             busy: false,
             picker: None,
+            slash_menu: None,
+            history: InputHistory::default(),
             status: footer_line(shared, key),
         }
     }
@@ -234,30 +251,37 @@ fn handle_key(
     ev: KeyEvent,
 ) -> Result<Option<LoopEnd>> {
     if ev.modifiers.contains(KeyModifiers::CONTROL) && matches!(ev.code, KeyCode::Char('c')) {
-        return Ok(Some(LoopEnd::Quit(ExitCode::SUCCESS)));
+        return ctrl_c(app, shared, key);
+    }
+    if ev.modifiers.contains(KeyModifiers::CONTROL) && matches!(ev.code, KeyCode::Char('d')) {
+        if app.input.is_empty() && app.picker.is_none() {
+            return Ok(Some(LoopEnd::Quit(ExitCode::SUCCESS)));
+        }
+        return Ok(None);
+    }
+    if matches!(ev.code, KeyCode::Esc) {
+        if app.picker.take().is_some() || app.slash_menu.take().is_some() {
+            return Ok(None);
+        }
+        return Ok(None);
     }
     if app.picker.is_some() {
         return handle_picker(app, shared, key, ws, ev);
     }
     match ev.code {
-        KeyCode::Enter => {
-            if app.busy {
-                return Ok(None);
-            }
-            let line = app.input.clone();
-            app.input.clear();
-            app.cursor = 0;
-            if line.trim().is_empty() {
-                return Ok(None);
-            }
-            submit_line(app, shared, key, ws, pin, &line)
+        KeyCode::Enter => submit_or_queue(app, shared, key, ws, pin),
+        KeyCode::Tab => {
+            complete_slash(app);
+            Ok(None)
         }
         KeyCode::Backspace => {
             delete_prev(app);
+            refresh_slash_menu(app);
             Ok(None)
         }
         KeyCode::Delete => {
             delete_next(app);
+            refresh_slash_menu(app);
             Ok(None)
         }
         KeyCode::Left => {
@@ -276,12 +300,30 @@ fn handle_key(
             app.cursor = app.input.len();
             Ok(None)
         }
-        KeyCode::Up | KeyCode::PageUp => {
+        KeyCode::Up => {
+            if !slash_nav(app, -1) {
+                if let Some(line) = app.history.up(&app.input) {
+                    set_input(app, &line);
+                    refresh_slash_menu(app);
+                }
+            }
+            Ok(None)
+        }
+        KeyCode::Down => {
+            if !slash_nav(app, 1) {
+                if let Some(line) = app.history.down() {
+                    set_input(app, &line);
+                    refresh_slash_menu(app);
+                }
+            }
+            Ok(None)
+        }
+        KeyCode::PageUp => {
             app.follow = false;
             app.scroll = app.scroll.saturating_add(3);
             Ok(None)
         }
-        KeyCode::Down | KeyCode::PageDown => {
+        KeyCode::PageDown => {
             if app.scroll <= 3 {
                 app.scroll = 0;
                 app.follow = true;
@@ -291,16 +333,148 @@ fn handle_key(
             Ok(None)
         }
         KeyCode::Char('u') if ev.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.input.clear();
-            app.cursor = 0;
+            set_input(app, "");
+            refresh_slash_menu(app);
             Ok(None)
         }
         KeyCode::Char(c) => {
             insert_char(app, c);
+            refresh_slash_menu(app);
             Ok(None)
         }
         _ => Ok(None),
     }
+}
+
+fn ctrl_c(app: &mut App, shared: &Shared, key: &str) -> Result<Option<LoopEnd>> {
+    if app.busy {
+        match shared.cancel(key, true) {
+            Ok(()) => {
+                app.busy = false;
+                app.push(Role::Error, "cancelled turn");
+                app.status = footer_line(shared, key);
+            }
+            Err(e) => app.push(Role::Error, format!("{e:#}")),
+        }
+        return Ok(None);
+    }
+    app.slash_menu = None;
+    if !app.input.is_empty() {
+        set_input(app, "");
+    }
+    Ok(None)
+}
+
+fn submit_or_queue(
+    app: &mut App,
+    shared: &Shared,
+    key: &str,
+    ws: &Workspace,
+    pin: Option<&str>,
+) -> Result<Option<LoopEnd>> {
+    if let Some(cmd) = take_slash_selection(app) {
+        app.history.push(&cmd);
+        set_input(app, "");
+        return submit_line(app, shared, key, ws, pin, &cmd);
+    }
+    let line = app.input.clone();
+    set_input(app, "");
+    app.slash_menu = None;
+    let trimmed = line.trim();
+    if trimmed.is_empty() || slash::is_bare_slash(trimmed) {
+        return Ok(None);
+    }
+    app.history.push(trimmed);
+    if app.busy {
+        match slash::parse_slash(trimmed) {
+            Some(slash::Slash::Help)
+            | Some(slash::Slash::Quit)
+            | Some(slash::Slash::Status)
+            | Some(slash::Slash::New)
+            | Some(slash::Slash::Provider(_))
+            | Some(slash::Slash::Model(_))
+            | Some(slash::Slash::Cli) => {
+                return submit_line(app, shared, key, ws, pin, trimmed);
+            }
+            _ => {
+                enqueue_turn(shared, key, ws, trimmed, pin)?;
+                app.push(Role::You, trimmed);
+                app.push(Role::System, "queued · runs after this turn");
+                return Ok(None);
+            }
+        }
+    }
+    submit_line(app, shared, key, ws, pin, trimmed)
+}
+
+fn set_input(app: &mut App, s: &str) {
+    app.input = s.to_string();
+    app.cursor = app.input.len();
+}
+
+fn refresh_slash_menu(app: &mut App) {
+    let hits = slash::filter_host_commands(&app.input);
+    if hits.is_empty() {
+        app.slash_menu = None;
+        return;
+    }
+    let keep = app
+        .slash_menu
+        .as_ref()
+        .and_then(|m| m.state.selected())
+        .and_then(|i| m_name_at(app, i));
+    let items: Vec<SlashRow> = hits
+        .into_iter()
+        .map(|c| SlashRow {
+            name: c.name.to_string(),
+            hint: c.hint.to_string(),
+        })
+        .collect();
+    let sel = keep
+        .and_then(|n| items.iter().position(|r| r.name == n))
+        .unwrap_or(0);
+    let mut state = ListState::default();
+    state.select(Some(sel));
+    app.slash_menu = Some(SlashMenu { items, state });
+}
+
+fn m_name_at(app: &App, i: usize) -> Option<String> {
+    app.slash_menu
+        .as_ref()
+        .and_then(|m| m.items.get(i).map(|r| r.name.clone()))
+}
+
+fn slash_nav(app: &mut App, delta: i32) -> bool {
+    let Some(menu) = app.slash_menu.as_mut() else {
+        return false;
+    };
+    if menu.items.is_empty() {
+        return false;
+    }
+    let i = menu.state.selected().unwrap_or(0) as i32;
+    let n = menu.items.len() as i32;
+    let next = (i + delta).clamp(0, n - 1) as usize;
+    menu.state.select(Some(next));
+    true
+}
+
+fn take_slash_selection(app: &mut App) -> Option<String> {
+    let menu = app.slash_menu.take()?;
+    let i = menu.state.selected().unwrap_or(0);
+    menu.items.get(i).map(|r| r.name.clone())
+}
+
+fn complete_slash(app: &mut App) {
+    let Some(menu) = app.slash_menu.as_ref() else {
+        return;
+    };
+    let i = menu.state.selected().unwrap_or(0);
+    let Some(name) = menu.items.get(i).map(|r| r.name.clone()) else {
+        return;
+    };
+    let with_space = matches!(name.as_str(), "/model" | "/provider");
+    set_input(app, &if with_space { format!("{name} ") } else { name });
+    refresh_slash_menu(app);
 }
 
 fn handle_picker(
@@ -314,14 +488,20 @@ fn handle_picker(
         return Ok(None);
     };
     match ev.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.picker = None;
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up | KeyCode::Char('k') if picker.filter.is_empty() => {
             let i = picker.state.selected().unwrap_or(0);
             picker.state.select(Some(i.saturating_sub(1)));
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down | KeyCode::Char('j') if picker.filter.is_empty() => {
+            let i = picker.state.selected().unwrap_or(0);
+            let n = picker.items.len().saturating_sub(1);
+            picker.state.select(Some((i + 1).min(n)));
+        }
+        KeyCode::Up => {
+            let i = picker.state.selected().unwrap_or(0);
+            picker.state.select(Some(i.saturating_sub(1)));
+        }
+        KeyCode::Down => {
             let i = picker.state.selected().unwrap_or(0);
             let n = picker.items.len().saturating_sub(1);
             picker.state.select(Some((i + 1).min(n)));
@@ -334,7 +514,11 @@ fn handle_picker(
                 picker_apply(app, shared, key, ws, kind, &name)?;
             }
         }
-        KeyCode::Char(c) if c.is_ascii_digit() => {
+        KeyCode::Backspace => {
+            picker.filter.pop();
+            apply_picker_filter(picker);
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() && picker.filter.is_empty() => {
             let n = c.to_digit(10).unwrap_or(0) as usize;
             if n >= 1 && n <= picker.items.len() {
                 let name = picker.items[n - 1].clone();
@@ -343,9 +527,23 @@ fn handle_picker(
                 picker_apply(app, shared, key, ws, kind, &name)?;
             }
         }
+        KeyCode::Char(c) => {
+            picker.filter.push(c);
+            apply_picker_filter(picker);
+        }
         _ => {}
     }
     Ok(None)
+}
+
+fn apply_picker_filter(picker: &mut Picker) {
+    picker.items = slash::filter_names(&picker.all, &picker.filter);
+    if picker.items.is_empty() {
+        picker.state.select(None);
+    } else {
+        let i = picker.state.selected().unwrap_or(0);
+        picker.state.select(Some(i.min(picker.items.len() - 1)));
+    }
 }
 
 fn picker_apply(
@@ -410,13 +608,15 @@ fn apply_step(
             let sel = list.iter().position(|p| p.current).unwrap_or(0);
             let mut state = ListState::default();
             state.select(Some(sel));
+            let items: Vec<String> = list.iter().map(|p| p.name.clone()).collect();
             app.picker = Some(Picker {
-                title: "Provider  (Enter / number · Esc cancel)".into(),
-                items: list.iter().map(|p| p.name.clone()).collect(),
+                title: "Provider  (Enter / type to find · Esc)".into(),
+                items: items.clone(),
+                all: items,
+                filter: String::new(),
                 state,
                 kind: PickerKind::Provider,
             });
-            app.push(Role::System, slash::format_provider_list(&list));
             Ok(None)
         }
         Step::OpenModelPicker => {
@@ -434,9 +634,12 @@ fn apply_step(
             let sel = list.iter().position(|m| m.current).unwrap_or(0);
             let mut state = ListState::default();
             state.select(Some(sel));
+            let items: Vec<String> = list.iter().map(|m| m.name.clone()).collect();
             app.picker = Some(Picker {
-                title: "Model  (Enter / number · Esc cancel)".into(),
-                items: list.iter().map(|m| m.name.clone()).collect(),
+                title: "Model  (Enter / type to find · Esc)".into(),
+                items: items.clone(),
+                all: items,
+                filter: String::new(),
                 state,
                 kind: PickerKind::Model,
             });
@@ -461,22 +664,24 @@ fn sync_model_picker(app: &mut App, shared: &Shared, key: &str, ws: &Workspace) 
     }
     let list = proxy::collect_models(shared, key, ws, proxy::CliFetch::Cached);
     let names: Vec<String> = list.iter().map(|m| m.name.clone()).collect();
-    if names == picker.items {
+    if names == picker.all {
         return;
     }
     let keep = picker
         .state
         .selected()
         .and_then(|i| picker.items.get(i).cloned());
-    picker.items = names;
-    let sel = keep
-        .and_then(|n| picker.items.iter().position(|x| *x == n))
-        .or_else(|| list.iter().position(|m| m.current))
-        .unwrap_or(0);
-    if picker.items.is_empty() {
-        picker.state.select(None);
-    } else {
-        picker.state.select(Some(sel.min(picker.items.len() - 1)));
+    picker.all = names;
+    apply_picker_filter(picker);
+    if let Some(n) = keep {
+        if let Some(i) = picker.items.iter().position(|x| *x == n) {
+            picker.state.select(Some(i));
+        }
+    } else if let Some(i) = list.iter().position(|m| m.current) {
+        let name = list[i].name.clone();
+        if let Some(j) = picker.items.iter().position(|x| *x == name) {
+            picker.state.select(Some(j));
+        }
     }
 }
 
@@ -569,11 +774,7 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str) {
         chunks[2],
     );
 
-    let hint = if app.busy {
-        "working…  ↑↓ scroll  Ctrl-C quit"
-    } else {
-        "message or /help   ↑↓ scroll  Ctrl-C quit"
-    };
+    let hint = composer_hint(app);
     let input = Paragraph::new(format!("› {}", app.input)).block(
         Block::default()
             .borders(Borders::TOP)
@@ -581,6 +782,10 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str) {
             .border_style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(input, chunks[3]);
+
+    if let Some(menu) = &app.slash_menu {
+        draw_slash_menu(f, chunks[1], chunks[3], menu);
+    }
 
     if let Some(picker) = &app.picker {
         let pop = centered(chunks[1], picker.items.len() as u16 + 2);
@@ -591,12 +796,13 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str) {
             .enumerate()
             .map(|(i, n)| ListItem::new(format!(" {:>2}  {n}", i + 1)))
             .collect();
+        let title = if picker.filter.is_empty() {
+            picker.title.clone()
+        } else {
+            format!("{}  /{}", picker.title, picker.filter)
+        };
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .title(picker.title.as_str())
-                    .borders(Borders::ALL),
-            )
+            .block(Block::default().title(title).borders(Borders::ALL))
             .highlight_style(
                 Style::default()
                     .fg(Color::Black)
@@ -611,6 +817,56 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str) {
         .min(chunks[3].right().saturating_sub(1));
     let cur_y = chunks[3].y + 1;
     f.set_cursor_position((cur_x, cur_y));
+}
+
+fn composer_hint(app: &App) -> String {
+    if app.picker.is_some() {
+        return "↵ pick  type to find  Esc".into();
+    }
+    if app.slash_menu.is_some() {
+        return "↵ apply  Tab complete  ↑↓  Esc".into();
+    }
+    if app.busy {
+        return "↵ queue  ^C cancel turn  PgUp scroll".into();
+    }
+    if !app.follow {
+        return "↑↓ history  PgDn latest  / commands".into();
+    }
+    "↵ send  ↑↓ history  / commands  PgUp scroll  ^D quit".into()
+}
+
+fn draw_slash_menu(f: &mut Frame, body: Rect, input: Rect, menu: &SlashMenu) {
+    let h = (menu.items.len() as u16 + 2)
+        .min(body.height.saturating_sub(1))
+        .max(3);
+    let y = input.y.saturating_sub(h);
+    let pop = Rect {
+        x: input.x,
+        y: y.max(body.y),
+        width: input.width,
+        height: h,
+    };
+    f.render_widget(Clear, pop);
+    let items: Vec<ListItem> = menu
+        .items
+        .iter()
+        .map(|r| ListItem::new(format!("  {:<10}  {}", r.name, r.hint)))
+        .collect();
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(" commands ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = menu.state.clone();
+    f.render_stateful_widget(list, pop, &mut state);
 }
 
 fn transcript_lines(app: &App) -> Vec<Line<'static>> {

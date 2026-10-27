@@ -69,7 +69,8 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   `--model` override from config / detect / a cached CLI `models` catalog
   (Grok/OpenCode; refresh is off the UI thread for every kind) — never
   forwarded as a headless chat prompt. The TUI overlay does not dump the
-  catalog into the transcript. Other `/…` lines may be proxied. `/cli`
+  catalog into the transcript. `/` opens an atr-local command menu; ↑/↓
+  in the composer walk input history. Other `/…` lines may be proxied. `/cli`
   opens the provider's own interactive TUI. A full PTY host of the vendor
   TUI is out of scope: atr still spawns print-mode / `exec` / `run` per
   turn.

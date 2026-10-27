@@ -7,6 +7,110 @@
 use crate::app::Shared;
 use crate::tui::tui_provider_now;
 
+/// Atr-local host commands shown in the `/` autocomplete menu.
+/// Order is the display order (Grok-style).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HostCommand {
+    pub name: &'static str,
+    pub aliases: &'static [&'static str],
+    pub hint: &'static str,
+}
+
+pub(crate) const HOST_COMMANDS: &[HostCommand] = &[
+    HostCommand {
+        name: "/provider",
+        aliases: &[],
+        hint: "list / pick atr providers",
+    },
+    HostCommand {
+        name: "/model",
+        aliases: &["/m"],
+        hint: "session model (next --model)",
+    },
+    HostCommand {
+        name: "/status",
+        aliases: &[],
+        hint: "session · provider · tokens",
+    },
+    HostCommand {
+        name: "/new",
+        aliases: &[],
+        hint: "fresh atr session",
+    },
+    HostCommand {
+        name: "/cli",
+        aliases: &["/native"],
+        hint: "open the provider's own TUI",
+    },
+    HostCommand {
+        name: "/help",
+        aliases: &["/?"],
+        hint: "atr host commands",
+    },
+    HostCommand {
+        name: "/quit",
+        aliases: &["/q", "/exit"],
+        hint: "leave atr",
+    },
+];
+
+pub(crate) fn is_bare_slash(line: &str) -> bool {
+    line.trim() == "/"
+}
+
+/// Prefix + fuzzy filter for the `/` menu. Empty when the line is not
+/// an in-progress atr-local command (has args, or is a provider slash).
+pub(crate) fn filter_host_commands(typed: &str) -> Vec<&'static HostCommand> {
+    let q = typed.trim();
+    if !q.starts_with('/') || q.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let mut hits: Vec<&HostCommand> = HOST_COMMANDS.iter().filter(|c| cmd_matches(c, q)).collect();
+    hits.sort_by_key(|c| {
+        let prefix = c.name.starts_with(q) || c.aliases.iter().any(|a| a.starts_with(q));
+        (!prefix, c.name)
+    });
+    hits
+}
+
+fn cmd_matches(c: &HostCommand, q: &str) -> bool {
+    if q == "/" {
+        return true;
+    }
+    std::iter::once(c.name)
+        .chain(c.aliases.iter().copied())
+        .any(|n| n.starts_with(q) || fuzzy_subseq(n, q))
+}
+
+pub(crate) fn fuzzy_subseq(name: &str, q: &str) -> bool {
+    let mut it = name.chars();
+    for qc in q.chars() {
+        loop {
+            match it.next() {
+                Some(c) if c.eq_ignore_ascii_case(&qc) => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
+pub(crate) fn filter_names(names: &[String], q: &str) -> Vec<String> {
+    if q.is_empty() {
+        return names.to_vec();
+    }
+    let ql = q.to_ascii_lowercase();
+    names
+        .iter()
+        .filter(|n| {
+            let nl = n.to_ascii_lowercase();
+            nl.contains(&ql) || fuzzy_subseq(&nl, &ql)
+        })
+        .cloned()
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Slash {
     Help,
@@ -254,6 +358,46 @@ mod tests {
         assert!(h.contains("/cli"), "{h}");
         assert!(!h.contains("unknown command"), "{h}");
         assert!(!h.contains("Claude's `/model` works in print mode"), "{h}");
+    }
+
+    #[test]
+    fn slash_menu_filters_atr_local_only() {
+        let all = filter_host_commands("/");
+        assert_eq!(all.len(), HOST_COMMANDS.len(), "{all:?}");
+        assert!(all.iter().any(|c| c.name == "/model"));
+        assert!(all.iter().any(|c| c.name == "/provider"));
+        assert!(all.iter().any(|c| c.name == "/quit"));
+
+        let m = filter_host_commands("/m");
+        assert!(m.iter().any(|c| c.name == "/model"), "{m:?}");
+        assert!(m.iter().all(|c| c.name == "/model"), "{m:?}");
+
+        let q = filter_host_commands("/q");
+        assert!(q.iter().any(|c| c.name == "/quit"), "{q:?}");
+
+        let fuzzy = filter_host_commands("/prv");
+        assert!(fuzzy.iter().any(|c| c.name == "/provider"), "{fuzzy:?}");
+
+        assert!(filter_host_commands("/compact").is_empty());
+        assert!(filter_host_commands("/model grok").is_empty());
+        assert!(filter_host_commands("hello").is_empty());
+        assert!(is_bare_slash(" / "));
+        assert!(!is_bare_slash("/model"));
+    }
+
+    #[test]
+    fn filter_names_type_to_find() {
+        let names = vec![
+            "grok-4.7".into(),
+            "grok-4.7-build-fast".into(),
+            "sonnet".into(),
+        ];
+        assert_eq!(filter_names(&names, "").len(), 3);
+        let grok = filter_names(&names, "grok-4.7");
+        assert!(grok.iter().any(|s| s == "grok-4.7"));
+        assert!(grok.iter().any(|s| s == "grok-4.7-build-fast"));
+        assert!(!grok.iter().any(|s| s == "sonnet"));
+        assert_eq!(filter_names(&names, "son").as_slice(), ["sonnet"]);
     }
 
     #[test]
