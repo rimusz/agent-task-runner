@@ -58,14 +58,18 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   directory and copied into the worktree by filename once the tree exists.
 - **CLI:** `atr add` (prompt + `--dir` / `--repo` / neither) and `atr submit`.
 - **TUI / ask:** a bare `atr` (or `atr tui`) is an interactive in-process
-  chat (transcript + footer). `atr ask "prompt"` is the one-shot / CI
-  entrypoint on the same engine. A session is a normal task keyed
-  `cli-<name>` (default `cli-default`), separate from Telegram `tg<chat>`.
-  Serve is not required and never auto-dispatches `cli-*` keys — serve
-  owns daemon work; the TUI / `ask` process owns those sessions.
-  Provider: session pin → `--provider` → optional `[tui] providers` →
-  global `[[provider]]` order. `/provider` and `/model` stick for the
-  session and reuse the existing handoff on switch.
+  chat TUI (ratatui transcript + footer + input). `atr ask "prompt"` is
+  the one-shot / CI entrypoint on the same engine (no alternate screen).
+  A session is a normal task keyed `cli-<name>` (default `cli-default`),
+  separate from Telegram `tg<chat>`. Serve is not required and never
+  auto-dispatches `cli-*` keys — serve owns daemon work; the TUI / `ask`
+  process owns those sessions. Provider: session pin → `--provider` →
+  optional `[tui] providers` → global `[[provider]]` order. `/provider`
+  is atr-local (list/pick). Other `/…` lines are proxied to the selected
+  provider CLI (headless turn, or that CLI's non-interactive control such
+  as `grok models` / `--model`). `/cli` opens the provider's own
+  interactive TUI. A full PTY host of the vendor TUI is out of scope:
+  atr still spawns print-mode / `exec` / `run` per turn.
 - **MCP:** `atr mcp` is stdio (local agents or SSH). Streamable HTTP is
   `POST /mcp` on the existing listener (localhost by default; Tailscale bind
   is optional). HTTP requires a bearer token from `mcp.token_env` (default

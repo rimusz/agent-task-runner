@@ -30,7 +30,7 @@ Other agents and scripts can also hand it work through MCP, the HTTP API, Telegr
 
 ### Terminal TUI (`atr tui`)
 
-A thin terminal session: transcript plus a status footer (provider / model / tokens / cache hit % when known). It does **not** clone the dashboard and does **not** share history with Telegram. A bare `atr` (no subcommand) is the same as `atr tui` (interactive). `atr ask "prompt"` is the documented one-shot / CI entrypoint: one turn, print the answer, exit non-zero on failure. `atr serve` stays an explicit subcommand.
+An interactive chat TUI (ratatui): scrollable transcript, status footer (session / provider / model / tokens / cache when known), and an input line. It does **not** clone the dashboard and does **not** share history with Telegram. A bare `atr` (no subcommand) is the same as `atr tui`. `atr ask "prompt"` is the documented one-shot / CI entrypoint: one turn, print the answer, no alternate screen. Without a TTY, `atr` / `atr tui` stay in line mode. `atr serve` stays an explicit subcommand.
 
 ```bash
 atr ask "what is 2+2?"                 # one-shot / CI
@@ -52,7 +52,7 @@ Provider for a TUI / `ask` session: session pin (`/provider` or `--provider`) �
 | `--dir` / `--repo` | Workspace; omit for answer-only |
 | `--new` | Drop the previous `cli-<name>` task |
 
-Interactive commands: `/help` `/status` `/provider <name>` `/model <name>` `/new` `/quit`. The first screen also shows session key, next provider, the configured provider list, and whether the user service is loaded.
+atr is a session host, not a second slash dialect. `/provider` (list/pick), `/new`, `/quit`, `/status`, `/help`, and `/cli` are atr-local. Every other `/…` (including `/model`, `/compact`, `/plan`, skills) is proxied to the selected provider CLI on the next headless turn. Claude honors `/model` in print mode (`-p`). Grok's `/model` picker is TUI-only — `/model` with no args runs `grok models`, `/model <id>` maps to `--model` for the next spawn, and `/cli` opens grok's own interactive TUI (resume when atr has a session id). OpenCode is the same via `opencode models`. atr never says "unknown command" for a slash. `/atr …` namespaces the host commands if a provider slash collides.
 
 ### First run
 

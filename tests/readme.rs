@@ -441,6 +441,12 @@ fn readme_headings_and_commands_match_help() {
         "/model",
         "/new",
         "/quit",
+        "/cli",
+        "/status",
+        "/help",
+        "/atr",
+        "/compact",
+        "/plan",
     ];
     for cmd in extract_slash_commands(&readme) {
         if IGNORE_SLASH.contains(&cmd.as_str()) {

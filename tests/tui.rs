@@ -385,6 +385,48 @@ fn bare_atr_launches_tui() {
 }
 
 #[test]
+fn line_mode_slashes_are_not_unknown_command() {
+    let (dir, cfg) = setup_bin_cfg();
+    let mut child = atr()
+        .env("ATR_CONFIG", &cfg)
+        .env("HOME", dir.path().join("home"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, "/help").unwrap();
+        writeln!(stdin, "/provider").unwrap();
+        writeln!(stdin, "/model").unwrap();
+        writeln!(stdin, "/compact").unwrap();
+        writeln!(stdin, "/quit").unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(!text.contains("unknown command"), "{text}");
+    assert!(text.contains("Chat"), "{text}");
+    assert!(
+        text.contains("Provider CLI") || text.contains("/cli"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Providers") || text.contains("/provider"),
+        "{text}"
+    );
+    assert!(
+        text.contains("test-model") || text.contains("--model") || text.contains("/model"),
+        "{text}"
+    );
+}
+
+#[test]
 fn atr_ask_oneshot_success() {
     let (dir, cfg) = setup_bin_cfg();
     let out = atr()

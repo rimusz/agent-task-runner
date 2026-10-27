@@ -114,7 +114,7 @@ gh issue edit 12 --add-label for:atr
 - **Grok Bot operator**: import the [atr Operator](https://x.ai/bot/oDG33vy41WVZKy-HFKVk0) bot template to queue work and watch atr from Grok Bot.
 - **Inbox folder**: scripts drop a task file and atr runs it. [More](docs/USAGE.md#hand-work-to-atr)
 - **Telegram**: add tasks and check progress from your phone. [More](docs/USE-CASES.md#7-control-from-your-phone)
-- **Terminal TUI**: a bare `atr` (or `atr tui`) is an interactive session. `atr ask "prompt"` is the one-shot / CI entrypoint (no `atr serve`). [More](docs/USAGE.md#terminal-tui-atr-tui)
+- **Terminal TUI**: a bare `atr` (or `atr tui`) is an interactive chat UI (transcript, footer, slash proxy to the provider CLI). `atr ask "prompt"` is the one-shot / CI entrypoint (no `atr serve`). [More](docs/USAGE.md#terminal-tui-atr-tui)
 
 ## Providers
 

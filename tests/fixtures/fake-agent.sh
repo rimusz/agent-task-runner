@@ -17,6 +17,12 @@ if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "models" ]]; then
+  echo "test-model"
+  echo "test-model-2"
+  exit 0
+fi
+
 if [[ "$KIND" == "opencode" && "${1:-}" == "auth" ]]; then
   echo "moonshotai"
   exit 0

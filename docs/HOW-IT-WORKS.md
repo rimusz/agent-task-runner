@@ -13,7 +13,10 @@ A `[[provider]]` block can be just `name` + `kind`. CLI path, flags, and
 `reported_usage` are filled from the kind. Order in the file is the failover
 order. A bare `atr` / `atr tui` / `atr ask` follows the session pin, then
 `--provider`, then optional `[tui] providers`, then this list. Serve
-never auto-dispatches `cli-*` TUI sessions.
+never auto-dispatches `cli-*` TUI sessions. The TUI is a session host:
+`/provider` `/new` `/quit` `/status` `/help` `/cli` stay in atr; other
+`/…` lines are proxied to the selected provider CLI (headless turn, or
+that CLI's `models` / `--model` control). `/cli` opens the vendor TUI.
 
 `atr init` and `atr providers detect` look on `PATH` and common install dirs
 (`~/.local/bin`, `~/.claude/local`, `~/.cursor/bin`, `~/.opencode/bin`,

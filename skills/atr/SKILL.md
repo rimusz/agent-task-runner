@@ -21,7 +21,7 @@ Secrets live in `~/.config/atr/shadow.env` (mode 0600), never in config.
 
 ## Terminal TUI
 
-A bare `atr` (or `atr tui`) is an interactive in-process chat (transcript + footer). `atr ask "prompt"` is the one-shot / CI entrypoint on the same engine. Serve is not required and never auto-dispatches `cli-*` sessions. Sessions are tasks keyed `cli-<name>` (default `cli-default`), separate from Telegram. First run: bare `atr` → init offer → service ask → TUI. Scripts: `atr init --yes` then `atr ask`. No TTY never auto-inits.
+A bare `atr` (or `atr tui`) is an interactive in-process chat TUI (transcript + footer + input). `atr ask "prompt"` is the one-shot / CI entrypoint on the same engine (no alternate screen). Serve is not required and never auto-dispatches `cli-*` sessions. Sessions are tasks keyed `cli-<name>` (default `cli-default`), separate from Telegram. Slash: `/provider` `/new` `/quit` `/status` `/help` `/cli` are atr-local; every other `/…` is proxied to the selected provider CLI (Claude `/model` in `-p`; Grok `grok models` / `--model` / `/cli` for the TUI picker). First run: bare `atr` → init offer → service ask → TUI. Scripts: `atr init --yes` then `atr ask`. No TTY never auto-inits.
 
 ```bash
 atr ask "what is 2+2?"       # one-shot / CI
@@ -29,7 +29,7 @@ atr                          # interactive TUI; /quit to leave
 atr tui --session work --provider grok
 ```
 
-Mid-session `/provider` and `/model` stick for that session and trigger the existing handoff on switch. `atr serve` stays an explicit subcommand.
+Mid-session `/provider` sticks and triggers the existing handoff on switch. `/model <id>` maps to the CLI `--model` flag for the next turn. `atr serve` stays an explicit subcommand.
 
 ## Telegram assistant (this chat)
 

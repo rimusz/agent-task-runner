@@ -11,9 +11,19 @@
 //! auto-dispatches `cli-*` keys. The TUI / `ask` process owns those
 //! sessions via [`crate::scheduler::dispatch_key`].
 //!
+//! The interactive UI is a session host: transcript, footer, input.
+//! atr-local slashes are `/provider`, `/new`, `/quit`, `/status`,
+//! `/help`, `/cli`. Every other `/…` is proxied to the selected
+//! provider CLI (headless turn, or that CLI's non-interactive control).
+//! `atr ask` never opens the alternate screen.
+//!
 //! First run on a TTY offers [`crate::init::ensure_config`] (the normal
 //! `atr init`) when config is missing, then continues. Non-TTY / CI
 //! fails with a pointer to `atr init` / `atr init --yes`.
+
+mod proxy;
+mod slash;
+mod ui;
 
 use crate::app::{Shared, SubmitOpts};
 use crate::db::Db;
@@ -56,6 +66,21 @@ pub struct TurnResult {
     pub footer: String,
     pub provider: String,
     pub model: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Workspace {
+    pub kind: WorkspaceKind,
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Step {
+    Quit,
+    Note(String),
+    Turn(String),
+    OpenProviderPicker,
+    NativeCli,
 }
 
 pub fn is_tui_key(key: &str) -> bool {
@@ -126,7 +151,7 @@ pub fn session_model(db: &Db, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Apply a stored `/model` override onto the provider used for this turn.
+/// Apply a stored `/model <id>` override onto the provider used for this turn.
 pub fn apply_session_model(provider: &mut crate::config::Provider, db: &Db, key: &str) {
     if let Some(m) = session_model(db, key) {
         provider.model = m;
@@ -178,10 +203,14 @@ pub async fn run(shared: Arc<Shared>, opts: TuiOpts) -> Result<ExitCode> {
     interactive(shared, key, ws, pin).await
 }
 
-/// One-shot path used by `atr ask`. Never opens the interactive REPL.
+/// One-shot path used by `atr ask`. Never opens the interactive TUI.
 pub async fn run_oneshot(shared: Arc<Shared>, mut opts: TuiOpts) -> Result<ExitCode> {
     opts.require_prompt = true;
     run(shared, opts).await
+}
+
+fn interactive_tty() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 async fn interactive(
@@ -190,14 +219,31 @@ async fn interactive(
     ws: Workspace,
     pin: Option<String>,
 ) -> Result<ExitCode> {
+    if interactive_tty() {
+        match ui::run(shared.clone(), key.clone(), ws.clone(), pin.clone()).await {
+            Ok(code) => return Ok(code),
+            Err(e) => {
+                eprintln!("tui: {e:#}; falling back to line mode");
+            }
+        }
+    }
+    line_interactive(shared, key, ws, pin).await
+}
+
+async fn line_interactive(
+    shared: Arc<Shared>,
+    key: String,
+    ws: Workspace,
+    pin: Option<String>,
+) -> Result<ExitCode> {
     let tty = std::io::stdin().is_terminal();
     if tty {
-        print_banner(&shared, &key)?;
+        eprint!("{}", banner_text(&shared, &key));
     }
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     loop {
         if tty {
-            eprint!("> ");
+            eprint!("› ");
             let _ = std::io::stderr().flush();
         }
         let Some(line) = lines.next_line().await? else {
@@ -207,40 +253,31 @@ async fn interactive(
         if line.is_empty() {
             continue;
         }
-        match parse_slash(&line) {
-            Some(Slash::Quit) => break,
-            Some(Slash::Help) => {
-                println!("{}", slash_help());
-                continue;
-            }
-            Some(Slash::Status) => {
-                println!("{}", footer_line(&shared, &key));
-                continue;
-            }
-            Some(Slash::New) => {
-                reset_session(&shared, &key)?;
-                if let Some(p) = pin.as_deref() {
-                    pin_session_provider(&shared, &key, p)?;
+        match step_line(&shared, &key, &ws, pin.as_deref(), &line)? {
+            Step::Quit => break,
+            Step::Note(msg) => {
+                if !msg.is_empty() {
+                    println!("{msg}");
                 }
-                println!("new session {key}");
-                continue;
             }
-            Some(Slash::Provider(name)) => {
-                set_session_provider(&shared, &key, &name)?;
-                println!("provider {name} (next turn; handoff if switching)");
-                continue;
+            Step::OpenProviderPicker => {
+                println!(
+                    "{}",
+                    slash::provider_pick_usage(&slash::list_providers(&shared, &key))
+                );
             }
-            Some(Slash::Model(model)) => {
-                shared.db.meta_set(&model_meta_key(&key), &model)?;
-                println!("model {model} (this session)");
-                continue;
+            Step::NativeCli => {
+                if interactive_tty() {
+                    match proxy::run_native_cli(&shared, &key, &ws) {
+                        Ok(msg) => println!("{msg}"),
+                        Err(e) => eprintln!("{e:#}"),
+                    }
+                } else {
+                    println!("{}", native_cli_hint(&shared, &key));
+                }
             }
-            Some(Slash::Unknown(cmd)) => {
-                eprintln!("unknown command {cmd}. {help}", help = slash_help());
-                continue;
-            }
-            None => {
-                let out = run_turn(&shared, &key, &ws, &line, pin.as_deref()).await?;
+            Step::Turn(text) => {
+                let out = run_turn(&shared, &key, &ws, &text, pin.as_deref()).await?;
                 if !out.text.is_empty() {
                     println!("{}", out.text);
                 }
@@ -254,6 +291,72 @@ async fn interactive(
     Ok(ExitCode::SUCCESS)
 }
 
+pub(crate) fn step_line(
+    shared: &Shared,
+    key: &str,
+    ws: &Workspace,
+    pin: Option<&str>,
+    line: &str,
+) -> Result<Step> {
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(Step::Note(String::new()));
+    }
+    match slash::parse_slash(line) {
+        None => Ok(Step::Turn(line.to_string())),
+        Some(slash::Slash::Quit) => Ok(Step::Quit),
+        Some(slash::Slash::Help) => Ok(Step::Note(slash::slash_help().to_string())),
+        Some(slash::Slash::Status) => Ok(Step::Note(footer_line(shared, key))),
+        Some(slash::Slash::New) => {
+            reset_session(shared, key)?;
+            if let Some(p) = pin {
+                pin_session_provider(shared, key, p)?;
+            }
+            Ok(Step::Note(format!("new session {key}")))
+        }
+        Some(slash::Slash::Provider(None)) => Ok(Step::OpenProviderPicker),
+        Some(slash::Slash::Provider(Some(name))) => apply_provider_pick(shared, key, &name),
+        Some(slash::Slash::Cli) => Ok(Step::NativeCli),
+        Some(slash::Slash::Proxy(cmd)) => {
+            if let Some(arg) = slash::model_slash(&cmd) {
+                match proxy::handle_model(shared, key, ws, arg)? {
+                    proxy::ModelAction::Note(s) => Ok(Step::Note(s)),
+                    proxy::ModelAction::Forward(s) => Ok(Step::Turn(s)),
+                }
+            } else {
+                Ok(Step::Turn(cmd))
+            }
+        }
+    }
+}
+
+pub(crate) fn apply_provider_pick(shared: &Shared, key: &str, input: &str) -> Result<Step> {
+    let list = slash::list_providers(shared, key);
+    let names: Vec<String> = list.iter().map(|p| p.name.clone()).collect();
+    match slash::pick_choice(&names, input) {
+        Some(name) => {
+            set_session_provider(shared, key, &name)?;
+            Ok(Step::Note(format!(
+                "provider {name} (next turn; handoff if switching)"
+            )))
+        }
+        None => Ok(Step::Note(format!(
+            "no provider matching {input:?}.\n{}",
+            slash::provider_pick_usage(&list)
+        ))),
+    }
+}
+
+fn native_cli_hint(shared: &Shared, key: &str) -> String {
+    match proxy::current_kind_cli(shared, key) {
+        Some((kind, _, name)) => format!(
+            "/cli needs a TTY so {name} ({kind}) can take over the terminal.\n\
+             Run `{kind}` in a real terminal, or start `atr tui` on a TTY."
+        ),
+        None => "/cli needs a TTY and a provider. /provider first.".into(),
+    }
+}
+
 fn warn_if_no_provider(shared: &Shared, oneshot: bool) -> Result<()> {
     let cfg = shared.config.read().unwrap().clone();
     let Some(msg) = crate::init::no_provider_next_steps(&cfg) else {
@@ -263,7 +366,7 @@ fn warn_if_no_provider(shared: &Shared, oneshot: bool) -> Result<()> {
     if oneshot {
         bail!("{}", msg.trim_end());
     }
-    let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let tty = interactive_tty();
     if !tty {
         bail!("{}", msg.trim_end());
     }
@@ -274,11 +377,6 @@ fn warn_if_no_provider(shared: &Shared, oneshot: bool) -> Result<()> {
     )? {
         bail!("{}", msg.trim_end());
     }
-    Ok(())
-}
-
-fn print_banner(shared: &Shared, key: &str) -> Result<()> {
-    eprint!("{}", banner_text(shared, key));
     Ok(())
 }
 
@@ -294,10 +392,10 @@ pub fn banner_text(shared: &Shared, key: &str) -> String {
         })
         .unwrap_or_else(|| "none".into());
     format!(
-        "atr tui  {footer}\nsession  {key}\nprovider {provider}\nlist     {}\n{}\n{}\n",
+        "atr tui  {footer}\nsession  {key}\nprovider {provider}\nlist     {}\n{}\n\
+         /help · other /slashes go to the provider · /quit\n",
         provider_list_short(&cfg),
         daemon_line(&shared.config_path),
-        slash_help()
     )
 }
 
@@ -339,55 +437,6 @@ fn print_oneshot(out: &TurnResult) -> Result<()> {
     }
     eprintln!("{}", out.footer);
     Ok(())
-}
-
-fn slash_help() -> &'static str {
-    "/help  /status  /provider <name>  /model <name>  /new  /quit"
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Slash {
-    Help,
-    Quit,
-    Status,
-    New,
-    Provider(String),
-    Model(String),
-    Unknown(String),
-}
-
-fn parse_slash(line: &str) -> Option<Slash> {
-    let t = line.trim();
-    if !t.starts_with('/') {
-        return None;
-    }
-    let mut parts = t.split_whitespace();
-    let cmd = parts.next()?;
-    match cmd {
-        "/help" | "/?" => Some(Slash::Help),
-        "/quit" | "/exit" | "/q" => Some(Slash::Quit),
-        "/status" => Some(Slash::Status),
-        "/new" => Some(Slash::New),
-        "/provider" => match parts.next() {
-            Some(n) => Some(Slash::Provider(n.to_string())),
-            None => Some(Slash::Unknown("/provider needs a name".into())),
-        },
-        "/model" => {
-            let rest: Vec<&str> = parts.collect();
-            if rest.is_empty() {
-                Some(Slash::Unknown("/model needs a name".into()))
-            } else {
-                Some(Slash::Model(rest.join(" ")))
-            }
-        }
-        other => Some(Slash::Unknown(other.to_string())),
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Workspace {
-    kind: WorkspaceKind,
-    repo: Option<String>,
 }
 
 fn resolve_workspace(shared: &Shared, opts: &TuiOpts) -> Result<Workspace> {
@@ -456,7 +505,6 @@ fn set_session_provider(shared: &Shared, key: &str, name: &str) -> Result<()> {
         bail!("provider {name:?} is not in config");
     }
     if shared.db.get_task(key)?.is_none() {
-        // Remember until the first prompt creates the task.
         shared.db.meta_set(&format!("tui-pin:{key}"), name)?;
         return Ok(());
     }
@@ -470,10 +518,22 @@ async fn run_turn(
     text: &str,
     launch_pin: Option<&str>,
 ) -> Result<TurnResult> {
+    enqueue_turn(shared, key, ws, text, launch_pin)?;
+    wait_turn(shared, key).await?;
+    Ok(collect_result(shared, key))
+}
+
+pub(crate) fn enqueue_turn(
+    shared: &Shared,
+    key: &str,
+    ws: &Workspace,
+    text: &str,
+    launch_pin: Option<&str>,
+) -> Result<()> {
     let cfg = shared.config.read().unwrap().clone();
     task::check_prompt_bytes(text, cfg.max_prompt_bytes)?;
     let none = ws.kind == WorkspaceKind::None;
-    let outcome = shared.submit_with(
+    let _ = shared.submit_with(
         key,
         text,
         "cli",
@@ -492,8 +552,6 @@ async fn run_turn(
             needs: Vec::new(),
         },
     )?;
-    let _ = outcome;
-    // Chat turns are not planner jobs, even when `[planner] mode = always`.
     if shared.db.get_task(key)?.is_some_and(|t| t.role == "plan") {
         let _ = shared.db.set_task_role(key, "");
     }
@@ -505,8 +563,7 @@ async fn run_turn(
             let _ = shared.db.meta_set(&format!("tui-pin:{key}"), "");
         }
     }
-    wait_turn(shared, key).await?;
-    Ok(collect_result(shared, key))
+    Ok(())
 }
 
 async fn wait_turn(shared: &Arc<Shared>, key: &str) -> Result<()> {
@@ -515,35 +572,11 @@ async fn wait_turn(shared: &Arc<Shared>, key: &str) -> Result<()> {
     loop {
         scheduler::dispatch_key(shared, key).await?;
         ticks += 1;
-        let inflight = shared.inflight.lock().unwrap().contains_key(key);
-        let task = shared.db.get_task(key)?;
-        let status = task.as_ref().map(|t| t.status.as_str()).unwrap_or("");
-        let pending = shared.db.pending_messages(key).ok().unwrap_or_default();
-        if !inflight
-            && pending.is_empty()
-            && matches!(
-                status,
-                "waiting" | "done" | "failed" | "needs_attention" | "cancelled"
-            )
-        {
+        if turn_is_idle(shared, key)? {
             return Ok(());
         }
-        if !inflight && status == "queued" && ticks >= 3 {
-            let cfg = shared.config.read().unwrap().clone();
-            let empty = std::collections::HashMap::new();
-            if let Some(t) = &task {
-                if scheduler::pick_provider(
-                    &cfg,
-                    &shared.db,
-                    &empty,
-                    t,
-                    &crate::clock::Clock::system(),
-                )?
-                .is_none()
-                {
-                    bail!("no provider available for session {key}");
-                }
-            }
+        if ticks >= 3 {
+            check_provider_available(shared, key)?;
         }
         if tokio::time::Instant::now() > deadline {
             bail!("timed out waiting for session {key}");
@@ -555,7 +588,39 @@ async fn wait_turn(shared: &Arc<Shared>, key: &str) -> Result<()> {
     }
 }
 
-fn collect_result(shared: &Shared, key: &str) -> TurnResult {
+pub(crate) fn turn_is_idle(shared: &Shared, key: &str) -> Result<bool> {
+    let inflight = shared.inflight.lock().unwrap().contains_key(key);
+    let task = shared.db.get_task(key)?;
+    let status = task.as_ref().map(|t| t.status.as_str()).unwrap_or("");
+    let pending = shared.db.pending_messages(key).ok().unwrap_or_default();
+    Ok(!inflight
+        && pending.is_empty()
+        && matches!(
+            status,
+            "waiting" | "done" | "failed" | "needs_attention" | "cancelled"
+        ))
+}
+
+pub(crate) fn check_provider_available(shared: &Shared, key: &str) -> Result<()> {
+    let inflight = shared.inflight.lock().unwrap().contains_key(key);
+    let task = shared.db.get_task(key)?;
+    let status = task.as_ref().map(|t| t.status.as_str()).unwrap_or("");
+    if inflight || status != "queued" {
+        return Ok(());
+    }
+    let cfg = shared.config.read().unwrap().clone();
+    let empty = std::collections::HashMap::new();
+    if let Some(t) = &task {
+        if scheduler::pick_provider(&cfg, &shared.db, &empty, t, &crate::clock::Clock::system())?
+            .is_none()
+        {
+            bail!("no provider available for session {key}");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn collect_result(shared: &Shared, key: &str) -> TurnResult {
     let runs = shared.db.list_runs(Some(key)).unwrap_or_default();
     let last = runs.last();
     let ok = last
@@ -661,22 +726,6 @@ mod tests {
         assert!(!is_tui_key("cli-"));
         assert!(!is_tui_key("demo-1"));
         assert_eq!(model_meta_key("cli-default"), "tui-model:cli-default");
-    }
-
-    #[test]
-    fn slash_commands() {
-        assert_eq!(parse_slash("hello"), None);
-        assert_eq!(parse_slash("/quit"), Some(Slash::Quit));
-        assert_eq!(parse_slash("/q"), Some(Slash::Quit));
-        assert_eq!(
-            parse_slash("/provider grok"),
-            Some(Slash::Provider("grok".into()))
-        );
-        assert_eq!(
-            parse_slash("/model grok-code"),
-            Some(Slash::Model("grok-code".into()))
-        );
-        assert!(matches!(parse_slash("/nope"), Some(Slash::Unknown(_))));
     }
 
     #[test]
