@@ -21,7 +21,7 @@ Secrets live in `~/.config/atr/shadow.env` (mode 0600), never in config.
 
 ## Terminal TUI
 
-A bare `atr` (or `atr tui`) is an interactive in-process chat (transcript + footer). `atr ask "prompt"` is the one-shot / CI entrypoint on the same engine. Serve is not required and never auto-dispatches `cli-*` sessions. Sessions are tasks keyed `cli-<name>` (default `cli-default`), separate from Telegram. First run on a TTY offers `atr init` if there is no config, then continues (and asks whether to install the user service); scripts should run `atr init --yes` first (no TTY never auto-inits).
+A bare `atr` (or `atr tui`) is an interactive in-process chat (transcript + footer). `atr ask "prompt"` is the one-shot / CI entrypoint on the same engine. Serve is not required and never auto-dispatches `cli-*` sessions. Sessions are tasks keyed `cli-<name>` (default `cli-default`), separate from Telegram. First run: bare `atr` → init offer → service ask → TUI. Scripts: `atr init --yes` then `atr ask`. No TTY never auto-inits.
 
 ```bash
 atr ask "what is 2+2?"       # one-shot / CI

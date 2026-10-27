@@ -153,9 +153,9 @@ owner's env var, ok/warn/fail and days left without printing values.
 ## 6b. Terminal TUI
 
 - A bare `atr` / `atr tui` is the interactive session. `atr ask "prompt"` is one-shot / CI. Both run the engine in-process and do **not** need `atr serve`.
-- No config yet: on a TTY, atr offers the normal `atr init` (including whether to install the user service) then continues. Without a TTY it exits with a pointer to `atr init` / `atr init --yes` (no auto `--yes`).
+- No config yet: on a TTY, atr offers the normal `atr init` (including whether to install the user service) then continues (`Starting atr tui…` / `atr ask`). Without a TTY it exits with a pointer to `atr init` / `atr init --yes` (no auto `--yes`).
 - Session keys are `cli-<name>` (default `cli-default`), separate from Telegram. Serve never starts those tasks.
-- No provider: check `atr providers`, `--provider`, or `[tui] providers`.
+- No enabled provider: atr prints which CLIs it saw and how to sign in / `atr providers detect` / enable. `atr ask` exits non-zero; the TUI asks whether to continue anyway.
 - `atr serve` is still an explicit subcommand; a bare `atr` is the TUI.
 
 ## 7. Notify hook

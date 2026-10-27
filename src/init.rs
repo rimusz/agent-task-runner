@@ -208,10 +208,7 @@ pub fn run(opts: InitOpts) -> Result<String> {
         match crate::config::load_config(&opts.config_path) {
             Ok(cfg) => {
                 match service::install_for_init(Some(&cfg), &opts.config_path, opts.force_service) {
-                    Ok(msg) => {
-                        out.push_str(&msg);
-                        out.push('\n');
-                    }
+                    Ok(msg) => out.push_str(&service_install_success_text(&msg)),
                     Err(e) => out.push_str(&format!("service install: {e:#}\n")),
                 }
             }
@@ -227,6 +224,66 @@ pub fn run(opts: InitOpts) -> Result<String> {
 /// Printed when init skips the user service so “no” is not a dead end.
 pub const SERVICE_SKIPPED_HINT: &str =
     "skipped user service. Bare `atr` / `atr tui` / `atr ask` still work in-process. Telegram, GitHub watching, and queued `atr add` need `atr service install` or `atr serve` later.";
+
+/// One success line after a real install; keeps linger notes from the installer.
+pub fn service_install_success_text(install_msg: &str) -> String {
+    let mut s = install_msg.trim_end().to_string();
+    s.push('\n');
+    if s.contains("installed") && !s.contains("atr status") {
+        s.push_str("Check with `atr status`.\n");
+    }
+    s
+}
+
+/// Short next-step when config has no enabled provider. Reuses detect.
+pub fn no_provider_next_steps(cfg: &crate::config::Config) -> Option<String> {
+    if cfg.providers.iter().any(|p| p.enabled) {
+        return None;
+    }
+    Some(format_no_provider_help(cfg))
+}
+
+pub fn format_no_provider_help(cfg: &crate::config::Config) -> String {
+    let d = detect_clis();
+    let mut out = String::from("No enabled provider is ready.\n");
+    if d.found.is_empty() {
+        out.push_str(
+            "No agent CLI found on PATH. Install claude, grok, cursor-agent, codex, or opencode.\n",
+        );
+    } else {
+        let seen: Vec<String> = d
+            .found
+            .iter()
+            .map(|f| {
+                let auth = match f.auth {
+                    crate::detect::Auth::Yes => "signed in",
+                    crate::detect::Auth::No => "not signed in",
+                    crate::detect::Auth::Unknown => "auth unknown",
+                    crate::detect::Auth::KeychainLocked => "keychain locked",
+                };
+                format!("{} ({auth})", f.spec_id)
+            })
+            .collect();
+        out.push_str(&format!("Seen: {}.\n", seen.join(", ")));
+        for f in d.found.iter().filter(|f| !f.auth.signed_in()) {
+            out.push_str(&format!("  sign in: {}\n", f.login));
+        }
+    }
+    let disabled: Vec<&str> = cfg
+        .providers
+        .iter()
+        .filter(|p| !p.enabled)
+        .map(|p| p.name.as_str())
+        .collect();
+    if !disabled.is_empty() {
+        out.push_str(&format!(
+            "In config but disabled: {}. `atr providers enable <name>`.\n",
+            disabled.join(", ")
+        ));
+    }
+    out.push_str("Then `atr providers detect` and retry.\n");
+    out
+}
 
 /// What the user service is for, plus platform install notes.
 pub fn service_offer_explainer() -> String {
@@ -738,6 +795,10 @@ fn maybe_issue_template(repo_path: &str) -> Result<Option<String>> {
 }
 
 pub async fn run_and_doctor(opts: InitOpts) -> Result<String> {
+    Ok(run_and_doctor_report(opts).await?.0)
+}
+
+async fn run_and_doctor_report(opts: InitOpts) -> Result<(String, Option<crate::doctor::Report>)> {
     let path = opts.config_path.clone();
     let mut text = run(opts)?;
     match crate::config::load_config(&path) {
@@ -751,10 +812,13 @@ pub async fn run_and_doctor(opts: InitOpts) -> Result<String> {
                     report.problems()
                 ));
             }
+            Ok((text, Some(report)))
         }
-        Err(e) => text.push_str(&format!("\ndoctor skipped: {e:#}\n")),
+        Err(e) => {
+            text.push_str(&format!("\ndoctor skipped: {e:#}\n"));
+            Ok((text, None))
+        }
     }
-    Ok(text)
 }
 
 /// Hint for scripts / CI when config is missing (never hangs on prompts).
@@ -780,10 +844,16 @@ pub struct EnsureConfigOpts {
     pub no_service: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct EnsureOutcome {
+    pub ran_init: bool,
+    pub doctor_callout: Option<String>,
+}
+
 /// If config is missing: on a TTY, offer and run the normal `atr init`;
 /// otherwise fail with [`config_missing_hint`]. After a successful init
 /// the caller continues the original command.
-pub async fn ensure_config(path: &Path) -> Result<()> {
+pub async fn ensure_config(path: &Path) -> Result<EnsureOutcome> {
     ensure_config_with(EnsureConfigOpts {
         config_path: path.to_path_buf(),
         tty: None,
@@ -793,9 +863,9 @@ pub async fn ensure_config(path: &Path) -> Result<()> {
     .await
 }
 
-pub async fn ensure_config_with(opts: EnsureConfigOpts) -> Result<()> {
+pub async fn ensure_config_with(opts: EnsureConfigOpts) -> Result<EnsureOutcome> {
     if opts.config_path.exists() {
-        return Ok(());
+        return Ok(EnsureOutcome::default());
     }
     let tty = opts.tty.unwrap_or_else(interactive_stdio);
     if !tty {
@@ -820,10 +890,10 @@ pub async fn ensure_config_with(opts: EnsureConfigOpts) -> Result<()> {
         force_service: false,
         config_path: opts.config_path.clone(),
     };
-    let text = if opts.assume_yes {
-        run(init)?
+    let (text, report) = if opts.assume_yes {
+        (run(init)?, None)
     } else {
-        run_and_doctor(init).await?
+        run_and_doctor_report(init).await?
     };
     print!("{text}");
     if !opts.config_path.exists() {
@@ -832,7 +902,10 @@ pub async fn ensure_config_with(opts: EnsureConfigOpts) -> Result<()> {
             opts.config_path.display()
         );
     }
-    Ok(())
+    Ok(EnsureOutcome {
+        ran_init: true,
+        doctor_callout: report.and_then(|r| r.provider_auth_fail_callout()),
+    })
 }
 
 #[cfg(test)]
@@ -1114,6 +1187,40 @@ exit 0
         );
         assert!(SERVICE_SKIPPED_HINT.contains("atr service install"),);
         assert!(SERVICE_SKIPPED_HINT.contains("in-process"),);
+        let ok = service_install_success_text("installed LaunchAgent dev.atr.serve");
+        assert!(ok.contains("atr status"), "{ok}");
+        let linger = service_install_success_text(
+            "installed systemd user unit /tmp/atr.service\nOn a headless Linux host, run `sudo loginctl enable-linger \"$USER\"` so the service survives logout.",
+        );
+        assert!(linger.contains("enable-linger"), "{linger}");
+        assert!(linger.contains("atr status"), "{linger}");
+    }
+
+    #[test]
+    fn no_provider_next_steps_when_all_disabled() {
+        let cfg = crate::config::parse_config_toml(
+            r#"
+[[provider]]
+name = "claude"
+kind = "claude"
+enabled = false
+"#,
+        )
+        .unwrap();
+        let msg = no_provider_next_steps(&cfg).expect("should warn");
+        assert!(msg.contains("No enabled provider"), "{msg}");
+        assert!(msg.contains("providers detect"), "{msg}");
+        assert!(msg.contains("claude"), "{msg}");
+        let on = crate::config::parse_config_toml(
+            r#"
+[[provider]]
+name = "claude"
+kind = "claude"
+enabled = true
+"#,
+        )
+        .unwrap();
+        assert!(no_provider_next_steps(&on).is_none());
     }
 
     #[tokio::test]

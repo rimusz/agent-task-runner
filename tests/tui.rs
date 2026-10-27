@@ -156,6 +156,23 @@ async fn oneshot_rejects_missing_prompt() {
 }
 
 #[tokio::test]
+async fn ask_fails_when_no_enabled_provider() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", false, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    let err = tui::run_oneshot(shared, opts("hello", None, None))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("No enabled provider"), "{err}");
+    assert!(err.contains("providers detect"), "{err}");
+}
+
+#[tokio::test]
 async fn atr_tui_provider_prefers_named_provider() {
     let (_dir, shared, _cfg) = no_serve(&[
         ("claude", true, "success"),

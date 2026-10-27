@@ -152,6 +152,10 @@ pub async fn run(shared: Arc<Shared>, opts: TuiOpts) -> Result<ExitCode> {
         reset_session(&shared, &key)?;
     }
     let ws = resolve_workspace(&shared, &opts)?;
+    warn_if_no_provider(
+        &shared,
+        opts.require_prompt || opts.prompt.as_deref().is_some_and(|s| !s.trim().is_empty()),
+    )?;
 
     if let Some(text) = opts
         .prompt
@@ -250,11 +254,83 @@ async fn interactive(
     Ok(ExitCode::SUCCESS)
 }
 
-fn print_banner(shared: &Shared, key: &str) -> Result<()> {
-    let footer = footer_line(shared, key);
-    eprintln!("atr tui  {footer}");
-    eprintln!("{}", slash_help());
+fn warn_if_no_provider(shared: &Shared, oneshot: bool) -> Result<()> {
+    let cfg = shared.config.read().unwrap().clone();
+    let Some(msg) = crate::init::no_provider_next_steps(&cfg) else {
+        return Ok(());
+    };
+    eprint!("{msg}");
+    if oneshot {
+        bail!("{}", msg.trim_end());
+    }
+    let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if !tty {
+        bail!("{}", msg.trim_end());
+    }
+    if !crate::init::yn(
+        "Continue anyway (turns will fail until a provider is ready)",
+        false,
+        false,
+    )? {
+        bail!("{}", msg.trim_end());
+    }
     Ok(())
+}
+
+fn print_banner(shared: &Shared, key: &str) -> Result<()> {
+    eprint!("{}", banner_text(shared, key));
+    Ok(())
+}
+
+pub fn banner_text(shared: &Shared, key: &str) -> String {
+    let cfg = shared.config.read().unwrap().clone();
+    let footer = footer_line(shared, key);
+    let provider = tui_provider_now(shared, key)
+        .or_else(|| {
+            cfg.providers
+                .iter()
+                .find(|p| p.enabled)
+                .map(|p| p.name.clone())
+        })
+        .unwrap_or_else(|| "none".into());
+    format!(
+        "atr tui  {footer}\nsession  {key}\nprovider {provider}\nlist     {}\n{}\n{}\n",
+        provider_list_short(&cfg),
+        daemon_line(&shared.config_path),
+        slash_help()
+    )
+}
+
+pub fn provider_list_short(cfg: &crate::config::Config) -> String {
+    if cfg.providers.is_empty() {
+        return "none".into();
+    }
+    cfg.providers
+        .iter()
+        .map(|p| {
+            if p.enabled {
+                p.name.clone()
+            } else {
+                format!("{} (off)", p.name)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn daemon_line(config_path: &std::path::Path) -> String {
+    let label = crate::service::launchd_label_for(config_path);
+    let loaded = crate::service::service_loaded(&label)
+        || crate::service::service_loaded(crate::service::LAUNCHD_LABEL);
+    format_daemon_line(loaded)
+}
+
+pub fn format_daemon_line(loaded: bool) -> String {
+    if loaded {
+        "daemon   loaded — check `atr status`".into()
+    } else {
+        "daemon   not loaded — `atr service install` or `atr serve` later".into()
+    }
 }
 
 fn print_oneshot(out: &TurnResult) -> Result<()> {
@@ -618,5 +694,27 @@ mod tests {
     fn ask_prompt_required_mentions_ask_and_tui() {
         assert!(ASK_PROMPT_REQUIRED.contains("atr ask"));
         assert!(ASK_PROMPT_REQUIRED.contains("atr tui"));
+    }
+
+    #[test]
+    fn banner_helpers_are_tight() {
+        assert!(format_daemon_line(true).contains("atr status"));
+        assert!(format_daemon_line(false).contains("atr service install"));
+        let cfg = crate::config::parse_config_toml(
+            r#"
+[[provider]]
+name = "claude"
+kind = "claude"
+enabled = true
+[[provider]]
+name = "grok"
+kind = "grok"
+enabled = false
+"#,
+        )
+        .unwrap();
+        let list = provider_list_short(&cfg);
+        assert!(list.contains("claude"), "{list}");
+        assert!(list.contains("grok (off)"), "{list}");
     }
 }

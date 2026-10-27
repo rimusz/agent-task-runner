@@ -558,8 +558,14 @@ async fn main() -> ExitCode {
 
 /// User-facing commands (TUI, ask, add, …): offer `atr init` on a TTY
 /// when config is missing. `atr serve` / service stay strict.
-async fn open_after_init(path: PathBuf) -> Result<std::sync::Arc<Shared>> {
-    atr::init::ensure_config(&path).await?;
+async fn open_after_init(path: PathBuf, starting: &str) -> Result<std::sync::Arc<Shared>> {
+    let outcome = atr::init::ensure_config(&path).await?;
+    if outcome.ran_init {
+        if let Some(c) = &outcome.doctor_callout {
+            eprint!("{c}");
+        }
+        eprintln!("Starting {starting}…");
+    }
     Shared::open(path)
 }
 
@@ -681,7 +687,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 read_body(body, body_file)?
             };
-            let shared = open_after_init(path).await?;
+            let shared = open_after_init(path, "atr add").await?;
             let cfg = shared.config.read().unwrap().clone();
             atr::task::check_prompt_bytes(&text, cfg.max_prompt_bytes)?;
             let title = title
@@ -798,15 +804,15 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Cmd::Ask { prompt, sess } => {
-            let shared = open_after_init(path).await?;
+            let shared = open_after_init(path, "atr ask").await?;
             atr::tui::run_oneshot(shared, sess.into_tui_opts(Some(prompt), true)).await
         }
         Cmd::Tui { prompt, sess } => {
-            let shared = open_after_init(path).await?;
+            let shared = open_after_init(path, "atr tui").await?;
             atr::tui::run(shared, sess.into_tui_opts(prompt, false)).await
         }
         Cmd::Status { json, repo } => {
-            let shared = open_after_init(path).await?;
+            let shared = open_after_init(path, "atr status").await?;
             app::print_status(&shared, json, repo.as_deref());
             Ok(ExitCode::SUCCESS)
         }
@@ -955,7 +961,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Doctor { cache, json } => {
-            atr::init::ensure_config(&path).await?;
+            let outcome = atr::init::ensure_config(&path).await?;
+            if outcome.ran_init {
+                if let Some(c) = &outcome.doctor_callout {
+                    eprint!("{c}");
+                }
+                eprintln!("Starting atr doctor…");
+            }
             let cfg = load_config(&path)?;
             let report = atr::doctor::run(&cfg, &path, cache).await;
             if json {

@@ -32,8 +32,6 @@ Other agents and scripts can also hand it work through MCP, the HTTP API, Telegr
 
 A thin terminal session: transcript plus a status footer (provider / model / tokens / cache hit % when known). It does **not** clone the dashboard and does **not** share history with Telegram. A bare `atr` (no subcommand) is the same as `atr tui` (interactive). `atr ask "prompt"` is the documented one-shot / CI entrypoint: one turn, print the answer, exit non-zero on failure. `atr serve` stays an explicit subcommand.
 
-On a TTY, the first `atr` / `atr tui` / `atr ask` (and `atr add` / `atr status` / `atr doctor`) offers the normal `atr init` if there is no config yet, then continues the original command. Interactive init asks whether to install the user service (`atr serve` for Telegram / GitHub / queued `atr add`); saying no still leaves `atr tui` / `atr ask` working in-process (`atr service install` later). Scripts and CI (`atr ask` with no TTY) get a clear error pointing at `atr init` or `atr init --yes` — they never hang on prompts.
-
 ```bash
 atr ask "what is 2+2?"                 # one-shot / CI
 atr ask "status" --session ci --provider grok
@@ -54,7 +52,11 @@ Provider for a TUI / `ask` session: session pin (`/provider` or `--provider`) �
 | `--dir` / `--repo` | Workspace; omit for answer-only |
 | `--new` | Drop the previous `cli-<name>` task |
 
-Interactive commands: `/help` `/status` `/provider <name>` `/model <name>` `/new` `/quit`.
+Interactive commands: `/help` `/status` `/provider <name>` `/model <name>` `/new` `/quit`. The first screen also shows session key, next provider, the configured provider list, and whether the user service is loaded.
+
+### First run
+
+On a TTY, a bare `atr` with no config offers `atr init`, asks whether to install the user service, then starts the TUI (`Starting atr tui…`). `atr ask` is the one-shot / CI command after init — scripts should run `atr init --yes` first (no TTY never hangs or auto-inits). If init left no enabled provider, atr prints what it saw and how to sign in / `atr providers detect` instead of dying on the first turn.
 
 ### Hand work to atr
 

@@ -63,6 +63,33 @@ impl Report {
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".into())
     }
+
+    /// FAIL lines about providers or auth, for the first-run bridge.
+    pub fn provider_auth_fail_callout(&self) -> Option<String> {
+        let fails: Vec<&Check> = self
+            .checks
+            .iter()
+            .filter(|c| c.status == Status::Fail && is_provider_or_auth_check(&c.name))
+            .collect();
+        if fails.is_empty() {
+            return None;
+        }
+        let mut out = String::from("Doctor FAIL (providers/auth) before continuing:\n");
+        for c in fails {
+            out.push_str(&format!("  {} — {}\n", c.name, c.detail));
+            if let Some(h) = &c.hint {
+                out.push_str(&format!("    fix: {h}\n"));
+            }
+        }
+        Some(out)
+    }
+}
+
+fn is_provider_or_auth_check(name: &str) -> bool {
+    name.starts_with("cli ")
+        || name.starts_with("auth ")
+        || name.starts_with("gh ")
+        || name.contains("provider")
 }
 
 /// With lessons on, the reflect provider must exist and be enabled.
@@ -1222,6 +1249,35 @@ mod tests {
         assert!(text.contains("fix: set repo_path"), "{text}");
         assert!(text.contains("2 problems"), "{text}");
         assert!(!report.ok());
+        assert!(
+            report.provider_auth_fail_callout().is_none(),
+            "repo_path FAIL is not a provider/auth callout"
+        );
+    }
+
+    #[test]
+    fn provider_auth_fail_callout_lists_cli_and_hint() {
+        let report = Report {
+            checks: vec![
+                Check {
+                    name: "cli claude".into(),
+                    status: Status::Fail,
+                    detail: "/bin/claude missing".into(),
+                    hint: Some("install the CLI".into()),
+                },
+                Check {
+                    name: "listen".into(),
+                    status: Status::Fail,
+                    detail: "in use".into(),
+                    hint: None,
+                },
+            ],
+            problems: 2,
+        };
+        let text = report.provider_auth_fail_callout().unwrap();
+        assert!(text.contains("cli claude"), "{text}");
+        assert!(text.contains("install the CLI"), "{text}");
+        assert!(!text.contains("listen"), "{text}");
     }
 
     fn mini_cfg(telegram: &str) -> (tempfile::TempDir, crate::config::Config, std::path::PathBuf) {
