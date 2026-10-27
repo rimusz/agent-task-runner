@@ -178,7 +178,9 @@ first run since the clock was last restarted (`tasks.clock_started`). The
 clock restarts on `atr retry` (Telegram `/retry`, `POST /tasks/<key>/retry`)
 and when a new message arrives for a finished task (`waiting`, `done`,
 `failed`, `needs_attention`, `cancelled`), so a long-lived Telegram chat or an
-old issue does not time out because it started days ago. Internal requeues
+old issue does not time out because it started days ago. Retry also unconsumes
+the last finished run's messages when none are pending — the scheduler only
+starts a task that has an unconsumed prompt. Internal requeues
 within an attempt (verify retries, review rounds, stall resumes, failover)
 keep counting.
 When a queued task is past it, atr marks the task `failed`, sends

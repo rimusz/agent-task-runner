@@ -2,7 +2,9 @@
 //! - the per-task wall clock restarts on retry or a new turn, instead of
 //!   counting from the task's first run days ago;
 //! - a retried task without a strict pin picks its provider again from the
-//!   current config (a Telegram assistant task follows `[telegram.assistant]`).
+//!   current config (a Telegram assistant task follows `[telegram.assistant]`);
+//! - retry on a finished task whose last prompt was consumed must become
+//!   dispatchable (`runnable_keys` / a new run) without a new submit.
 #[allow(dead_code)]
 mod common;
 
@@ -148,6 +150,32 @@ async fn retried_task_re_resolves_from_current_provider_config() {
         h.shared.db.list_runs(Some("demo-r5")).unwrap()[1].provider,
         "grok"
     );
+}
+
+#[tokio::test]
+async fn retry_dispatches_without_a_new_submit() {
+    let h = Harness::with_providers(PROVIDERS, "127.0.0.1:0").await;
+    h.submit("demo-r7", "do the work");
+    h.wait_status("demo-r7", &["waiting"], 10000).await;
+    assert!(
+        h.shared.db.pending_messages("demo-r7").unwrap().is_empty(),
+        "finished run should have consumed its messages"
+    );
+    assert!(
+        !h.shared
+            .db
+            .runnable_keys()
+            .unwrap()
+            .iter()
+            .any(|k| k == "demo-r7"),
+        "consumed task must not be dispatchable before retry"
+    );
+    h.shared.retry("demo-r7").unwrap();
+    // No atr submit / enqueue — retry itself must make the task dispatchable.
+    h.wait_until("demo-r7", 10000, |h| {
+        h.shared.db.list_runs(Some("demo-r7")).unwrap().len() >= 2
+    })
+    .await;
 }
 
 #[tokio::test]

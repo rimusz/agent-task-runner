@@ -915,6 +915,20 @@ impl Db {
         Ok(row.and_then(|(p, e)| e.map(|ended| (p, ended))))
     }
 
+    /// Latest finished run id for `key`, if any. Used by user-facing retry
+    /// to unconsume that run's messages so `runnable_keys` can dispatch.
+    pub fn last_finished_run_id(&self, key: &str) -> Result<Option<i64>> {
+        let conn = self.lock();
+        let id = conn
+            .query_row(
+                "SELECT id FROM runs WHERE task_key = ?1 AND ended IS NOT NULL ORDER BY id DESC LIMIT 1",
+                params![key],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(id)
+    }
+
     pub fn latest_finished_provider(&self) -> Result<Option<String>> {
         let conn = self.lock();
         let v = conn

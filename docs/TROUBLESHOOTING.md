@@ -80,7 +80,9 @@ Wrong provider planning or answering? `atr driver` shows the driver; see
 **Task failed with `task timeout`.** The task passed `task_timeout` (default
 `4h`, counted from the first run of the current attempt). `atr tasks <key>`
 shows a last run with outcome `task_timeout`. `atr retry <key>` (or a new
-message on the finished task) starts a new attempt with a fresh clock. Raise `task_timeout` if the work is legitimately long
+message on the finished task) starts a new attempt with a fresh clock and
+re-queues the last consumed prompt so the in-process scheduler can dispatch.
+Raise `task_timeout` if the work is legitimately long
 (simulator matrices), or split the task. With `[lessons]` on, record what went
 wrong with `atr lessons add --repo R "…"` so the next task in that repo starts
 with it.

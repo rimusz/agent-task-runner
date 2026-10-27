@@ -253,6 +253,14 @@ impl Shared {
         if !t.pin_strict {
             self.reresolve_provider(&t)?;
         }
+        // `runnable_keys` also requires an unconsumed message. A finished run
+        // marks its prompt consumed; without unconsuming, retry would sit
+        // queued forever (the scheduler ticks but finds nothing to start).
+        if self.db.pending_messages(key)?.is_empty() {
+            if let Some(run_id) = self.db.last_finished_run_id(key)? {
+                self.db.unconsume_run(run_id)?;
+            }
+        }
         self.db.set_status(key, "queued")?;
         self.kick.notify_waiters();
         Ok(())
@@ -1379,6 +1387,53 @@ cli = "/bin/true"
         assert_eq!(
             Shared::cancel_ok_line("acme-run", false),
             "cancelled acme-run"
+        );
+        std::mem::forget(dir);
+    }
+
+    #[test]
+    fn retry_unconsumes_last_run_so_task_is_runnable() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = test_shared(&dir);
+        shared.db.upsert_task("real-1", "/repo", None).unwrap();
+        let mid = shared
+            .db
+            .enqueue_message("real-1", "do the work", "cli")
+            .unwrap();
+        let run = shared.db.start_run("real-1", "claude", "").unwrap();
+        shared.db.mark_consumed(&[mid], run).unwrap();
+        shared.db.finish_run(run, "success", None).unwrap();
+        shared.db.set_status("real-1", "waiting").unwrap();
+        assert!(shared.db.pending_messages("real-1").unwrap().is_empty());
+        assert!(
+            !shared
+                .db
+                .runnable_keys()
+                .unwrap()
+                .iter()
+                .any(|k| k == "real-1"),
+            "consumed waiting task must not be dispatchable"
+        );
+
+        shared.db.set_status("real-1", "running").unwrap();
+        let err = shared.retry("real-1").unwrap_err().to_string();
+        assert!(err.contains("is running"), "{err}");
+        shared.db.set_status("real-1", "waiting").unwrap();
+
+        shared.retry("real-1").unwrap();
+        assert_eq!(
+            shared.db.get_task("real-1").unwrap().unwrap().status,
+            "queued"
+        );
+        assert_eq!(shared.db.pending_messages("real-1").unwrap().len(), 1);
+        assert!(
+            shared
+                .db
+                .runnable_keys()
+                .unwrap()
+                .iter()
+                .any(|k| k == "real-1"),
+            "retry must leave an unconsumed message so the scheduler can dispatch"
         );
         std::mem::forget(dir);
     }
