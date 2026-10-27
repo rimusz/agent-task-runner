@@ -4,6 +4,11 @@ all-features = false
 [advisories]
 version = 2
 yanked = "warn"
+ignore = [
+    # ratatui 0.29 depends on paste; the crate is archived (not a vuln)
+    # and 0.29 has no upgrade path. Revisit when we move off 0.29.
+    { id = "RUSTSEC-2024-0436", reason = "transitive paste via ratatui 0.29; unmaintained, not a vuln" },
+]
 
 [licenses]
 version = 2
