@@ -150,7 +150,7 @@ atr config get github.label
 atr config set github.label for:atr
 ```
 
-`atr retry` starts a fresh attempt: the `task_timeout` wall clock restarts, and the provider is chosen again from the current config (a Telegram assistant task follows `[telegram.assistant]` as it is now; a compare arm keeps its pinned provider). `atr pause` / `atr resume` / `atr retry` call the running `atr serve` (bearer token, read from the same token file as `atr cancel`). If the service is not reachable they write the state database instead and the change applies at the next start. `atr config get/set` use the same keys and validation as Telegram `/config` (secret keys refused, comments kept, `config.toml.bak` written, service reloaded with SIGHUP).
+`atr retry` starts a fresh attempt: the last consumed prompt is marked pending again so the scheduler can dispatch (no extra `atr submit` needed), the `task_timeout` wall clock restarts, and the provider is chosen again from the current config (a Telegram assistant task follows `[telegram.assistant]` as it is now; a compare arm keeps its pinned provider). `atr pause` / `atr resume` / `atr retry` call the running `atr serve` (bearer token, read from the same token file as `atr cancel`). If the service is not reachable they write the state database instead and the change applies at the next start. `atr config get/set` use the same keys and validation as Telegram `/config` (secret keys refused, comments kept, `config.toml.bak` written, service reloaded with SIGHUP).
 
 Telegram command to CLI:
 
