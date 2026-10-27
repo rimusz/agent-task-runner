@@ -55,15 +55,27 @@ pub async fn dispatch_available(shared: &Arc<Shared>) -> Result<()> {
 }
 
 /// Dispatch at most the runnable work for one task key. Used by `atr tui`
-/// so an in-process turn does not start leftover queued tasks.
+/// so an in-process turn does not start leftover queued tasks, including
+/// `cli-*` sessions that serve never auto-dispatches.
 pub async fn dispatch_key(shared: &Arc<Shared>, key: &str) -> Result<()> {
     dispatch_matching(shared, Some(key)).await
+}
+
+/// Serve owns daemon work. TUI sessions (`cli-*`) are started only by
+/// [`dispatch_key`] in the TUI process.
+pub fn serve_dispatches(key: &str) -> bool {
+    !crate::tui::is_tui_key(key)
 }
 
 async fn dispatch_matching(shared: &Arc<Shared>, only: Option<&str>) -> Result<()> {
     let keys = order_runnable(shared)?;
     for key in keys {
         if only.is_some_and(|want| want != key) {
+            continue;
+        }
+        // Full-scheduler ticks (serve) skip TUI sessions so Telegram/GitHub
+        // keep running without racing an in-process `atr tui` on `cli-*`.
+        if only.is_none() && !serve_dispatches(&key) {
             continue;
         }
         if shared.inflight.lock().unwrap().contains_key(&key) {
@@ -2038,6 +2050,16 @@ pub fn reconcile(shared: &Shared) -> Result<usize> {
 mod tests {
     use super::*;
     use crate::db::Db;
+
+    #[test]
+    fn serve_skips_tui_session_keys() {
+        assert!(serve_dispatches("demo-1"));
+        assert!(serve_dispatches("tg42"));
+        assert!(!serve_dispatches("cli-default"));
+        assert!(!serve_dispatches("cli-work"));
+        assert!(serve_dispatches("cli-"));
+        assert!(serve_dispatches("acme-1"));
+    }
 
     #[test]
     fn record_run_usage_last_event_wins_and_is_idempotent() {

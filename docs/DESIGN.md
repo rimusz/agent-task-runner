@@ -57,13 +57,14 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   with a different request is 409. Optional `files` are stored under the state
   directory and copied into the worktree by filename once the tree exists.
 - **CLI:** `atr add` (prompt + `--dir` / `--repo` / neither) and `atr submit`.
-- **TUI:** `atr tui` is a thin in-process chat (transcript + footer). A
-  session is a normal task keyed `cli-<name>` (default `cli-default`),
-  separate from Telegram `tg<chat>`. Serve is not required. Provider:
-  session pin → `ATR_TUI_PROVIDER` / `--provider` → optional `[tui]
-  providers` → global `[[provider]]` order. `/provider` and `/model` stick
-  for the session and reuse the existing handoff on switch.
-  `ATR_DEFAULT=tui` makes a bare `atr` launch the TUI.
+- **TUI:** a bare `atr` (or `atr tui`) is a thin in-process chat
+  (transcript + footer). A session is a normal task keyed `cli-<name>`
+  (default `cli-default`), separate from Telegram `tg<chat>`. Serve is
+  not required and never auto-dispatches `cli-*` keys — serve owns
+  daemon work; the TUI process owns those sessions. Provider: session
+  pin → `--provider` → optional `[tui] providers` → global
+  `[[provider]]` order. `/provider` and `/model` stick for the session
+  and reuse the existing handoff on switch.
 - **MCP:** `atr mcp` is stdio (local agents or SSH). Streamable HTTP is
   `POST /mcp` on the existing listener (localhost by default; Tailscale bind
   is optional). HTTP requires a bearer token from `mcp.token_env` (default

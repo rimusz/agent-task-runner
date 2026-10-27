@@ -16,20 +16,20 @@ Secrets live in `~/.config/atr/shadow.env` (mode 0600), never in config.
 ## Driver and models
 
 - `driver` (top-level) = planning/review provider; empty = grok if enabled, else first enabled. Show/set: `atr driver`, `atr driver set <provider> [--model M]`, `atr driver clear`; Telegram `/config set driver <name>`.
-- Workers use `[[provider]]` order; the Telegram assistant uses `telegram.assistant.providers` (ordered list: first enabled one not busy/cooling/rate-limited/at quota, falls back down the list), else `telegram.assistant.provider`, else first available (not `driver`). Set the list with `atr config set telegram.assistant.providers '["grok","codex","claude"]'` (`/config set …` in Telegram); `providers` wins over `provider` and doctor warns when both are set. The TUI (`atr tui`) uses session pin → `ATR_TUI_PROVIDER` / `--provider` → optional `[tui] providers` → global order. Models are per provider (`atr providers model <name> <model>`); TUI `/model` is a per-session override. Per-task provider preference: `atr add --provider`, POST/MCP `provider`.
+- Workers use `[[provider]]` order; the Telegram assistant uses `telegram.assistant.providers` (ordered list: first enabled one not busy/cooling/rate-limited/at quota, falls back down the list), else `telegram.assistant.provider`, else first available (not `driver`). Set the list with `atr config set telegram.assistant.providers '["grok","codex","claude"]'` (`/config set …` in Telegram); `providers` wins over `provider` and doctor warns when both are set. The TUI (bare `atr` / `atr tui`) uses session pin → `--provider` → optional `[tui] providers` → global order. Models are per provider (`atr providers model <name> <model>`); TUI `/model` is a per-session override. Per-task provider preference: `atr add --provider`, POST/MCP `provider`.
 - Verify: `atr driver`, dashboard `driver <name>`, `atr status --json | jq .driver`. Details: CONFIG.md "Choosing the driver provider and model".
 
 ## Terminal TUI
 
-`atr tui` is a thin in-process chat (transcript + footer). Serve is not required. Sessions are tasks keyed `cli-<name>` (default `cli-default`), separate from Telegram.
+A bare `atr` (or `atr tui`) is a thin in-process chat (transcript + footer). Serve is not required and never auto-dispatches `cli-*` sessions. Sessions are tasks keyed `cli-<name>` (default `cli-default`), separate from Telegram.
 
 ```bash
-atr tui                      # interactive; /quit to leave
+atr                          # interactive TUI; /quit to leave
 atr tui "what is 2+2?"       # one turn, then exit
 atr tui --session work --provider grok
 ```
 
-`ATR_DEFAULT=tui` makes a bare `atr` launch the TUI. `ATR_TUI_PROVIDER` is the launch preference (same as `--provider`). Mid-session `/provider` and `/model` stick for that session and trigger the existing handoff on switch.
+Mid-session `/provider` and `/model` stick for that session and trigger the existing handoff on switch. `atr serve` stays an explicit subcommand.
 
 ## Telegram assistant (this chat)
 

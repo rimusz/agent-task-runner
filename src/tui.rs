@@ -1,10 +1,14 @@
-//! Interactive terminal session (`atr tui`).
+//! Interactive terminal session (`atr tui`, also a bare `atr`).
 //!
 //! A TUI session is a normal atr task keyed `cli-<name>` (default
 //! `cli-default`), separate from Telegram's `tg<chat>` keys. The engine
 //! runs in-process: `atr serve` is not required. Resume, the stable
 //! prefix, worktree pool, and provider-switch handoff are the existing
 //! task machinery.
+//!
+//! Serve owns daemon work (Telegram, GitHub, `atr add`, …). It never
+//! auto-dispatches `cli-*` keys. The TUI process owns those sessions via
+//! [`crate::scheduler::dispatch_key`].
 
 use crate::app::{Shared, SubmitOpts};
 use crate::db::Db;
@@ -44,15 +48,6 @@ pub struct TurnResult {
     pub model: String,
 }
 
-/// `ATR_DEFAULT=tui` (case-insensitive) means a bare `atr` is `atr tui`.
-pub fn default_is_tui() -> bool {
-    default_from(std::env::var("ATR_DEFAULT").ok().as_deref())
-}
-
-pub fn default_from(val: Option<&str>) -> bool {
-    val.is_some_and(|v| v.trim().eq_ignore_ascii_case("tui"))
-}
-
 pub fn is_tui_key(key: &str) -> bool {
     key.strip_prefix(SESSION_PREFIX)
         .is_some_and(|rest| !rest.is_empty())
@@ -81,26 +76,17 @@ pub fn model_meta_key(task_key: &str) -> String {
     format!("{MODEL_META_PREFIX}{task_key}")
 }
 
-/// Launch preference: `--provider` / `ATR_TUI_PROVIDER` (same effect).
-/// The `[tui] providers` list is a fallback order, not a pin.
+/// Launch preference from `--provider`. The `[tui] providers` list is a
+/// fallback order, not a pin.
 pub fn launch_provider(opts_provider: Option<&str>) -> Option<String> {
-    launch_provider_from(
-        opts_provider,
-        std::env::var("ATR_TUI_PROVIDER").ok().as_deref(),
-    )
-}
-
-pub fn launch_provider_from(opts_provider: Option<&str>, env: Option<&str>) -> Option<String> {
-    if let Some(p) = opts_provider.map(str::trim).filter(|s| !s.is_empty()) {
-        return Some(p.to_string());
-    }
-    env.map(str::trim)
+    opts_provider
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
 }
 
-/// Provider this TUI session would use now: session pin, then launch env,
-/// then `[tui] providers`, else `None` (first available at dispatch).
+/// Provider this TUI session would use now: session pin, then
+/// `[tui] providers`, else `None` (first available at dispatch).
 pub fn tui_provider_now(shared: &Shared, key: &str) -> Option<String> {
     if let Ok(Some(t)) = shared.db.get_task(key) {
         if let Some(p) = t
@@ -114,9 +100,6 @@ pub fn tui_provider_now(shared: &Shared, key: &str) -> Option<String> {
         if !t.provider_hint.trim().is_empty() {
             return Some(t.provider_hint.trim().to_string());
         }
-    }
-    if let Some(p) = launch_provider(None) {
-        return Some(p);
     }
     let names = shared.config.read().unwrap().tui.providers.clone();
     if names.is_empty() {
@@ -602,26 +585,13 @@ mod tests {
     }
 
     #[test]
-    fn launch_provider_prefers_flag_then_env() {
+    fn launch_provider_uses_flag_only() {
+        assert_eq!(launch_provider(Some("grok")).as_deref(), Some("grok"));
         assert_eq!(
-            launch_provider_from(None, Some("grok")).as_deref(),
-            Some("grok")
-        );
-        assert_eq!(
-            launch_provider_from(Some("claude"), Some("grok")).as_deref(),
+            launch_provider(Some("  claude ")).as_deref(),
             Some("claude")
         );
-        assert_eq!(launch_provider_from(None, Some("")), None);
-        assert_eq!(launch_provider_from(None, None), None);
-    }
-
-    #[test]
-    fn atr_default_routing() {
-        assert!(default_from(Some("tui")));
-        assert!(default_from(Some("TUI")));
-        assert!(default_from(Some(" tui ")));
-        assert!(!default_from(Some("serve")));
-        assert!(!default_from(None));
-        assert!(!default_from(Some("")));
+        assert_eq!(launch_provider(Some("")), None);
+        assert_eq!(launch_provider(None), None);
     }
 }

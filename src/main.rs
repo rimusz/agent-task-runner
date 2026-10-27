@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use atr::{app, config::default_config_path, load_config, Shared, SubmitOutcome, EX_TEMPFAIL};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -102,8 +102,8 @@ enum Cmd {
     Tui {
         /// One-shot prompt. Omit for the interactive transcript + status footer.
         prompt: Option<String>,
-        /// Preferred provider for this session (same as `ATR_TUI_PROVIDER`).
-        #[arg(long, env = "ATR_TUI_PROVIDER")]
+        /// Preferred provider for this session.
+        #[arg(long)]
         provider: Option<String>,
         /// Session name (task key `cli-<name>`, default `default`).
         #[arg(long)]
@@ -532,7 +532,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     let path = cli.config.unwrap_or_else(default_config_path);
     let cmd = match cli.cmd {
         Some(c) => c,
-        None if atr::tui::default_is_tui() => Cmd::Tui {
+        None => Cmd::Tui {
             prompt: None,
             provider: None,
             session: None,
@@ -540,12 +540,6 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             repo: None,
             new: false,
         },
-        None => {
-            let mut cmd = Cli::command();
-            cmd.print_help()?;
-            println!();
-            return Ok(ExitCode::from(2));
-        }
     };
     if !matches!(cmd, Cmd::Serve) {
         atr::logrotate::init_tracing(None);

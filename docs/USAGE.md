@@ -26,29 +26,29 @@ atr tui "what is 2+2?"
 
 Other agents and scripts can also hand it work through MCP, the HTTP API, Telegram, or an inbox folder. See [Hand work to atr](#hand-work-to-atr).
 
-`atr serve` (or the user service) must be running for queued work to start. `atr tui` is the exception: it runs the engine in-process and does not need serve.
+`atr serve` (or the user service) must be running for queued work to start. A bare `atr` / `atr tui` is the exception: it runs the engine in-process and does not need serve. Serve never auto-dispatches TUI sessions (`cli-*`); those turns run only in the TUI process.
 
 ### Terminal TUI (`atr tui`)
 
-A thin terminal session: transcript plus a status footer (provider / model / tokens / cache hit % when known). It does **not** clone the dashboard and does **not** share history with Telegram.
+A thin terminal session: transcript plus a status footer (provider / model / tokens / cache hit % when known). It does **not** clone the dashboard and does **not** share history with Telegram. A bare `atr` (no subcommand) is the same as `atr tui`. `atr serve` stays an explicit subcommand.
 
 ```bash
-atr tui                      # interactive; /quit to leave
+atr                          # interactive TUI; /quit to leave
+atr tui                      # same
 atr tui "what is 2+2?"       # one turn, print the answer, exit
 atr tui --session work --provider grok
 ```
 
-Sessions are normal atr tasks keyed `cli-<name>` (default `cli-default`), the same idea as Telegram's `tg<chat>` keys but a separate history. Resume, the stable prompt prefix, and provider-switch handoff are the existing task machinery.
+Sessions are normal atr tasks keyed `cli-<name>` (default `cli-default`), the same idea as Telegram's `tg<chat>` keys but a separate history. Resume, the stable prompt prefix, and provider-switch handoff are the existing task machinery. Serve owns daemon work (Telegram, GitHub, `atr add`); the TUI process owns `cli-*`.
 
-Provider for a TUI session: session pin (`/provider` or `--provider`) → `ATR_TUI_PROVIDER` → optional `[tui] providers` list → global `[[provider]]` order. Mid-session `/provider` and `/model` stick for that session; switching provider triggers the existing handoff brief.
+Provider for a TUI session: session pin (`/provider` or `--provider`) → optional `[tui] providers` list → global `[[provider]]` order. Mid-session `/provider` and `/model` stick for that session; switching provider triggers the existing handoff brief.
 
-| Flag / env | Effect |
+| Flag | Effect |
 |---|---|
-| `--provider` / `ATR_TUI_PROVIDER` | Preferred provider at launch |
+| `--provider` | Preferred provider at launch |
 | `--session <name>` | Task key `cli-<name>` (default `default`) |
 | `--dir` / `--repo` | Workspace; omit for answer-only |
 | `--new` | Drop the previous `cli-<name>` task |
-| `ATR_DEFAULT=tui` | Bare `atr` is `atr tui` (explicit subcommands unchanged) |
 
 Interactive commands: `/help` `/status` `/provider <name>` `/model <name>` `/new` `/quit`.
 

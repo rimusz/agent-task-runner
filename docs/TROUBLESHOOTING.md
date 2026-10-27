@@ -152,10 +152,10 @@ owner's env var, ok/warn/fail and days left without printing values.
 
 ## 6b. Terminal TUI
 
-- `atr tui` runs the engine in-process. It does **not** need `atr serve`.
-- Session keys are `cli-<name>` (default `cli-default`), separate from Telegram.
-- No provider: check `atr providers`, `ATR_TUI_PROVIDER`, or `[tui] providers`.
-- `ATR_DEFAULT=tui` only affects a bare `atr`; `atr add` and other subcommands stay the same.
+- A bare `atr` / `atr tui` runs the engine in-process. It does **not** need `atr serve`.
+- Session keys are `cli-<name>` (default `cli-default`), separate from Telegram. Serve never starts those tasks.
+- No provider: check `atr providers`, `--provider`, or `[tui] providers`.
+- `atr serve` is still an explicit subcommand; a bare `atr` is the TUI.
 
 ## 7. Notify hook
 

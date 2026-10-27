@@ -1,5 +1,5 @@
 //! `atr tui` runs the engine in-process (no `atr serve`) with fake CLIs.
-use atr::{tui, Shared};
+use atr::{tui, Shared, SubmitOpts};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -208,36 +208,107 @@ fn session_key_helpers() {
     assert!(!tui::is_tui_key("tg42"));
 }
 
+#[tokio::test]
+async fn serve_dispatch_skips_tui_session() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    let enqueue = |key: &str, body: &str| {
+        shared
+            .submit_with(
+                key,
+                body,
+                "cli",
+                None,
+                None,
+                false,
+                true,
+                SubmitOpts {
+                    workspace_kind: Some("none".into()),
+                    output_kind: Some("reply".into()),
+                    output_spec: None,
+                    source_kind: Some("cli".into()),
+                    title: Some(key.into()),
+                    allow_empty_repo: true,
+                    provider_hint: Some("claude".into()),
+                    needs: Vec::new(),
+                },
+            )
+            .unwrap()
+    };
+    enqueue("cli-hold", "tui turn");
+    enqueue("demo-1", "worker turn");
+    assert!(atr::scheduler::serve_dispatches("demo-1"));
+    assert!(!atr::scheduler::serve_dispatches("cli-hold"));
+
+    atr::scheduler::dispatch_available(&shared).await.unwrap();
+    wait_status(&shared, "demo-1", &["waiting", "done"], 8000).await;
+    let tui = shared.db.get_task("cli-hold").unwrap().unwrap();
+    assert_eq!(tui.status, "queued", "serve must not start cli-* sessions");
+    assert!(shared.db.list_runs(Some("cli-hold")).unwrap().is_empty());
+
+    atr::scheduler::dispatch_key(&shared, "cli-hold")
+        .await
+        .unwrap();
+    wait_status(&shared, "cli-hold", &["waiting", "done"], 8000).await;
+    let runs = shared.db.list_runs(Some("cli-hold")).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].outcome.as_deref(), Some("success"));
+}
+
+async fn wait_status(shared: &Shared, key: &str, want: &[&str], ms: u64) {
+    let start = std::time::Instant::now();
+    loop {
+        if let Ok(Some(t)) = shared.db.get_task(key) {
+            if want.iter().any(|w| t.status == *w) {
+                return;
+            }
+        }
+        if start.elapsed() > std::time::Duration::from_millis(ms) {
+            let st = shared
+                .db
+                .get_task(key)
+                .ok()
+                .flatten()
+                .map(|t| t.status)
+                .unwrap_or_else(|| "missing".into());
+            panic!("timeout waiting for {key} in {want:?}, last={st}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+}
+
 #[test]
-fn atr_default_bare_command_routes_to_tui() {
+fn bare_atr_launches_tui() {
     let (dir, cfg) = setup_bin_cfg();
     let out = atr()
         .env("ATR_CONFIG", &cfg)
         .env("HOME", dir.path().join("home"))
-        .env("ATR_DEFAULT", "tui")
-        .arg("what is two plus two?")
+        .arg("--help")
         .output()
         .unwrap();
-    // A prompt without a subcommand is still invalid; ATR_DEFAULT only
-    // applies to a bare `atr`. The one-shot form is `atr tui "…"`.
-    assert!(!out.status.success());
-
-    let out = atr()
-        .env("ATR_CONFIG", &cfg)
-        .env("HOME", dir.path().join("home"))
-        .env_remove("ATR_DEFAULT")
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2));
+    assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
-    assert!(help.contains("Usage:"), "{help}");
+    assert!(help.contains("tui"), "{help}");
+    assert!(help.contains("serve"), "{help}");
+    assert!(!help.contains("ATR_DEFAULT"), "{help}");
+    assert!(!help.contains("ATR_TUI_PROVIDER"), "{help}");
 
     let out = atr()
         .env("ATR_CONFIG", &cfg)
         .env("HOME", dir.path().join("home"))
-        .env("ATR_DEFAULT", "tui")
-        .env("ATR_TUI_PROVIDER", "grok")
-        .args(["tui", "status please", "--session", "bin"])
+        .args([
+            "tui",
+            "status please",
+            "--session",
+            "bin",
+            "--provider",
+            "grok",
+        ])
         .output()
         .unwrap();
     let text = format!(
@@ -249,12 +320,9 @@ fn atr_default_bare_command_routes_to_tui() {
     assert!(text.contains("cli-bin"), "{text}");
     assert!(text.contains("grok"), "{text}");
 
-    // Bare `atr` with ATR_DEFAULT=tui is the same as `atr tui` (REPL; EOF ends it).
     let mut child = atr()
         .env("ATR_CONFIG", &cfg)
         .env("HOME", dir.path().join("home"))
-        .env("ATR_DEFAULT", "tui")
-        .env("ATR_TUI_PROVIDER", "grok")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -262,7 +330,7 @@ fn atr_default_bare_command_routes_to_tui() {
         .unwrap();
     {
         let mut stdin = child.stdin.take().unwrap();
-        writeln!(stdin, "hello from default").unwrap();
+        writeln!(stdin, "hello from bare atr").unwrap();
     }
     let out = child.wait_with_output().unwrap();
     let text = format!(
@@ -272,18 +340,18 @@ fn atr_default_bare_command_routes_to_tui() {
     );
     assert!(out.status.success(), "{text}");
     assert!(text.contains("cli-default"), "{text}");
-    assert!(text.contains("grok"), "{text}");
 }
 
 #[test]
-fn tui_help_documents_flags_and_env() {
+fn tui_help_documents_flags() {
     let out = atr().args(["tui", "--help"]).output().unwrap();
     assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
     assert!(help.contains("--provider"), "{help}");
-    assert!(help.contains("ATR_TUI_PROVIDER"), "{help}");
     assert!(help.contains("--session"), "{help}");
     assert!(help.contains("--new"), "{help}");
+    assert!(!help.contains("ATR_TUI_PROVIDER"), "{help}");
+    assert!(!help.contains("ATR_DEFAULT"), "{help}");
 }
 
 fn setup_bin_cfg() -> (TempDir, std::path::PathBuf) {

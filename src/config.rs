@@ -81,7 +81,7 @@ pub struct RawConfig {
     pub mcp: RawMcp,
     #[serde(default)]
     pub cache: RawCache,
-    /// Optional TUI provider order (`atr tui`). Empty = global `[[provider]]`.
+    /// Optional TUI provider order (bare `atr` / `atr tui`). Empty = global `[[provider]]`.
     #[serde(default)]
     pub tui: RawTui,
     /// Repeatable intake sources. Empty = current defaults (GitHub if `[github]
@@ -118,8 +118,8 @@ impl Default for RawCache {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RawTui {
-    /// Ordered preference for `atr tui`. First usable name wins; empty = global
-    /// `[[provider]]` order (after a session pin or `ATR_TUI_PROVIDER`).
+    /// Ordered preference for bare `atr` / `atr tui`. First usable name wins;
+    /// empty = global `[[provider]]` order (after a session pin or `--provider`).
     #[serde(default)]
     pub providers: Vec<String>,
 }

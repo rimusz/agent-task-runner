@@ -34,8 +34,6 @@ Environment (not secrets):
 | Variable | Effect |
 |---|---|
 | `ATR_CONFIG` | Config path (same as `--config`) |
-| `ATR_DEFAULT=tui` | Bare `atr` launches `atr tui` |
-| `ATR_TUI_PROVIDER` | Preferred provider for a TUI session at launch (same as `atr tui --provider`) |
 
 `atr config get github.label` and `atr config set github.label for:atr` (or
 Telegram `/config get` / `/config set`, which Confirm first) edit the same file
@@ -327,7 +325,7 @@ atr picks providers in three separate places:
 | **Driver** (planning + review) | top-level `driver = "<provider name>"` | `grok` if that provider is enabled, else the first enabled `[[provider]]` |
 | **Workers** (normal tasks) | `[[provider]]` order + `enabled` | first available provider in order |
 | **Telegram assistant** (free-text chat) | `[telegram.assistant] providers` (ordered list), else `provider` | first available provider in order (it does **not** use `driver`) |
-| **TUI** (`atr tui`) | session pin, then `ATR_TUI_PROVIDER` / `--provider`, then `[tui] providers` | first available provider in order (it does **not** use `driver`) |
+| **TUI** (bare `atr` / `atr tui`) | session pin, then `--provider`, then `[tui] providers` | first available provider in order (it does **not** use `driver`) |
 
 The model is always per provider: `[[provider]] model` (empty = the CLI's own
 default). There is no per-task model override; to run a task on another model,
@@ -350,8 +348,8 @@ enabled = true
 provider = "grok"            # optional; empty = first available in order
 # providers = ["grok", "codex", "claude"]  # optional ordered list; wins over provider
 
-# Optional TUI order (`atr tui`). Empty = global [[provider]] order after
-# the session pin and ATR_TUI_PROVIDER / --provider.
+# Optional TUI order (bare `atr` / `atr tui`). Empty = global [[provider]]
+# order after the session pin and --provider.
 # [tui]
 # providers = ["grok", "claude"]
 ```
