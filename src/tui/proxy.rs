@@ -6,25 +6,17 @@
 //! that CLI's own interactive TUI. This module maps what we can without
 //! inventing a second catalog:
 //!
-//! * `/model <id>` → next-turn `--model` (the flag those CLIs accept)
-//! * `/model` with no args → `grok models` / `opencode models` when that
-//!   subcommand exists; otherwise forward `/model` as the print-mode
-//!   prompt (Claude honors it)
+//! * `/model` is atr-local (see [`collect_models`]): never a chat turn
 //! * `/cli` → spawn the provider CLI *without* `-p` / `exec` / json, on
 //!   the session worktree, resuming when we have an id
 
 use crate::app::Shared;
 use crate::config::Provider;
+use crate::tui::slash::ModelChoice;
 use crate::tui::{session_model, tui_provider_now, Workspace};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ModelAction {
-    Note(String),
-    Forward(String),
-}
 
 pub(crate) fn models_argv(kind: &str) -> Option<&'static [&'static str]> {
     match kind {
@@ -33,51 +25,101 @@ pub(crate) fn models_argv(kind: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-pub(crate) fn handle_model(
-    shared: &Shared,
-    key: &str,
-    ws: &Workspace,
-    arg: Option<String>,
-) -> Result<ModelAction> {
-    if let Some(name) = arg {
-        let name = name.trim();
-        if name.is_empty() {
-            return handle_model(shared, key, ws, None);
-        }
-        shared.db.meta_set(&crate::tui::model_meta_key(key), name)?;
-        return Ok(ModelAction::Note(format!(
-            "next turn passes --model {name} to the provider CLI \
-             (atr does not own the model catalog)."
-        )));
-    }
-
+pub(crate) fn collect_models(shared: &Shared, key: &str, ws: &Workspace) -> Vec<ModelChoice> {
     let Some((kind, cli, pname)) = current_kind_cli(shared, key) else {
-        return Ok(ModelAction::Note(
-            "no provider yet. /provider to pick one, then /model or type a message.".into(),
-        ));
+        return Vec::new();
     };
-    let cwd = session_cwd(shared, key, ws);
-    if models_argv(&kind).is_some() {
-        match run_models_list(&cli, &kind, &cwd) {
-            Ok(text) => {
-                let text = text.trim();
-                return Ok(ModelAction::Note(format!(
-                    "{pname} ({kind}) models via `{} models`:\n{text}\n\n\
-                     /model <id> maps to --model. /cli opens the provider TUI picker.",
-                    cli.display()
-                )));
+    let cfg = shared.config.read().unwrap().clone();
+    let current = session_model(&shared.db, key);
+    let mut out: Vec<ModelChoice> = Vec::new();
+    let mut push = |name: String, tag: &str| {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        if let Some(e) = out.iter_mut().find(|m| m.name == name) {
+            if !e.tag.contains(tag) {
+                e.tag = format!("{}, {tag}", e.tag);
             }
-            Err(e) => {
-                return Ok(ModelAction::Note(format!(
-                    "could not run `{} models`: {e:#}\n\
-                     /model <id> maps to --model. /cli opens {kind}'s own TUI.",
-                    cli.display()
-                )));
+            return;
+        }
+        let is_cur = current.as_deref() == Some(name.as_str());
+        out.push(ModelChoice {
+            name,
+            tag: tag.to_string(),
+            current: is_cur,
+        });
+    };
+
+    if let Some(m) = &current {
+        push(m.clone(), "session");
+    }
+    if let Some(p) = cfg.provider(&pname) {
+        if !p.model.trim().is_empty() {
+            push(p.model.clone(), "config");
+        }
+    }
+    if let Some(m) = crate::detect::cli_default_model(&kind) {
+        push(m, "detect");
+    }
+    if let Ok(runs) = shared.db.list_runs(Some(key)) {
+        if let Some(m) = runs
+            .last()
+            .and_then(|r| r.model.clone())
+            .filter(|s| !s.is_empty())
+        {
+            push(m, "last-run");
+        }
+    }
+    for p in &cfg.providers {
+        if p.kind == kind && p.name != pname && !p.model.trim().is_empty() {
+            push(p.model.clone(), &format!("config:{}", p.name));
+        }
+    }
+    if kind == "opencode" {
+        for b in crate::presets::BUILTINS {
+            push(b.model.to_string(), "preset");
+        }
+    }
+    if models_argv(&kind).is_some() {
+        let cwd = session_cwd(shared, key, ws);
+        if let Ok(text) = run_models_list(&cli, &kind, &cwd) {
+            for id in parse_cli_model_ids(&text) {
+                push(id, "cli");
             }
         }
     }
-    // Claude / Cursor: `/model` is accepted as the -p prompt.
-    Ok(ModelAction::Forward("/model".into()))
+    if let Some(cur) = &current {
+        if let Some(e) = out.iter_mut().find(|m| m.name == *cur) {
+            e.current = true;
+        }
+    } else if let Some(e) = out.iter_mut().find(|m| m.tag.contains("config")) {
+        e.current = true;
+    }
+    out
+}
+
+pub(crate) fn parse_cli_model_ids(text: &str) -> Vec<String> {
+    let mut out = crate::detect::parse_models(text);
+    for line in text.lines() {
+        let tok = line.split_whitespace().next().unwrap_or("");
+        if !looks_like_model_id(tok) {
+            continue;
+        }
+        if !out.iter().any(|e| e == tok) {
+            out.push(tok.to_string());
+        }
+    }
+    out
+}
+
+fn looks_like_model_id(s: &str) -> bool {
+    if s.len() < 2 || s.starts_with('-') || s.starts_with('#') {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':'))
+        && s.chars().any(|c| c.is_ascii_alphanumeric())
 }
 
 pub(crate) fn run_models_list(cli: &Path, kind: &str, cwd: &Path) -> Result<String> {
@@ -243,6 +285,14 @@ pub(crate) fn run_native_cli(shared: &Shared, key: &str, ws: &Workspace) -> Resu
 mod tests {
     use super::*;
     use crate::config::Provider;
+
+    #[test]
+    fn parse_cli_model_ids_accepts_simple_and_slash_ids() {
+        let ids = parse_cli_model_ids("test-model\ntest-model-2\nmoonshotai/kimi-k2.6\n# skip\n");
+        assert!(ids.iter().any(|s| s == "test-model"), "{ids:?}");
+        assert!(ids.iter().any(|s| s == "test-model-2"), "{ids:?}");
+        assert!(ids.iter().any(|s| s == "moonshotai/kimi-k2.6"), "{ids:?}");
+    }
 
     #[test]
     fn models_argv_only_for_clis_that_have_it() {

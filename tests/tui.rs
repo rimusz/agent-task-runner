@@ -132,6 +132,43 @@ async fn oneshot_runs_in_process_without_serve() {
 }
 
 #[tokio::test]
+async fn model_slash_is_atr_local_for_claude() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    assert_eq!(tui::classify_line("/model"), "model");
+    assert_eq!(tui::classify_line("/model sonnet"), "model");
+    let kind = tui::preview_line(&shared, "cli-default", "/model").unwrap();
+    assert_eq!(kind, "model-picker", "{kind}");
+    assert!(
+        shared.db.list_runs(Some("cli-default")).unwrap().is_empty(),
+        "bare /model must not enqueue a turn"
+    );
+    let out = tui::preview_line(&shared, "cli-default", "/model sonnet").unwrap();
+    assert!(out.starts_with("note"), "{out}");
+    assert!(out.contains("sonnet"), "{out}");
+    assert!(
+        shared.db.list_runs(Some("cli-default")).unwrap().is_empty(),
+        "/model <id> must not enqueue a turn"
+    );
+    tui::set_session_model(&shared, "cli-default", "sonnet").unwrap();
+    assert_eq!(
+        tui::session_model(&shared.db, "cli-default").as_deref(),
+        Some("sonnet")
+    );
+    let footer = tui::footer_line(&shared, "cli-default");
+    assert!(footer.contains("sonnet"), "{footer}");
+    assert_eq!(
+        tui::preview_line(&shared, "cli-default", "/compact").unwrap(),
+        "turn"
+    );
+}
+
+#[tokio::test]
 async fn oneshot_rejects_missing_prompt() {
     let (_dir, shared, _cfg) = no_serve(&[
         ("claude", true, "success"),
@@ -411,6 +448,10 @@ fn line_mode_slashes_are_not_unknown_command() {
     );
     assert!(out.status.success(), "{text}");
     assert!(!text.contains("unknown command"), "{text}");
+    assert!(
+        !text.contains("built-in Claude") && !text.contains("nothing for me to execute"),
+        "bare /model must not be forwarded as Claude chat: {text}"
+    );
     assert!(text.contains("Chat"), "{text}");
     assert!(
         text.contains("Provider CLI") || text.contains("/cli"),

@@ -96,6 +96,13 @@ struct Picker {
     title: String,
     items: Vec<String>,
     state: ListState,
+    kind: PickerKind,
+}
+
+#[derive(Clone, Copy)]
+enum PickerKind {
+    Provider,
+    Model,
 }
 
 #[derive(Clone, Copy)]
@@ -228,7 +235,7 @@ fn handle_key(
         return Ok(Some(LoopEnd::Quit(ExitCode::SUCCESS)));
     }
     if app.picker.is_some() {
-        return handle_picker(app, shared, key, ev);
+        return handle_picker(app, shared, key, ws, ev);
     }
     match ev.code {
         KeyCode::Enter => {
@@ -298,6 +305,7 @@ fn handle_picker(
     app: &mut App,
     shared: &Shared,
     key: &str,
+    ws: &Workspace,
     ev: KeyEvent,
 ) -> Result<Option<LoopEnd>> {
     let Some(picker) = app.picker.as_mut() else {
@@ -319,27 +327,42 @@ fn handle_picker(
         KeyCode::Enter => {
             let i = picker.state.selected().unwrap_or(0);
             if let Some(name) = picker.items.get(i).cloned() {
+                let kind = picker.kind;
                 app.picker = None;
-                if let Step::Note(msg) = super::apply_provider_pick(shared, key, &name)? {
-                    app.push(Role::System, msg);
-                    app.status = footer_line(shared, key);
-                }
+                picker_apply(app, shared, key, ws, kind, &name)?;
             }
         }
         KeyCode::Char(c) if c.is_ascii_digit() => {
             let n = c.to_digit(10).unwrap_or(0) as usize;
             if n >= 1 && n <= picker.items.len() {
                 let name = picker.items[n - 1].clone();
+                let kind = picker.kind;
                 app.picker = None;
-                if let Step::Note(msg) = super::apply_provider_pick(shared, key, &name)? {
-                    app.push(Role::System, msg);
-                    app.status = footer_line(shared, key);
-                }
+                picker_apply(app, shared, key, ws, kind, &name)?;
             }
         }
         _ => {}
     }
     Ok(None)
+}
+
+fn picker_apply(
+    app: &mut App,
+    shared: &Shared,
+    key: &str,
+    ws: &Workspace,
+    kind: PickerKind,
+    name: &str,
+) -> Result<()> {
+    let step = match kind {
+        PickerKind::Provider => super::apply_provider_pick(shared, key, name)?,
+        PickerKind::Model => super::apply_model_pick(shared, key, ws, name)?,
+    };
+    if let Step::Note(msg) = step {
+        app.push(Role::System, msg);
+        app.status = footer_line(shared, key);
+    }
+    Ok(())
 }
 
 fn submit_line(
@@ -389,8 +412,29 @@ fn apply_step(
                 title: "Provider  (Enter / number · Esc cancel)".into(),
                 items: list.iter().map(|p| p.name.clone()).collect(),
                 state,
+                kind: PickerKind::Provider,
             });
             app.push(Role::System, slash::format_provider_list(&list));
+            Ok(None)
+        }
+        Step::OpenModelPicker => {
+            let list = proxy::collect_models(shared, key, ws);
+            let (kind, _, pname) = proxy::current_kind_cli(shared, key)
+                .unwrap_or_else(|| ("?".into(), Default::default(), "none".into()));
+            if list.is_empty() {
+                app.push(Role::System, slash::model_empty_hint(&pname, &kind));
+                return Ok(None);
+            }
+            let sel = list.iter().position(|m| m.current).unwrap_or(0);
+            let mut state = ListState::default();
+            state.select(Some(sel));
+            app.picker = Some(Picker {
+                title: "Model  (Enter / number · Esc cancel)".into(),
+                items: list.iter().map(|m| m.name.clone()).collect(),
+                state,
+                kind: PickerKind::Model,
+            });
+            app.push(Role::System, slash::model_pick_usage(&pname, &kind, &list));
             Ok(None)
         }
         Step::NativeCli => Ok(Some(LoopEnd::Native)),

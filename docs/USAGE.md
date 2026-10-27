@@ -52,7 +52,7 @@ Provider for a TUI / `ask` session: session pin (`/provider` or `--provider`) �
 | `--dir` / `--repo` | Workspace; omit for answer-only |
 | `--new` | Drop the previous `cli-<name>` task |
 
-atr is a session host, not a second slash dialect. `/provider` (list/pick), `/new`, `/quit`, `/status`, `/help`, and `/cli` are atr-local. Every other `/…` (including `/model`, `/compact`, `/plan`, skills) is proxied to the selected provider CLI on the next headless turn. Claude honors `/model` in print mode (`-p`). Grok's `/model` picker is TUI-only — `/model` with no args runs `grok models`, `/model <id>` maps to `--model` for the next spawn, and `/cli` opens grok's own interactive TUI (resume when atr has a session id). OpenCode is the same via `opencode models`. atr never says "unknown command" for a slash. `/atr …` namespaces the host commands if a provider slash collides.
+atr is a session host. `/provider` and `/model` are atr-local pickers (never sent as chat). `/model` lists models for the current provider from config, detect, last run, and `grok models` / `opencode models` when that CLI has the subcommand — it does not invent a catalog. `/model <id>` sets the session override immediately (footer updates; next spawn uses that CLI's `--model` flag). If the list is empty: `/model <id>` if you know the id, or `atr providers model <name> <id>`. `/cli` opens the provider's own TUI (full native `/model` picker). `/new` `/quit` `/status` `/help` stay atr-local. Other `/…` (`/compact`, `/plan`, skills) still go to the provider on the next turn. `/atr …` namespaces host commands if a provider slash collides.
 
 ### First run
 

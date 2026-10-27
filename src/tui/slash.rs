@@ -1,9 +1,8 @@
 //! Slash routing for the TUI host.
 //!
-//! atr owns a short list of session commands. Every other `/…` line is
-//! forwarded to the selected provider CLI (headless turn, or that CLI's
-//! non-interactive control). atr never reports "unknown command" for a
-//! slash — that was a fake second dialect.
+//! atr-local: `/provider`, `/model`, `/new`, `/quit`, `/status`, `/help`,
+//! `/cli`. Every other `/…` is forwarded to the selected provider CLI.
+//! `/model` never becomes a chat turn.
 
 use crate::app::Shared;
 use crate::tui::tui_provider_now;
@@ -15,8 +14,9 @@ pub(crate) enum Slash {
     Status,
     New,
     Provider(Option<String>),
+    Model(Option<String>),
     Cli,
-    /// Full line (`/model`, `/compact`, …) for the provider / proxy path.
+    /// Full line (`/compact`, `/plan`, …) for the provider proxy path.
     Proxy(String),
 }
 
@@ -34,6 +34,14 @@ pub(crate) fn parse_slash(line: &str) -> Option<Slash> {
         "/status" => Some(Slash::Status),
         "/new" => Some(Slash::New),
         "/provider" => Some(Slash::Provider(parts.next().map(str::to_string))),
+        "/model" | "/m" => {
+            let rest: Vec<&str> = parts.collect();
+            Some(Slash::Model(if rest.is_empty() {
+                None
+            } else {
+                Some(rest.join(" "))
+            }))
+        }
         "/cli" | "/native" => Some(Slash::Cli),
         _ => Some(Slash::Proxy(t.to_string())),
     }
@@ -55,23 +63,6 @@ fn strip_atr_ns(raw: &str) -> String {
     }
 }
 
-/// `/model` / `/m` (Grok alias). `/memory` and `/mcps` are not matches.
-pub(crate) fn model_slash(line: &str) -> Option<Option<String>> {
-    let mut parts = line.split_whitespace();
-    let cmd = parts.next()?;
-    match cmd {
-        "/model" | "/m" => {
-            let rest: Vec<&str> = parts.collect();
-            if rest.is_empty() {
-                Some(None)
-            } else {
-                Some(Some(rest.join(" ")))
-            }
-        }
-        _ => None,
-    }
-}
-
 pub(crate) fn slash_help() -> &'static str {
     "\
 atr tui — interactive session host
@@ -81,21 +72,21 @@ Chat
   CLI headless (same engine as `atr ask`): stream-json / -p / exec, not
   that CLI's own full-screen TUI.
 
-Provider CLI slashes
-  Other /commands are sent to the current provider on the next turn.
-  Claude's `/model` works in print mode. Grok's `/model` picker is
-  TUI-only — `grok models` lists ids, `/model <id>` maps to `--model`,
-  `/cli` opens grok itself. Skills and `/compact` / `/plan` / … follow
-  the same rule: forwarded, or use `/cli` when the picker is TUI-only.
-
 atr (this host)
   /provider [name]   list / pick atr providers (enabled · current)
+  /model [id]        list / pick the session model (next spawn --model)
   /status            session, provider, model, tokens, cache
   /new               fresh atr session (same key)
   /cli               open the provider's own interactive TUI
   /quit              leave atr  (/exit /q)
 
-  `/atr …` is the same atr commands if a provider slash collides.
+  `/model` is atr-local for every provider. It is never sent as chat.
+  `/cli` is the full native experience (Grok/Claude's own /model picker).
+  `/atr …` namespaces host commands if a provider slash collides.
+
+Provider CLI slashes
+  Other /commands (/compact, /plan, skills, …) go to the current
+  provider on the next turn. Not /model.
 "
 }
 
@@ -175,6 +166,41 @@ pub(crate) fn provider_pick_usage(list: &[ProviderChoice]) -> String {
     )
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ModelChoice {
+    pub name: String,
+    pub tag: String,
+    pub current: bool,
+}
+
+pub(crate) fn format_model_list(provider: &str, kind: &str, list: &[ModelChoice]) -> String {
+    if list.is_empty() {
+        return model_empty_hint(provider, kind);
+    }
+    let mut lines = vec![format!("Models for {provider} ({kind})  (* current)")];
+    for (i, m) in list.iter().enumerate() {
+        let mark = if m.current { "*" } else { " " };
+        lines.push(format!("  {:>2}  {:<28} {mark}  {}", i + 1, m.name, m.tag));
+    }
+    lines.join("\n")
+}
+
+pub(crate) fn model_pick_usage(provider: &str, kind: &str, list: &[ModelChoice]) -> String {
+    format!(
+        "{}\n\nusage: /model <id or number>\n       atr providers model {provider} <id>\n       /cli opens {kind}'s own TUI",
+        format_model_list(provider, kind, list)
+    )
+}
+
+pub(crate) fn model_empty_hint(provider: &str, kind: &str) -> String {
+    format!(
+        "no model list for {provider} ({kind}). atr does not invent a catalog.\n\
+         Set this session: /model <id>\n\
+         Persist in config: atr providers model {provider} <id>\n\
+         Or /cli for {kind}'s own TUI picker."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,11 +216,12 @@ mod tests {
             parse_slash("/provider grok"),
             Some(Slash::Provider(Some("grok".into())))
         );
-        assert_eq!(parse_slash("/model"), Some(Slash::Proxy("/model".into())));
+        assert_eq!(parse_slash("/model"), Some(Slash::Model(None)));
         assert_eq!(
             parse_slash("/model grok-code"),
-            Some(Slash::Proxy("/model grok-code".into()))
+            Some(Slash::Model(Some("grok-code".into())))
         );
+        assert_eq!(parse_slash("/m"), Some(Slash::Model(None)));
         assert_eq!(
             parse_slash("/compact"),
             Some(Slash::Proxy("/compact".into()))
@@ -208,15 +235,12 @@ mod tests {
 
     #[test]
     fn model_slash_does_not_eat_memory() {
-        assert_eq!(model_slash("/model"), Some(None));
-        assert_eq!(model_slash("/m"), Some(None));
+        assert_eq!(parse_slash("/memory"), Some(Slash::Proxy("/memory".into())));
+        assert_eq!(parse_slash("/mcps"), Some(Slash::Proxy("/mcps".into())));
         assert_eq!(
-            model_slash("/model grok-code"),
-            Some(Some("grok-code".into()))
+            parse_slash("/compact"),
+            Some(Slash::Proxy("/compact".into()))
         );
-        assert_eq!(model_slash("/memory"), None);
-        assert_eq!(model_slash("/mcps"), None);
-        assert_eq!(model_slash("/compact"), None);
     }
 
     #[test]
@@ -225,8 +249,11 @@ mod tests {
         assert!(h.contains("Chat"), "{h}");
         assert!(h.contains("Provider CLI"), "{h}");
         assert!(h.contains("/provider"), "{h}");
+        assert!(h.contains("/model"), "{h}");
+        assert!(h.contains("never sent as chat"), "{h}");
         assert!(h.contains("/cli"), "{h}");
         assert!(!h.contains("unknown command"), "{h}");
+        assert!(!h.contains("Claude's `/model` works in print mode"), "{h}");
     }
 
     #[test]

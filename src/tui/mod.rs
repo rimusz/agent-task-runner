@@ -12,9 +12,9 @@
 //! sessions via [`crate::scheduler::dispatch_key`].
 //!
 //! The interactive UI is a session host: transcript, footer, input.
-//! atr-local slashes are `/provider`, `/new`, `/quit`, `/status`,
-//! `/help`, `/cli`. Every other `/…` is proxied to the selected
-//! provider CLI (headless turn, or that CLI's non-interactive control).
+//! atr-local slashes are `/provider`, `/model`, `/new`, `/quit`,
+//! `/status`, `/help`, `/cli`. `/model` changes the session `--model`
+//! override and is never sent as chat. Other `/…` may be proxied.
 //! `atr ask` never opens the alternate screen.
 //!
 //! First run on a TTY offers [`crate::init::ensure_config`] (the normal
@@ -80,6 +80,7 @@ pub(crate) enum Step {
     Note(String),
     Turn(String),
     OpenProviderPicker,
+    OpenModelPicker,
     NativeCli,
 }
 
@@ -266,6 +267,9 @@ async fn line_interactive(
                     slash::provider_pick_usage(&slash::list_providers(&shared, &key))
                 );
             }
+            Step::OpenModelPicker => {
+                println!("{}", model_picker_text(&shared, &key, &ws));
+            }
             Step::NativeCli => {
                 if interactive_tty() {
                     match proxy::run_native_cli(&shared, &key, &ws) {
@@ -316,17 +320,88 @@ pub(crate) fn step_line(
         }
         Some(slash::Slash::Provider(None)) => Ok(Step::OpenProviderPicker),
         Some(slash::Slash::Provider(Some(name))) => apply_provider_pick(shared, key, &name),
+        Some(slash::Slash::Model(None)) => Ok(Step::OpenModelPicker),
+        Some(slash::Slash::Model(Some(name))) => apply_model_pick(shared, key, ws, &name),
         Some(slash::Slash::Cli) => Ok(Step::NativeCli),
-        Some(slash::Slash::Proxy(cmd)) => {
-            if let Some(arg) = slash::model_slash(&cmd) {
-                match proxy::handle_model(shared, key, ws, arg)? {
-                    proxy::ModelAction::Note(s) => Ok(Step::Note(s)),
-                    proxy::ModelAction::Forward(s) => Ok(Step::Turn(s)),
-                }
-            } else {
-                Ok(Step::Turn(cmd))
-            }
-        }
+        Some(slash::Slash::Proxy(cmd)) => Ok(Step::Turn(cmd)),
+    }
+}
+
+pub(crate) fn apply_model_pick(
+    shared: &Shared,
+    key: &str,
+    ws: &Workspace,
+    input: &str,
+) -> Result<Step> {
+    let list = proxy::collect_models(shared, key, ws);
+    let names: Vec<String> = list.iter().map(|m| m.name.clone()).collect();
+    if let Some(name) = slash::pick_choice(&names, input) {
+        return set_model_note(shared, key, &name);
+    }
+    if input.trim().parse::<usize>().is_ok() {
+        let (kind, _, pname) = proxy::current_kind_cli(shared, key)
+            .unwrap_or_else(|| ("?".into(), Default::default(), "none".into()));
+        return Ok(Step::Note(format!(
+            "no model matching {input:?}.\n{}",
+            slash::model_pick_usage(&pname, &kind, &list)
+        )));
+    }
+    let name = input.trim();
+    if name.is_empty() {
+        return Ok(Step::OpenModelPicker);
+    }
+    set_model_note(shared, key, name)
+}
+
+fn set_model_note(shared: &Shared, key: &str, name: &str) -> Result<Step> {
+    shared.db.meta_set(&model_meta_key(key), name)?;
+    Ok(Step::Note(format!(
+        "model {name} (this session; next turn uses the provider --model flag)\n{}",
+        footer_line(shared, key)
+    )))
+}
+
+fn model_picker_text(shared: &Shared, key: &str, ws: &Workspace) -> String {
+    let list = proxy::collect_models(shared, key, ws);
+    let (kind, _, pname) = proxy::current_kind_cli(shared, key)
+        .unwrap_or_else(|| ("?".into(), Default::default(), "none".into()));
+    slash::model_pick_usage(&pname, &kind, &list)
+}
+
+/// What a TUI line would do. Tests lock `/model` out of the turn path.
+pub fn classify_line(line: &str) -> &'static str {
+    match slash::parse_slash(line.trim()) {
+        None => "chat",
+        Some(slash::Slash::Help) => "help",
+        Some(slash::Slash::Quit) => "quit",
+        Some(slash::Slash::Status) => "status",
+        Some(slash::Slash::New) => "new",
+        Some(slash::Slash::Provider(_)) => "provider",
+        Some(slash::Slash::Model(_)) => "model",
+        Some(slash::Slash::Cli) => "cli",
+        Some(slash::Slash::Proxy(_)) => "proxy",
+    }
+}
+
+pub fn set_session_model(shared: &Shared, key: &str, model: &str) -> Result<()> {
+    shared.db.meta_set(&model_meta_key(key), model.trim())?;
+    Ok(())
+}
+
+/// Run a TUI slash/chat classify+apply without spawning a turn.
+/// Returns `turn` only when the line would enqueue a provider run.
+pub fn preview_line(shared: &Shared, key: &str, line: &str) -> Result<String> {
+    let ws = Workspace {
+        kind: WorkspaceKind::None,
+        repo: None,
+    };
+    match step_line(shared, key, &ws, None, line)? {
+        Step::Turn(_) => Ok("turn".into()),
+        Step::Note(s) => Ok(format!("note\n{s}")),
+        Step::OpenModelPicker => Ok("model-picker".into()),
+        Step::OpenProviderPicker => Ok("provider-picker".into()),
+        Step::Quit => Ok("quit".into()),
+        Step::NativeCli => Ok("cli".into()),
     }
 }
 
@@ -737,6 +812,17 @@ mod tests {
         );
         assert_eq!(launch_provider(Some("")), None);
         assert_eq!(launch_provider(None), None);
+    }
+
+    #[test]
+    fn model_lines_never_classify_as_chat_or_proxy() {
+        assert_eq!(classify_line("/model"), "model");
+        assert_eq!(classify_line("/model sonnet"), "model");
+        assert_eq!(classify_line("/m"), "model");
+        assert_eq!(classify_line("/atr model opus"), "model");
+        assert_eq!(classify_line("/compact"), "proxy");
+        assert_eq!(classify_line("hello"), "chat");
+        assert_eq!(classify_line("/provider"), "provider");
     }
 
     #[test]
