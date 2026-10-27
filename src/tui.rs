@@ -10,6 +10,10 @@
 //! Serve owns daemon work (Telegram, GitHub, `atr add`, …). It never
 //! auto-dispatches `cli-*` keys. The TUI / `ask` process owns those
 //! sessions via [`crate::scheduler::dispatch_key`].
+//!
+//! First run on a TTY offers [`crate::init::ensure_config`] (the normal
+//! `atr init`) when config is missing, then continues. Non-TTY / CI
+//! fails with a pointer to `atr init` / `atr init --yes`.
 
 use crate::app::{Shared, SubmitOpts};
 use crate::db::Db;

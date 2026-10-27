@@ -204,7 +204,7 @@ pub fn run(opts: InitOpts) -> Result<String> {
             Err(e) => out.push_str(&format!("add current repo: {e:#}\n")),
         }
     }
-    if !opts.no_service {
+    if offer_service_install(opts.yes, opts.no_service)? {
         match crate::config::load_config(&opts.config_path) {
             Ok(cfg) => {
                 match service::install_for_init(Some(&cfg), &opts.config_path, opts.force_service) {
@@ -217,8 +217,46 @@ pub fn run(opts: InitOpts) -> Result<String> {
             }
             Err(e) => out.push_str(&format!("config load after init: {e:#}\n")),
         }
+    } else {
+        out.push_str(SERVICE_SKIPPED_HINT);
+        out.push('\n');
     }
     Ok(out)
+}
+
+/// Printed when init skips the user service so “no” is not a dead end.
+pub const SERVICE_SKIPPED_HINT: &str =
+    "skipped user service. Bare `atr` / `atr tui` / `atr ask` still work in-process. Telegram, GitHub watching, and queued `atr add` need `atr service install` or `atr serve` later.";
+
+/// What the user service is for, plus platform install notes.
+pub fn service_offer_explainer() -> String {
+    let mut s = String::from(
+        "The user service runs `atr serve` in the background so Telegram, GitHub watching, and queued `atr add` keep working when you are not in the TUI.\n",
+    );
+    if cfg!(target_os = "macos") {
+        s.push_str(
+            "This installs LaunchAgent `dev.atr.serve` (load it from the desktop session, not SSH).\n",
+        );
+    } else {
+        s.push_str(
+            "This installs systemd user unit `atr.service`. On a headless Linux host also run `sudo loginctl enable-linger \"$USER\"` so it survives logout.\n",
+        );
+    }
+    s.push_str("Say no to skip; you can run `atr service install` or `atr serve` later.\n");
+    s
+}
+
+/// `--no-service` skips; `--yes` installs (existing convention); otherwise
+/// explain and ask on a TTY (`yn` refuses without a terminal).
+pub fn offer_service_install(yes: bool, no_service: bool) -> Result<bool> {
+    if no_service {
+        return Ok(false);
+    }
+    if yes {
+        return Ok(true);
+    }
+    eprint!("{}", service_offer_explainer());
+    yn("Install the user service now", true, false)
 }
 
 fn ensure_mcp_token(config_path: &Path, yes: bool) -> Result<Option<String>> {
@@ -719,6 +757,84 @@ pub async fn run_and_doctor(opts: InitOpts) -> Result<String> {
     Ok(text)
 }
 
+/// Hint for scripts / CI when config is missing (never hangs on prompts).
+pub fn config_missing_hint(path: &Path) -> String {
+    format!(
+        "config not found at {}. Run `atr init` first, or `atr init --yes` for defaults.",
+        path.display()
+    )
+}
+
+fn interactive_stdio() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+/// Options for [`ensure_config_with`]. Production uses [`ensure_config`].
+#[derive(Debug, Clone)]
+pub struct EnsureConfigOpts {
+    pub config_path: PathBuf,
+    /// `None` detects stdin+stdout TTY. Tests pass `Some(true/false)`.
+    pub tty: Option<bool>,
+    /// Skip the y/N confirm and run `atr init --yes` (tests).
+    pub assume_yes: bool,
+    pub no_service: bool,
+}
+
+/// If config is missing: on a TTY, offer and run the normal `atr init`;
+/// otherwise fail with [`config_missing_hint`]. After a successful init
+/// the caller continues the original command.
+pub async fn ensure_config(path: &Path) -> Result<()> {
+    ensure_config_with(EnsureConfigOpts {
+        config_path: path.to_path_buf(),
+        tty: None,
+        assume_yes: false,
+        no_service: false,
+    })
+    .await
+}
+
+pub async fn ensure_config_with(opts: EnsureConfigOpts) -> Result<()> {
+    if opts.config_path.exists() {
+        return Ok(());
+    }
+    let tty = opts.tty.unwrap_or_else(interactive_stdio);
+    if !tty {
+        bail!("{}", config_missing_hint(&opts.config_path));
+    }
+    eprintln!("No atr config at {}.", opts.config_path.display());
+    eprintln!(
+        "atr needs a config before it can run (providers, workspace). This is the normal `atr init`."
+    );
+    let go = if opts.assume_yes {
+        true
+    } else {
+        yn("Run atr init now", true, false)?
+    };
+    if !go {
+        bail!("{}", config_missing_hint(&opts.config_path));
+    }
+    let init = InitOpts {
+        yes: opts.assume_yes,
+        force: false,
+        no_service: opts.no_service,
+        force_service: false,
+        config_path: opts.config_path.clone(),
+    };
+    let text = if opts.assume_yes {
+        run(init)?
+    } else {
+        run_and_doctor(init).await?
+    };
+    print!("{text}");
+    if !opts.config_path.exists() {
+        bail!(
+            "init finished but config is still missing at {}",
+            opts.config_path.display()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,6 +929,10 @@ mod tests {
         assert!(toml.contains("allowed_chat_ids = []"), "{toml}");
         assert!(!dir.path().join("shadow.env").exists());
         assert!(!msg.to_ascii_lowercase().contains("telegram enabled"));
+        assert!(
+            msg.contains("atr service install") && msg.contains("in-process"),
+            "skipping the service must say how to install later: {msg}"
+        );
         assert!(
             !dir.path().join(".github").exists(),
             "--yes must not copy the issue template without confirmation"
@@ -936,5 +1056,79 @@ exit 0
             msg.contains("skipped user service") || msg.contains("--force-service"),
             "{msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_config_noop_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "listen = \"127.0.0.1:0\"\n").unwrap();
+        ensure_config_with(EnsureConfigOpts {
+            config_path: path.clone(),
+            tty: Some(false),
+            assume_yes: false,
+            no_service: true,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "listen = \"127.0.0.1:0\"\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_config_non_tty_fails_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("config.toml");
+        let err = ensure_config_with(EnsureConfigOpts {
+            config_path: path.clone(),
+            tty: Some(false),
+            assume_yes: true,
+            no_service: true,
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(!path.exists(), "non-TTY must not run init");
+        assert!(err.contains("atr init"), "{err}");
+        assert!(err.contains("--yes"), "{err}");
+    }
+
+    #[test]
+    fn offer_service_install_follows_flags_and_refuses_non_tty() {
+        assert!(offer_service_install(true, false).unwrap());
+        assert!(!offer_service_install(true, true).unwrap());
+        assert!(!offer_service_install(false, true).unwrap());
+        let err = offer_service_install(false, false).unwrap_err().to_string();
+        assert!(
+            err.contains("not a terminal") || err.contains("--yes"),
+            "{err}"
+        );
+        let explain = service_offer_explainer();
+        assert!(explain.contains("atr serve"), "{explain}");
+        assert!(explain.contains("Telegram"), "{explain}");
+        assert!(
+            explain.contains("atr service install") && explain.contains("atr serve"),
+            "{explain}"
+        );
+        assert!(SERVICE_SKIPPED_HINT.contains("atr service install"),);
+        assert!(SERVICE_SKIPPED_HINT.contains("in-process"),);
+    }
+
+    #[tokio::test]
+    async fn ensure_config_tty_assume_yes_runs_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        ensure_config_with(EnsureConfigOpts {
+            config_path: path.clone(),
+            tty: Some(true),
+            assume_yes: true,
+            no_service: true,
+        })
+        .await
+        .unwrap();
+        assert!(path.exists());
+        crate::config::load_config(&path).unwrap();
     }
 }

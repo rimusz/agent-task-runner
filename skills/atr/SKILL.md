@@ -21,7 +21,7 @@ Secrets live in `~/.config/atr/shadow.env` (mode 0600), never in config.
 
 ## Terminal TUI
 
-A bare `atr` (or `atr tui`) is an interactive in-process chat (transcript + footer). `atr ask "prompt"` is the one-shot / CI entrypoint on the same engine. Serve is not required and never auto-dispatches `cli-*` sessions. Sessions are tasks keyed `cli-<name>` (default `cli-default`), separate from Telegram.
+A bare `atr` (or `atr tui`) is an interactive in-process chat (transcript + footer). `atr ask "prompt"` is the one-shot / CI entrypoint on the same engine. Serve is not required and never auto-dispatches `cli-*` sessions. Sessions are tasks keyed `cli-<name>` (default `cli-default`), separate from Telegram. First run on a TTY offers `atr init` if there is no config, then continues (and asks whether to install the user service); scripts should run `atr init --yes` first (no TTY never auto-inits).
 
 ```bash
 atr ask "what is 2+2?"       # one-shot / CI
@@ -82,7 +82,7 @@ atr telegram setup
 atr doctor
 ```
 
-`atr init` writes `~/.config/atr` (config, `system-prompt.md`, `atr-serve.sh`), detects CLIs, installs this skill into each CLI’s skill dir, installs the user service (LaunchAgent `dev.atr.serve` on macOS, systemd user unit on Linux), and runs doctor. It never overwrites existing files without `--force` (it merges missing keys). It will not replace a loaded `dev.atr.serve` job or install a service for a non-default config unless you pass `--force-service`. On macOS the service must run in the desktop session so Cursor can use the login keychain.
+`atr init` writes `~/.config/atr` (config, `system-prompt.md`, `atr-serve.sh`), detects CLIs, installs this skill into each CLI’s skill dir, and runs doctor. On a TTY it asks whether to install the user service (LaunchAgent `dev.atr.serve` on macOS, systemd user unit `atr.service` on Linux) so Telegram / GitHub / queued `atr add` keep running; `--yes` installs it, `--no-service` skips. Saying no is not a dead end: `atr tui` / `atr ask` still work; install later with `atr service install` or `atr serve`. It never overwrites existing files without `--force` (it merges missing keys). It will not replace a loaded `dev.atr.serve` job or install a service for a non-default config unless you pass `--force-service`. On macOS the service must run in the desktop session so Cursor can use the login keychain. Headless Linux: `sudo loginctl enable-linger "$USER"` so the user unit survives logout.
 
 Override config with `--config` or `ATR_CONFIG`. SQLite defaults to `~/.local/share/atr/state.db`.
 

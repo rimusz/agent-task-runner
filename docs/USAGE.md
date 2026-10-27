@@ -32,6 +32,8 @@ Other agents and scripts can also hand it work through MCP, the HTTP API, Telegr
 
 A thin terminal session: transcript plus a status footer (provider / model / tokens / cache hit % when known). It does **not** clone the dashboard and does **not** share history with Telegram. A bare `atr` (no subcommand) is the same as `atr tui` (interactive). `atr ask "prompt"` is the documented one-shot / CI entrypoint: one turn, print the answer, exit non-zero on failure. `atr serve` stays an explicit subcommand.
 
+On a TTY, the first `atr` / `atr tui` / `atr ask` (and `atr add` / `atr status` / `atr doctor`) offers the normal `atr init` if there is no config yet, then continues the original command. Interactive init asks whether to install the user service (`atr serve` for Telegram / GitHub / queued `atr add`); saying no still leaves `atr tui` / `atr ask` working in-process (`atr service install` later). Scripts and CI (`atr ask` with no TTY) get a clear error pointing at `atr init` or `atr init --yes` — they never hang on prompts.
+
 ```bash
 atr ask "what is 2+2?"                 # one-shot / CI
 atr ask "status" --session ci --provider grok

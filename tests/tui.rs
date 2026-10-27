@@ -394,6 +394,35 @@ fn atr_ask_oneshot_success() {
 }
 
 #[test]
+fn atr_ask_missing_config_non_tty_fails() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("home")).unwrap();
+    let cfg = dir.path().join("missing").join("config.toml");
+    let out = atr()
+        .env("ATR_CONFIG", &cfg)
+        .env("HOME", dir.path().join("home"))
+        .args(["ask", "hello"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "non-TTY ask without config must fail"
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("atr init"), "{text}");
+    assert!(text.contains("--yes"), "{text}");
+    assert!(
+        !text.contains("atr tui  "),
+        "must not start the interactive TUI: {text}"
+    );
+    assert!(!cfg.exists(), "non-TTY must not write config");
+}
+
+#[test]
 fn atr_ask_missing_prompt_fails() {
     let (dir, cfg) = setup_bin_cfg();
     let out = atr()

@@ -20,7 +20,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Write config, prompt, launcher, and install the user service.
+    /// Write config, prompt, launcher. TTY asks about the user service.
     Init {
         /// Accept defaults (non-interactive).
         #[arg(long)]
@@ -177,7 +177,7 @@ enum Cmd {
         #[arg(long)]
         repo: Option<String>,
     },
-    /// One ok/warn/FAIL line per check. Missing config: run atr init.
+    /// One ok/warn/FAIL line per check. Missing config: offers `atr init` on a TTY.
     Doctor {
         /// Render two prompts per provider and assert the cache prefix is stable.
         #[arg(long)]
@@ -556,6 +556,13 @@ async fn main() -> ExitCode {
     }
 }
 
+/// User-facing commands (TUI, ask, add, …): offer `atr init` on a TTY
+/// when config is missing. `atr serve` / service stay strict.
+async fn open_after_init(path: PathBuf) -> Result<std::sync::Arc<Shared>> {
+    atr::init::ensure_config(&path).await?;
+    Shared::open(path)
+}
+
 async fn run(cli: Cli) -> Result<ExitCode> {
     let path = cli.config.unwrap_or_else(default_config_path);
     let cmd = match cli.cmd {
@@ -674,7 +681,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 read_body(body, body_file)?
             };
-            let shared = Shared::open(path)?;
+            let shared = open_after_init(path).await?;
             let cfg = shared.config.read().unwrap().clone();
             atr::task::check_prompt_bytes(&text, cfg.max_prompt_bytes)?;
             let title = title
@@ -791,15 +798,15 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Cmd::Ask { prompt, sess } => {
-            let shared = Shared::open(path)?;
+            let shared = open_after_init(path).await?;
             atr::tui::run_oneshot(shared, sess.into_tui_opts(Some(prompt), true)).await
         }
         Cmd::Tui { prompt, sess } => {
-            let shared = Shared::open(path)?;
+            let shared = open_after_init(path).await?;
             atr::tui::run(shared, sess.into_tui_opts(prompt, false)).await
         }
         Cmd::Status { json, repo } => {
-            let shared = Shared::open(path)?;
+            let shared = open_after_init(path).await?;
             app::print_status(&shared, json, repo.as_deref());
             Ok(ExitCode::SUCCESS)
         }
@@ -948,6 +955,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Doctor { cache, json } => {
+            atr::init::ensure_config(&path).await?;
             let cfg = load_config(&path)?;
             let report = atr::doctor::run(&cfg, &path, cache).await;
             if json {

@@ -109,3 +109,23 @@ fn init_force_keeps_existing_mcp_token() {
     assert!(text.contains("not shown"), "{text}");
     assert_eq!(load_config(&cfg_path).unwrap().mcp.token_file, token_path);
 }
+
+#[test]
+fn serve_missing_config_stays_strict() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("missing").join("config.toml");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_atr"))
+        .env("ATR_CONFIG", &cfg)
+        .env("HOME", dir.path().join("home"))
+        .arg("serve")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("run atr init"), "{text}");
+    assert!(!cfg.exists(), "serve must not auto-init");
+}

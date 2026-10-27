@@ -80,6 +80,8 @@ atr init               # asks a few questions; or: atr init --yes
 atr service install    # runs atr in the background (init usually does this)
 ```
 
+Or run `atr` / `atr tui` / `atr ask` on a TTY: if there is no config yet, atr offers this same `atr init` (including whether to install the user service) and then continues. Scripts should call `atr init --yes` first.
+
 **4. Check it.**
 
 ```bash

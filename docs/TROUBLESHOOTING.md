@@ -15,7 +15,7 @@ broken. Each non-ok line prints a `fix:` hint.
 
 | Check | warn means | FAIL means | Fix |
 |---|---|---|---|
-| `config` | — | config could not load | `atr init`, or fix the TOML error it prints |
+| `config` | — | config could not load | On a TTY, `atr` / `atr tui` / `atr ask` offer `atr init`. Otherwise run `atr init` (or `atr init --yes`), or fix the TOML error it prints |
 | `config keys` | the file has keys this atr does not know (they are ignored); the line names each one and the nearest valid key | — | Fix the typo, delete the key, or upgrade atr if the key belongs to a newer version (normal after a rollback) |
 | `lessons` | lessons are on but the reflect provider (`[lessons] provider`, else the driver) is missing or disabled: only manual lessons get added | — | Set `[lessons] provider` to an enabled provider, or enable the driver |
 | `compare` | `[verify]` is on but some repos have no verify commands: compare can't judge there and `atr add --compare` refuses | — | Set `[verify] commands` or a `[[verify.repo]]` entry with commands |
@@ -153,6 +153,7 @@ owner's env var, ok/warn/fail and days left without printing values.
 ## 6b. Terminal TUI
 
 - A bare `atr` / `atr tui` is the interactive session. `atr ask "prompt"` is one-shot / CI. Both run the engine in-process and do **not** need `atr serve`.
+- No config yet: on a TTY, atr offers the normal `atr init` (including whether to install the user service) then continues. Without a TTY it exits with a pointer to `atr init` / `atr init --yes` (no auto `--yes`).
 - Session keys are `cli-<name>` (default `cli-default`), separate from Telegram. Serve never starts those tasks.
 - No provider: check `atr providers`, `--provider`, or `[tui] providers`.
 - `atr serve` is still an explicit subcommand; a bare `atr` is the TUI.

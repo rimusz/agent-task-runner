@@ -255,7 +255,10 @@ fn install_systemd(load: bool) -> Result<String> {
             bail!("systemctl --user enable --now atr failed");
         }
     }
-    Ok(format!("installed systemd user unit {}", dest.display()))
+    Ok(format!(
+        "installed systemd user unit {}\nOn a headless Linux host, run `sudo loginctl enable-linger \"$USER\"` so the service survives logout.",
+        dest.display()
+    ))
 }
 
 pub fn uninstall() -> Result<String> {
