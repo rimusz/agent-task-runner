@@ -16,7 +16,9 @@ order. A bare `atr` / `atr tui` / `atr ask` follows the session pin, then
 never auto-dispatches `cli-*` TUI sessions. The TUI is a session host:
 `/provider` and `/model` are atr-local pickers (`/model` sets the session
 `--model` override; never a chat turn; the TUI overlay does not dump the
-catalog into the transcript). `/new` `/quit` `/status` `/help`
+catalog into the transcript). The under-input strip stays in sync with
+the session provider/model (`/provider` and `/model` are the switchers).
+`/new` `/quit` `/status` `/help`
 `/cli` stay in atr; other `/…` lines may be proxied. `/cli` opens the
 vendor TUI.
 

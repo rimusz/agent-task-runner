@@ -58,7 +58,7 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   directory and copied into the worktree by filename once the tree exists.
 - **CLI:** `atr add` (prompt + `--dir` / `--repo` / neither) and `atr submit`.
 - **TUI / ask:** a bare `atr` (or `atr tui`) is an interactive in-process
-  chat TUI (ratatui transcript + footer + input). `atr ask "prompt"` is
+  chat TUI (ratatui transcript + composer + under-input status strip). `atr ask "prompt"` is
   the one-shot / CI entrypoint on the same engine (no alternate screen).
   A session is a normal task keyed `cli-<name>` (default `cli-default`),
   separate from Telegram `tg<chat>`. Serve is not required and never
@@ -69,7 +69,9 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   `--model` override from config / detect / a cached CLI `models` catalog
   (Grok/OpenCode; refresh is off the UI thread for every kind) — never
   forwarded as a headless chat prompt. The TUI overlay does not dump the
-  catalog into the transcript. `/` opens an atr-local command menu; ↑/↓
+  catalog into the transcript. The under-input strip shows the same
+  session `provider / model` as `/status` (plus tok/cache and workspace
+  path). `/` opens an atr-local command menu; ↑/↓
   in the composer walk input history. Other `/…` lines may be proxied. `/cli`
   opens the provider's own interactive TUI. A full PTY host of the vendor
   TUI is out of scope: atr still spawns print-mode / `exec` / `run` per

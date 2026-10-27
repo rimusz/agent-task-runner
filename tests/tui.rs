@@ -167,7 +167,12 @@ async fn model_slash_is_atr_local_for_claude() {
         Some("sonnet")
     );
     let footer = tui::footer_line(&shared, "cli-default");
+    let strip = tui::composer_status_line(&shared, "cli-default");
     assert!(footer.contains("sonnet"), "{footer}");
+    assert!(
+        strip.contains("sonnet"),
+        "under-input strip must stay in sync with footer model: strip={strip} footer={footer}"
+    );
     assert_eq!(
         tui::preview_line(&shared, "cli-default", "/compact").unwrap(),
         "turn"
@@ -200,7 +205,12 @@ async fn model_slash_lists_real_grok_ids_not_prose() {
     );
 
     let footer = tui::footer_line(&shared, "cli-default");
+    let strip = tui::composer_status_line(&shared, "cli-default");
     assert!(footer.contains("grok /"), "{footer}");
+    assert!(
+        strip.starts_with("grok /"),
+        "strip must follow session provider: strip={strip} footer={footer}"
+    );
 
     let list = tui::preview_line(&shared, "cli-default", "/model").unwrap();
     assert!(list.starts_with("model-picker"), "{list}");
@@ -241,7 +251,16 @@ async fn model_slash_lists_real_grok_ids_not_prose() {
         Some("grok-4.7")
     );
     let footer = tui::footer_line(&shared, "cli-default");
+    let strip = tui::composer_status_line(&shared, "cli-default");
     assert!(footer.contains("grok / grok-4.7"), "{footer}");
+    assert!(
+        strip.starts_with("grok / grok-4.7"),
+        "under-input strip must match footer session provider/model: strip={strip} footer={footer}"
+    );
+    assert!(
+        footer.ends_with(&strip) || footer.contains(&strip),
+        "footer and strip share the same chrome: strip={strip} footer={footer}"
+    );
     assert_eq!(
         shared.db.list_runs(Some("cli-default")).unwrap().len(),
         1,
@@ -265,8 +284,25 @@ async fn model_slash_lists_real_grok_ids_not_prose() {
         Some("grok-4.7-build-fast")
     );
     let footer = tui::footer_line(&shared, "cli-default");
+    let strip = tui::composer_status_line(&shared, "cli-default");
     assert!(footer.contains("grok / grok-4.7-build-fast"), "{footer}");
+    assert!(
+        strip.starts_with("grok / grok-4.7-build-fast"),
+        "strip must follow /model pick: strip={strip} footer={footer}"
+    );
     assert_eq!(shared.db.list_runs(Some("cli-default")).unwrap().len(), 1);
+}
+
+#[test]
+fn composer_path_line_tildes_home() {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/tester".into());
+    let under = std::path::PathBuf::from(&home).join("Projects/github/rimusz");
+    assert_eq!(tui::composer_path_line(&under), "~/Projects/github/rimusz");
+    assert_eq!(tui::composer_path_line(std::path::Path::new(&home)), "~");
+    assert_eq!(
+        tui::composer_path_line(std::path::Path::new("/opt/src")),
+        "/opt/src"
+    );
 }
 
 #[tokio::test]

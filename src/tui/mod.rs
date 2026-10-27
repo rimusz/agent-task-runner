@@ -11,7 +11,8 @@
 //! auto-dispatches `cli-*` keys. The TUI / `ask` process owns those
 //! sessions via [`crate::scheduler::dispatch_key`].
 //!
-//! The interactive UI is a session host: transcript, footer, input.
+//! The interactive UI is a session host: transcript, composer, and an
+//! under-input status strip (provider / model, plus workspace path).
 //! atr-local slashes are `/provider`, `/model`, `/new`, `/quit`,
 //! `/status`, `/help`, `/cli`. `/model` changes the session `--model`
 //! override and is never sent as chat. Other `/…` may be proxied.
@@ -32,8 +33,9 @@ use crate::providers::{cache_hit_ratio, UsageNumbers};
 use crate::scheduler;
 use crate::task::{self, OutputKind, WorkspaceKind};
 use anyhow::{bail, Result};
+use std::ffi::OsStr;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -123,9 +125,9 @@ pub fn launch_provider(opts_provider: Option<&str>) -> Option<String> {
 }
 
 /// Provider the next turn / `/model` list should use — same value as
-/// the footer. Pin / hint / `[tui] providers`, then last run, then the
-/// first enabled provider. Not "last run first" (that disagreed with
-/// `/model` when the session had moved on).
+/// the footer and under-input strip. Pin / hint / `[tui] providers`,
+/// then last run, then the first enabled provider. Not "last run first"
+/// (that disagreed with `/model` when the session had moved on).
 pub fn session_provider_now(shared: &Shared, key: &str) -> Option<String> {
     if let Some(p) = tui_provider_now(shared, key) {
         return Some(p);
@@ -782,7 +784,26 @@ pub(crate) fn collect_result(shared: &Shared, key: &str) -> TurnResult {
     }
 }
 
-pub fn footer_line(shared: &Shared, key: &str) -> String {
+struct SessionChrome {
+    provider: String,
+    model: String,
+    extras: Vec<String>,
+}
+
+impl SessionChrome {
+    /// `provider / model` plus cheap tok / cache extras.
+    fn status_line(&self) -> String {
+        let mut parts = vec![format!("{} / {}", self.provider, self.model)];
+        parts.extend(self.extras.iter().cloned());
+        parts.join(" · ")
+    }
+
+    fn footer_line(&self, key: &str) -> String {
+        format!("{key} · {}", self.status_line())
+    }
+}
+
+fn session_chrome(shared: &Shared, key: &str) -> SessionChrome {
     let cfg = shared.config.read().unwrap().clone();
     let runs = shared.db.list_runs(Some(key)).unwrap_or_default();
     let last = runs.last();
@@ -795,7 +816,7 @@ pub fn footer_line(shared: &Shared, key: &str) -> String {
                 .filter(|s| !s.is_empty())
         })
         .unwrap_or_else(|| "default".into());
-    let mut parts = vec![key.to_string(), format!("{provider} / {model}")];
+    let mut extras = Vec::new();
     if let Some(r) = last {
         if let Ok(rows) = shared.db.list_usage_for_run(r.id) {
             let mut u = UsageNumbers::default();
@@ -807,18 +828,64 @@ pub fn footer_line(shared: &Shared, key: &str) -> String {
             }
             let tok = u.input.saturating_add(u.output);
             if tok > 0 || u.cache_read > 0 {
-                parts.push(format!("{tok} tok"));
+                extras.push(format!("{tok} tok"));
             }
             let kind = cfg
                 .provider(&provider)
                 .map(|p| p.kind.as_str())
                 .unwrap_or("");
             if let Some(hit) = cache_hit_ratio(kind, &u) {
-                parts.push(format!("cache {:.0}%", hit * 100.0));
+                extras.push(format!("cache {:.0}%", hit * 100.0));
             }
         }
     }
-    parts.join(" · ")
+    SessionChrome {
+        provider,
+        model,
+        extras,
+    }
+}
+
+/// Line-mode / `/status` chrome: `key · provider / model · tok · cache`.
+/// Same session provider+model as [`composer_status_line`].
+pub fn footer_line(shared: &Shared, key: &str) -> String {
+    session_chrome(shared, key).footer_line(key)
+}
+
+/// Under-composer primary strip: `provider / model` plus tok / cache.
+/// Same source as [`footer_line`] (session pin, then last run, then config).
+pub fn composer_status_line(shared: &Shared, key: &str) -> String {
+    session_chrome(shared, key).status_line()
+}
+
+/// Quiet workspace path for the under-composer strip (`~/…` when under `$HOME`).
+pub fn composer_path_line(path: &Path) -> String {
+    shorten_home_path(path, std::env::var_os("HOME").as_deref())
+}
+
+pub(crate) fn shorten_home_path(path: &Path, home: Option<&OsStr>) -> String {
+    let display = path.to_string_lossy();
+    let Some(home) = home.filter(|h| !h.is_empty()) else {
+        return display.into_owned();
+    };
+    let home = Path::new(home);
+    if path == home {
+        return "~".into();
+    }
+    match path.strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => display.into_owned(),
+    }
+}
+
+pub(crate) fn truncate_middle_end(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max || max < 2 {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    format!("…{}", s.chars().skip(n - keep).collect::<String>())
 }
 
 #[cfg(test)]
@@ -863,6 +930,27 @@ mod tests {
         assert_eq!(classify_line("/provider"), "provider");
         assert_eq!(classify_line("/"), "slash-menu");
         assert_eq!(classify_line(" / "), "slash-menu");
+    }
+
+    #[test]
+    fn home_path_uses_tilde() {
+        let home = Path::new("/Users/rimas");
+        let home_os = OsStr::new("/Users/rimas");
+        assert_eq!(shorten_home_path(home, Some(home_os)), "~");
+        assert_eq!(
+            shorten_home_path(&home.join("Projects/github/rimusz"), Some(home_os)),
+            "~/Projects/github/rimusz"
+        );
+        assert_eq!(
+            shorten_home_path(Path::new("/opt/src"), Some(home_os)),
+            "/opt/src"
+        );
+        assert_eq!(
+            shorten_home_path(Path::new("/Users/rimas/x"), None),
+            "/Users/rimas/x"
+        );
+        assert_eq!(truncate_middle_end("abcdefghij", 6), "…fghij");
+        assert_eq!(truncate_middle_end("short", 12), "short");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Ratatui chat host: transcript, status footer, input, provider picker.
+//! Ratatui chat host: transcript, composer, under-input status strip.
 //!
 //! Does not open the alternate screen for `atr ask`. Slash handling is
 //! [`super::step_line`] — atr-local host commands plus provider proxy.
@@ -7,8 +7,8 @@ use super::history::InputHistory;
 use super::proxy;
 use super::slash;
 use super::{
-    collect_result, daemon_line, enqueue_turn, footer_line, step_line, turn_is_idle, Step,
-    Workspace,
+    collect_result, composer_path_line, composer_status_line, enqueue_turn, step_line,
+    truncate_middle_end, turn_is_idle, Step, Workspace,
 };
 use crate::app::Shared;
 use crate::scheduler;
@@ -57,7 +57,6 @@ pub(crate) async fn run(
                     Err(e) => format!("{e:#}"),
                 };
                 app.push(Role::System, msg);
-                app.status = footer_line(&shared, &key);
             }
         }
     }
@@ -93,7 +92,6 @@ struct App {
     picker: Option<Picker>,
     slash_menu: Option<SlashMenu>,
     history: InputHistory,
-    status: String,
 }
 
 struct SlashMenu {
@@ -153,7 +151,6 @@ impl App {
             picker: None,
             slash_menu: None,
             history: InputHistory::default(),
-            status: footer_line(shared, key),
         }
     }
 
@@ -189,13 +186,12 @@ async fn event_loop(
     let mut ticks = 0u32;
     loop {
         sync_model_picker(app, shared, key, ws);
-        term.draw(|f| draw(f, app, shared, key))?;
+        term.draw(|f| draw(f, app, shared, key, ws))?;
         if app.busy {
             scheduler::dispatch_key(shared, key).await?;
             ticks += 1;
             let snap = collect_result(shared, key);
             *app.last_assistant_mut() = snap.text.clone();
-            app.status = snap.footer.clone();
             if turn_is_idle(shared, key)? {
                 app.busy = false;
                 if !snap.ok {
@@ -352,7 +348,6 @@ fn ctrl_c(app: &mut App, shared: &Shared, key: &str) -> Result<Option<LoopEnd>> 
             Ok(()) => {
                 app.busy = false;
                 app.push(Role::Error, "cancelled turn");
-                app.status = footer_line(shared, key);
             }
             Err(e) => app.push(Role::Error, format!("{e:#}")),
         }
@@ -560,7 +555,6 @@ fn picker_apply(
     };
     if let Step::Note(msg) = step {
         app.push(Role::System, msg);
-        app.status = footer_line(shared, key);
     }
     Ok(())
 }
@@ -596,7 +590,6 @@ fn apply_step(
         Step::Quit => Ok(Some(LoopEnd::Quit(ExitCode::SUCCESS))),
         Step::Note(msg) => {
             app.push(Role::System, msg);
-            app.status = footer_line(shared, key);
             Ok(None)
         }
         Step::OpenProviderPicker => {
@@ -741,19 +734,19 @@ fn move_right(app: &mut App) {
     app.cursor += next;
 }
 
-fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str) {
+fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str, ws: &Workspace) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(3),
-            Constraint::Length(2),
             Constraint::Length(3),
+            Constraint::Length(2),
         ])
         .split(area);
 
-    let title = format!(" atr tui  {} ", footer_line(shared, key));
+    let title = format!(" atr tui  {key} ");
     f.render_widget(
         Paragraph::new(title).style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[0],
@@ -767,13 +760,6 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str) {
         .scroll(scroll_pair(app, height, width));
     f.render_widget(para, chunks[1]);
 
-    let daemon = daemon_line(&shared.config_path);
-    let foot = format!("{}\n{daemon}", app.status);
-    f.render_widget(
-        Paragraph::new(foot).style(Style::default().fg(Color::DarkGray)),
-        chunks[2],
-    );
-
     let hint = composer_hint(app);
     let input = Paragraph::new(format!("› {}", app.input)).block(
         Block::default()
@@ -781,10 +767,21 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str) {
             .title(hint)
             .border_style(Style::default().fg(Color::DarkGray)),
     );
-    f.render_widget(input, chunks[3]);
+    f.render_widget(input, chunks[2]);
+
+    let status = composer_status_line(shared, key);
+    let path = truncate_middle_end(
+        &composer_path_line(&proxy::session_cwd(shared, key, ws)),
+        chunks[3].width.max(1) as usize,
+    );
+    let strip = vec![
+        Line::from(Span::styled(status, Style::default().fg(Color::Gray))),
+        Line::from(Span::styled(path, Style::default().fg(Color::DarkGray))),
+    ];
+    f.render_widget(Paragraph::new(strip), chunks[3]);
 
     if let Some(menu) = &app.slash_menu {
-        draw_slash_menu(f, chunks[1], chunks[3], menu);
+        draw_slash_menu(f, chunks[1], chunks[2], menu);
     }
 
     if let Some(picker) = &app.picker {
@@ -813,9 +810,9 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str) {
         f.render_stateful_widget(list, pop, &mut state);
     }
 
-    let cur_x = (chunks[3].x + 2 + visible_width(&app.input[..app.cursor.min(app.input.len())]))
-        .min(chunks[3].right().saturating_sub(1));
-    let cur_y = chunks[3].y + 1;
+    let cur_x = (chunks[2].x + 2 + visible_width(&app.input[..app.cursor.min(app.input.len())]))
+        .min(chunks[2].right().saturating_sub(1));
+    let cur_y = chunks[2].y + 1;
     f.set_cursor_position((cur_x, cur_y));
 }
 

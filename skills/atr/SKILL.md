@@ -21,7 +21,7 @@ Secrets live in `~/.config/atr/shadow.env` (mode 0600), never in config.
 
 ## Terminal TUI
 
-A bare `atr` (or `atr tui`) is an interactive in-process chat TUI (transcript + footer + input). `atr ask "prompt"` is the one-shot / CI entrypoint on the same engine (no alternate screen). Serve is not required and never auto-dispatches `cli-*` sessions. Sessions are tasks keyed `cli-<name>` (default `cli-default`), separate from Telegram. Slash: `/provider` and `/model` are atr-local pickers (`/model` sets the session `--model` override; never sent as chat). `/new` `/quit` `/status` `/help` `/cli` stay atr-local; `/cli` opens the vendor TUI. Other `/…` may be proxied. First run: bare `atr` → init offer → service ask → TUI. Scripts: `atr init --yes` then `atr ask`. No TTY never auto-inits.
+A bare `atr` (or `atr tui`) is an interactive in-process chat TUI (transcript + composer + under-input status strip). `atr ask "prompt"` is the one-shot / CI entrypoint on the same engine (no alternate screen). Serve is not required and never auto-dispatches `cli-*` sessions. Sessions are tasks keyed `cli-<name>` (default `cli-default`), separate from Telegram. Slash: `/provider` and `/model` are atr-local pickers (`/model` sets the session `--model` override; never sent as chat). `/new` `/quit` `/status` `/help` `/cli` stay atr-local; `/cli` opens the vendor TUI. Other `/…` may be proxied. First run: bare `atr` → init offer → service ask → TUI. Scripts: `atr init --yes` then `atr ask`. No TTY never auto-inits.
 
 ```bash
 atr ask "what is 2+2?"       # one-shot / CI
@@ -29,7 +29,7 @@ atr                          # interactive TUI; /quit to leave
 atr tui --session work --provider grok
 ```
 
-Mid-session `/provider` sticks and triggers the existing handoff on switch. `/model` / `/model <id>` change atr's session model (footer + next `--model`); they are never forwarded as a Claude/Cursor prompt. `atr serve` stays an explicit subcommand.
+Mid-session `/provider` sticks and triggers the existing handoff on switch. `/model` / `/model <id>` change atr's session model (under-input strip + next `--model`); they are never forwarded as a Claude/Cursor prompt. `atr serve` stays an explicit subcommand.
 
 ## Telegram assistant (this chat)
 
