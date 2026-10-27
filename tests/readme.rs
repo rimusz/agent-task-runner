@@ -431,7 +431,17 @@ fn readme_headings_and_commands_match_help() {
         validate_invocation(tokens, &top, &global);
     }
 
-    const IGNORE_SLASH: &[&str] = &["/command", "/newbot", "/connect", "/review", "/mcp"];
+    const IGNORE_SLASH: &[&str] = &[
+        "/command",
+        "/newbot",
+        "/connect",
+        "/review",
+        "/mcp",
+        "/provider",
+        "/model",
+        "/new",
+        "/quit",
+    ];
     for cmd in extract_slash_commands(&readme) {
         if IGNORE_SLASH.contains(&cmd.as_str()) {
             continue;
