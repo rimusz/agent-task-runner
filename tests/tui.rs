@@ -354,7 +354,7 @@ async fn model_slash_claude_lists_full_ids_not_only_aliases() {
         "Claude /model must list real ids, not only short aliases: {list}"
     );
     assert!(
-        numbered.iter().any(|id| *id == "sonnet"),
+        numbered.contains(&"sonnet"),
         "short aliases stay secondary: {list}"
     );
     assert!(
