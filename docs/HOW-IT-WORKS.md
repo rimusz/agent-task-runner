@@ -11,7 +11,7 @@ GitHub tokens and `gh`: [GITHUB.md](GITHUB.md).
 
 A `[[provider]]` block can be just `name` + `kind`. CLI path, flags, and
 `reported_usage` are filled from the kind. Order in the file is the failover
-order. A bare `atr` / `atr tui` follows the session pin, then
+order. A bare `atr` / `atr tui` / `atr ask` follows the session pin, then
 `--provider`, then optional `[tui] providers`, then this list. Serve
 never auto-dispatches `cli-*` TUI sessions.
 

@@ -55,8 +55,8 @@ pub async fn dispatch_available(shared: &Arc<Shared>) -> Result<()> {
 }
 
 /// Dispatch at most the runnable work for one task key. Used by `atr tui`
-/// so an in-process turn does not start leftover queued tasks, including
-/// `cli-*` sessions that serve never auto-dispatches.
+/// / `atr ask` so an in-process turn does not start leftover queued tasks,
+/// including `cli-*` sessions that serve never auto-dispatches.
 pub async fn dispatch_key(shared: &Arc<Shared>, key: &str) -> Result<()> {
     dispatch_matching(shared, Some(key)).await
 }

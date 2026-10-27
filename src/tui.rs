@@ -1,14 +1,15 @@
-//! Interactive terminal session (`atr tui`, also a bare `atr`).
+//! Interactive terminal session (`atr tui`, also a bare `atr`) and
+//! one-shot CI turns (`atr ask`).
 //!
-//! A TUI session is a normal atr task keyed `cli-<name>` (default
+//! A session is a normal atr task keyed `cli-<name>` (default
 //! `cli-default`), separate from Telegram's `tg<chat>` keys. The engine
 //! runs in-process: `atr serve` is not required. Resume, the stable
 //! prefix, worktree pool, and provider-switch handoff are the existing
 //! task machinery.
 //!
 //! Serve owns daemon work (Telegram, GitHub, `atr add`, …). It never
-//! auto-dispatches `cli-*` keys. The TUI process owns those sessions via
-//! [`crate::scheduler::dispatch_key`].
+//! auto-dispatches `cli-*` keys. The TUI / `ask` process owns those
+//! sessions via [`crate::scheduler::dispatch_key`].
 
 use crate::app::{Shared, SubmitOpts};
 use crate::db::Db;
@@ -25,6 +26,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub const SESSION_PREFIX: &str = "cli-";
 pub const DEFAULT_SESSION: &str = "default";
+pub const ASK_PROMPT_REQUIRED: &str =
+    "atr ask requires a prompt. Example: atr ask \"what is 2+2?\"  (use `atr tui` for the interactive session)";
 
 const MODEL_META_PREFIX: &str = "tui-model:";
 
@@ -36,6 +39,9 @@ pub struct TuiOpts {
     pub dir: Option<PathBuf>,
     pub repo: Option<String>,
     pub new: bool,
+    /// When true, a missing or blank prompt is an error (never the REPL).
+    /// Used by `atr ask`.
+    pub require_prompt: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -157,8 +163,17 @@ pub async fn run(shared: Arc<Shared>, opts: TuiOpts) -> Result<ExitCode> {
             ExitCode::from(1)
         });
     }
+    if opts.require_prompt {
+        bail!("{ASK_PROMPT_REQUIRED}");
+    }
 
     interactive(shared, key, ws, pin).await
+}
+
+/// One-shot path used by `atr ask`. Never opens the interactive REPL.
+pub async fn run_oneshot(shared: Arc<Shared>, mut opts: TuiOpts) -> Result<ExitCode> {
+    opts.require_prompt = true;
+    run(shared, opts).await
 }
 
 async fn interactive(
@@ -593,5 +608,11 @@ mod tests {
         );
         assert_eq!(launch_provider(Some("")), None);
         assert_eq!(launch_provider(None), None);
+    }
+
+    #[test]
+    fn ask_prompt_required_mentions_ask_and_tui() {
+        assert!(ASK_PROMPT_REQUIRED.contains("atr ask"));
+        assert!(ASK_PROMPT_REQUIRED.contains("atr tui"));
     }
 }

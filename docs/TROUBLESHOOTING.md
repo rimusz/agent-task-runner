@@ -152,7 +152,7 @@ owner's env var, ok/warn/fail and days left without printing values.
 
 ## 6b. Terminal TUI
 
-- A bare `atr` / `atr tui` runs the engine in-process. It does **not** need `atr serve`.
+- A bare `atr` / `atr tui` is the interactive session. `atr ask "prompt"` is one-shot / CI. Both run the engine in-process and do **not** need `atr serve`.
 - Session keys are `cli-<name>` (default `cli-default`), separate from Telegram. Serve never starts those tasks.
 - No provider: check `atr providers`, `--provider`, or `[tui] providers`.
 - `atr serve` is still an explicit subcommand; a bare `atr` is the TUI.

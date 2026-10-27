@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use atr::{app, config::default_config_path, load_config, Shared, SubmitOutcome, EX_TEMPFAIL};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -97,26 +97,21 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["provider", "dir", "needs"])]
         compare: Option<String>,
     },
+    /// One-shot in-process turn for CI and scripts (`atr serve` is not required).
+    /// Never opens the interactive TUI.
+    Ask {
+        /// Prompt to run. Required — missing or empty is an error, not a REPL.
+        prompt: String,
+        #[command(flatten)]
+        sess: CliSessionArgs,
+    },
     /// Interactive terminal session (in-process; `atr serve` is not required).
     /// With a prompt argument, run one turn, print the answer, and exit.
     Tui {
         /// One-shot prompt. Omit for the interactive transcript + status footer.
         prompt: Option<String>,
-        /// Preferred provider for this session.
-        #[arg(long)]
-        provider: Option<String>,
-        /// Session name (task key `cli-<name>`, default `default`).
-        #[arg(long)]
-        session: Option<String>,
-        /// Local directory workspace (edit in place).
-        #[arg(long, conflicts_with = "repo")]
-        dir: Option<PathBuf>,
-        /// Git repository workspace (worktree / branch).
-        #[arg(long)]
-        repo: Option<String>,
-        /// Drop the previous `cli-<name>` task and start a fresh session.
-        #[arg(long)]
-        new: bool,
+        #[command(flatten)]
+        sess: CliSessionArgs,
     },
     /// Show providers (with order numbers), inflight tasks, and usage.
     Status {
@@ -297,6 +292,39 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CompareCmd,
     },
+}
+
+#[derive(Args, Debug)]
+struct CliSessionArgs {
+    /// Preferred provider for this session.
+    #[arg(long)]
+    provider: Option<String>,
+    /// Session name (task key `cli-<name>`, default `default`).
+    #[arg(long)]
+    session: Option<String>,
+    /// Local directory workspace (edit in place).
+    #[arg(long, conflicts_with = "repo")]
+    dir: Option<PathBuf>,
+    /// Git repository workspace (worktree / branch).
+    #[arg(long)]
+    repo: Option<String>,
+    /// Drop the previous `cli-<name>` task and start a fresh session.
+    #[arg(long)]
+    new: bool,
+}
+
+impl CliSessionArgs {
+    fn into_tui_opts(self, prompt: Option<String>, require_prompt: bool) -> atr::tui::TuiOpts {
+        atr::tui::TuiOpts {
+            prompt,
+            provider: self.provider,
+            session: self.session,
+            dir: self.dir,
+            repo: self.repo,
+            new: self.new,
+            require_prompt,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -534,11 +562,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Some(c) => c,
         None => Cmd::Tui {
             prompt: None,
-            provider: None,
-            session: None,
-            dir: None,
-            repo: None,
-            new: false,
+            sess: CliSessionArgs {
+                provider: None,
+                session: None,
+                dir: None,
+                repo: None,
+                new: false,
+            },
         },
     };
     if !matches!(cmd, Cmd::Serve) {
@@ -760,27 +790,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 SubmitOutcome::Queued => Ok(ExitCode::from(EX_TEMPFAIL as u8)),
             }
         }
-        Cmd::Tui {
-            prompt,
-            provider,
-            session,
-            dir,
-            repo,
-            new,
-        } => {
+        Cmd::Ask { prompt, sess } => {
             let shared = Shared::open(path)?;
-            atr::tui::run(
-                shared,
-                atr::tui::TuiOpts {
-                    prompt,
-                    provider,
-                    session,
-                    dir,
-                    repo,
-                    new,
-                },
-            )
-            .await
+            atr::tui::run_oneshot(shared, sess.into_tui_opts(Some(prompt), true)).await
+        }
+        Cmd::Tui { prompt, sess } => {
+            let shared = Shared::open(path)?;
+            atr::tui::run(shared, sess.into_tui_opts(prompt, false)).await
         }
         Cmd::Status { json, repo } => {
             let shared = Shared::open(path)?;

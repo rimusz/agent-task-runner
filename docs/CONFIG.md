@@ -325,7 +325,7 @@ atr picks providers in three separate places:
 | **Driver** (planning + review) | top-level `driver = "<provider name>"` | `grok` if that provider is enabled, else the first enabled `[[provider]]` |
 | **Workers** (normal tasks) | `[[provider]]` order + `enabled` | first available provider in order |
 | **Telegram assistant** (free-text chat) | `[telegram.assistant] providers` (ordered list), else `provider` | first available provider in order (it does **not** use `driver`) |
-| **TUI** (bare `atr` / `atr tui`) | session pin, then `--provider`, then `[tui] providers` | first available provider in order (it does **not** use `driver`) |
+| **TUI / ask** (bare `atr` / `atr tui` / `atr ask`) | session pin, then `--provider`, then `[tui] providers` | first available provider in order (it does **not** use `driver`) |
 
 The model is always per provider: `[[provider]] model` (empty = the CLI's own
 default). There is no per-task model override; to run a task on another model,
@@ -348,7 +348,7 @@ enabled = true
 provider = "grok"            # optional; empty = first available in order
 # providers = ["grok", "codex", "claude"]  # optional ordered list; wins over provider
 
-# Optional TUI order (bare `atr` / `atr tui`). Empty = global [[provider]]
+# Optional TUI / ask order (bare `atr` / `atr tui` / `atr ask`). Empty = global [[provider]]
 # order after the session pin and --provider.
 # [tui]
 # providers = ["grok", "claude"]

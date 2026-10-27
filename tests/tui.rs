@@ -1,4 +1,4 @@
-//! `atr tui` runs the engine in-process (no `atr serve`) with fake CLIs.
+//! `atr tui` / `atr ask` run the engine in-process (no `atr serve`) with fake CLIs.
 use atr::{tui, Shared, SubmitOpts};
 use std::fs;
 use std::io::Write;
@@ -116,7 +116,7 @@ async fn oneshot_runs_in_process_without_serve() {
         ("codex", false, "success"),
     ])
     .await;
-    let code = tui::run(shared.clone(), opts("what is 2+2?", None, None))
+    let code = tui::run_oneshot(shared.clone(), opts("what is 2+2?", None, None))
         .await
         .unwrap();
     assert_eq!(code, std::process::ExitCode::SUCCESS);
@@ -129,6 +129,30 @@ async fn oneshot_runs_in_process_without_serve() {
     let footer = tui::footer_line(&shared, "cli-default");
     assert!(footer.contains("cli-default"), "{footer}");
     assert!(footer.contains("claude"), "{footer}");
+}
+
+#[tokio::test]
+async fn oneshot_rejects_missing_prompt() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    let err = tui::run_oneshot(
+        shared,
+        tui::TuiOpts {
+            prompt: None,
+            require_prompt: true,
+            ..tui::TuiOpts::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("requires a prompt"), "{msg}");
+    assert!(msg.contains("atr tui"), "{msg}");
 }
 
 #[tokio::test]
@@ -294,6 +318,7 @@ fn bare_atr_launches_tui() {
     assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
     assert!(help.contains("tui"), "{help}");
+    assert!(help.contains("ask"), "{help}");
     assert!(help.contains("serve"), "{help}");
     assert!(!help.contains("ATR_DEFAULT"), "{help}");
     assert!(!help.contains("ATR_TUI_PROVIDER"), "{help}");
@@ -343,10 +368,89 @@ fn bare_atr_launches_tui() {
 }
 
 #[test]
+fn atr_ask_oneshot_success() {
+    let (dir, cfg) = setup_bin_cfg();
+    let out = atr()
+        .env("ATR_CONFIG", &cfg)
+        .env("HOME", dir.path().join("home"))
+        .args([
+            "ask",
+            "status please",
+            "--session",
+            "ci",
+            "--provider",
+            "grok",
+        ])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("cli-ci"), "{text}");
+    assert!(text.contains("grok"), "{text}");
+}
+
+#[test]
+fn atr_ask_missing_prompt_fails() {
+    let (dir, cfg) = setup_bin_cfg();
+    let out = atr()
+        .env("ATR_CONFIG", &cfg)
+        .env("HOME", dir.path().join("home"))
+        .arg("ask")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "ask without a prompt must fail");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("PROMPT") || text.contains("prompt") || text.contains("required"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("atr tui  "),
+        "must not fall into the interactive TUI: {text}"
+    );
+
+    let out = atr()
+        .env("ATR_CONFIG", &cfg)
+        .env("HOME", dir.path().join("home"))
+        .args(["ask", "   "])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "blank prompt must fail");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("requires a prompt"), "{text}");
+    assert!(
+        !text.contains("atr tui  "),
+        "must not fall into the interactive TUI: {text}"
+    );
+}
+
+#[test]
 fn tui_help_documents_flags() {
     let out = atr().args(["tui", "--help"]).output().unwrap();
     assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("--provider"), "{help}");
+    assert!(help.contains("--session"), "{help}");
+    assert!(help.contains("--new"), "{help}");
+    assert!(!help.contains("ATR_TUI_PROVIDER"), "{help}");
+    assert!(!help.contains("ATR_DEFAULT"), "{help}");
+
+    let out = atr().args(["ask", "--help"]).output().unwrap();
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("<PROMPT>"), "{help}");
     assert!(help.contains("--provider"), "{help}");
     assert!(help.contains("--session"), "{help}");
     assert!(help.contains("--new"), "{help}");
