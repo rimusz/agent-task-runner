@@ -19,6 +19,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/tasks/:key/result", get(get_result))
         .route("/mcp", post(mcp_post).get(mcp_get))
         .merge(write_routes(shared.clone()))
+        .fallback(drain_not_found)
         .with_state(shared)
 }
 
@@ -38,8 +39,20 @@ fn write_routes(shared: Arc<Shared>) -> Router<Arc<Shared>> {
         ))
 }
 
-/// Max request body read (and discarded) before an auth denial.
+/// Max request body read (and discarded) before a deny or unmatched-route 404.
 const DENY_DRAIN_LIMIT: usize = 64 * 1024;
+
+/// Closing a socket with unread request bytes makes the kernel send RST,
+/// and the client can lose the response (macOS: `Invalid argument` on body
+/// read; Linux often still delivers the status). Same as auth deny below.
+async fn drain_body(req: axum::extract::Request) {
+    let _ = axum::body::to_bytes(req.into_body(), DENY_DRAIN_LIMIT).await;
+}
+
+async fn drain_not_found(req: axum::extract::Request) -> Response {
+    drain_body(req).await;
+    StatusCode::NOT_FOUND.into_response()
+}
 
 async fn require_write_auth(
     State(shared): State<Arc<Shared>>,
@@ -48,10 +61,7 @@ async fn require_write_auth(
 ) -> Response {
     let cfg = shared.config.read().unwrap().clone();
     if let Some(deny) = auth_failure(&cfg, req.headers()) {
-        // Read the (small) request body before replying. Closing a socket
-        // with unread request bytes makes the kernel send RST, and the client
-        // can lose the response body (seen as a 503 with an empty body).
-        let _ = axum::body::to_bytes(req.into_body(), DENY_DRAIN_LIMIT).await;
+        drain_body(req).await;
         return deny;
     }
     next.run(req).await
@@ -482,6 +492,7 @@ pub fn dashboard_only(shared: Arc<Shared>) -> Router {
         .route("/dashboard.json", get(dashboard_json))
         .route("/health", get(health))
         .route("/tasks/:key/result", get(get_result))
+        .fallback(drain_not_found)
         .with_state(shared)
 }
 
@@ -736,6 +747,8 @@ token_file = "{token}"
         tokio::spawn(async move {
             axum::serve(listener, dashboard_only(s)).await.ok();
         });
+        // POST a real body: unmatched routes must drain it before 404, or the
+        // kernel RSTs and ureq fails to read the response (macOS os error 22).
         let err = ureq::post(&format!("http://{addr}/mcp"))
             .send_string("{}")
             .unwrap_err();
