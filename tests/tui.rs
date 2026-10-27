@@ -168,7 +168,7 @@ async fn model_slash_is_atr_local_for_claude() {
     );
     tui::set_session_model(&shared, "cli-default", "sonnet").unwrap();
     assert_eq!(
-        tui::session_model(&shared.db, "cli-default").as_deref(),
+        tui::session_model(&shared, "cli-default").as_deref(),
         Some("sonnet")
     );
     let footer = tui::footer_line(&shared, "cli-default");
@@ -252,7 +252,7 @@ async fn model_slash_lists_real_grok_ids_not_prose() {
     assert!(set.starts_with("note"), "{set}");
     assert!(set.contains("grok-4.7"), "{set}");
     assert_eq!(
-        tui::session_model(&shared.db, "cli-default").as_deref(),
+        tui::session_model(&shared, "cli-default").as_deref(),
         Some("grok-4.7")
     );
     let footer = tui::footer_line(&shared, "cli-default");
@@ -285,7 +285,7 @@ async fn model_slash_lists_real_grok_ids_not_prose() {
     let by_num = tui::preview_line(&shared, "cli-default", &format!("/model {num}")).unwrap();
     assert!(by_num.starts_with("note"), "{by_num}");
     assert_eq!(
-        tui::session_model(&shared.db, "cli-default").as_deref(),
+        tui::session_model(&shared, "cli-default").as_deref(),
         Some("grok-4.7-build-fast")
     );
     let footer = tui::footer_line(&shared, "cli-default");
@@ -323,7 +323,7 @@ async fn model_slash_lists_cursor_ids_not_available_header() {
 }
 
 #[tokio::test]
-async fn model_slash_claude_uses_aliases_not_help_prose() {
+async fn model_slash_claude_lists_full_ids_not_only_aliases() {
     let (_dir, shared, _cfg) = no_serve(&[
         ("claude", true, "success"),
         ("grok", false, "success"),
@@ -333,12 +333,145 @@ async fn model_slash_claude_uses_aliases_not_help_prose() {
     .await;
     let list = tui::preview_line(&shared, "cli-default", "/model").unwrap();
     assert!(list.starts_with("model-picker"), "{list}");
-    assert!(list.contains("sonnet"), "{list}");
-    assert!(list.contains("opus"), "{list}");
-    assert!(list.contains("haiku"), "{list}");
+    for want in [
+        "claude-sonnet-5-5",
+        "claude-opus-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-1",
+    ] {
+        assert!(list.contains(want), "missing full id {want} in {list}");
+    }
+    let numbered: Vec<&str> = list
+        .lines()
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            let _n = parts.next()?.parse::<usize>().ok()?;
+            parts.next()
+        })
+        .collect();
+    assert!(
+        numbered.iter().any(|id| id.starts_with("claude-")),
+        "Claude /model must list real ids, not only short aliases: {list}"
+    );
+    assert!(
+        numbered.iter().any(|id| *id == "sonnet"),
+        "short aliases stay secondary: {list}"
+    );
     assert!(
         !list.contains("Available models") && !list.contains("Usage:"),
         "claude help prose must not be picker rows: {list}"
+    );
+}
+
+#[tokio::test]
+async fn session_model_is_isolated_per_provider() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", false, "success"),
+        ("cursor", true, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    let pin = tui::preview_line(&shared, "cli-default", "/provider cursor").unwrap();
+    assert!(pin.starts_with("note"), "{pin}");
+    assert_eq!(
+        tui::session_provider_now(&shared, "cli-default").as_deref(),
+        Some("cursor")
+    );
+
+    let set_a = tui::preview_line(&shared, "cli-default", "/model composer-2.5").unwrap();
+    assert!(set_a.starts_with("note"), "{set_a}");
+    assert_eq!(
+        tui::session_model(&shared, "cli-default").as_deref(),
+        Some("composer-2.5")
+    );
+    let strip_a = tui::composer_status_line(&shared, "cli-default");
+    assert!(
+        strip_a.starts_with("cursor / composer-2.5"),
+        "strip={strip_a}"
+    );
+    let code = tui::run_oneshot(
+        shared.clone(),
+        opts("warmup last-run", Some("cursor"), None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
+
+    let switch_b = tui::preview_line(&shared, "cli-default", "/provider claude").unwrap();
+    assert!(switch_b.starts_with("note"), "{switch_b}");
+    assert_eq!(
+        tui::session_provider_now(&shared, "cli-default").as_deref(),
+        Some("claude")
+    );
+    assert_ne!(
+        tui::session_model(&shared, "cli-default").as_deref(),
+        Some("composer-2.5")
+    );
+    let strip_b = tui::composer_status_line(&shared, "cli-default");
+    assert!(strip_b.starts_with("claude /"), "strip={strip_b}");
+    assert!(
+        !strip_b.contains("composer-2.5"),
+        "foreign session model leaked into strip: {strip_b}"
+    );
+
+    let list_b = tui::preview_line(&shared, "cli-default", "/model").unwrap();
+    assert!(list_b.starts_with("model-picker"), "{list_b}");
+    assert!(list_b.contains("Models for claude"), "{list_b}");
+    let session_rows: Vec<&str> = list_b.lines().filter(|l| l.contains("session")).collect();
+    assert!(
+        session_rows
+            .iter()
+            .all(|l| !l.contains("composer-2.5") && !l.contains("gpt-6.1-sol")),
+        "foreign id must not be collect_models session/current: {list_b}"
+    );
+    let current = list_b.lines().find(|l| {
+        l.split_whitespace()
+            .next()
+            .is_some_and(|n| n.parse::<usize>().is_ok())
+            && l.contains('*')
+    });
+    if let Some(cur) = current {
+        assert!(
+            !cur.contains("composer-2.5") && !cur.contains("gpt-6.1-sol"),
+            "foreign id marked current: {cur}\n{list_b}"
+        );
+    }
+
+    let set_b = tui::preview_line(&shared, "cli-default", "/model claude-sonnet-5-5").unwrap();
+    assert!(set_b.starts_with("note"), "{set_b}");
+    assert_eq!(
+        tui::session_model(&shared, "cli-default").as_deref(),
+        Some("claude-sonnet-5-5")
+    );
+    let strip_b = tui::composer_status_line(&shared, "cli-default");
+    assert!(
+        strip_b.starts_with("claude / claude-sonnet-5-5"),
+        "strip={strip_b}"
+    );
+
+    let back_a = tui::preview_line(&shared, "cli-default", "/provider cursor").unwrap();
+    assert!(back_a.starts_with("note"), "{back_a}");
+    assert_eq!(
+        tui::session_model(&shared, "cli-default").as_deref(),
+        Some("composer-2.5")
+    );
+    let strip_back = tui::composer_status_line(&shared, "cli-default");
+    assert!(
+        strip_back.starts_with("cursor / composer-2.5"),
+        "A→B→A must restore A's model: strip={strip_back}"
+    );
+
+    let back_b = tui::preview_line(&shared, "cli-default", "/provider claude").unwrap();
+    assert!(back_b.starts_with("note"), "{back_b}");
+    assert_eq!(
+        tui::session_model(&shared, "cli-default").as_deref(),
+        Some("claude-sonnet-5-5")
+    );
+    let strip_b2 = tui::composer_status_line(&shared, "cli-default");
+    assert!(
+        strip_b2.starts_with("claude / claude-sonnet-5-5"),
+        "A→B→A→B must keep B's model: strip={strip_b2}"
     );
 }
 

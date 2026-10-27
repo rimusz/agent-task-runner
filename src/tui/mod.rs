@@ -111,7 +111,11 @@ pub fn tui_task_key(name: &str) -> Result<String> {
     Ok(format!("{SESSION_PREFIX}{raw}"))
 }
 
-pub fn model_meta_key(task_key: &str) -> String {
+pub fn model_meta_key(task_key: &str, provider: &str) -> String {
+    format!("{MODEL_META_PREFIX}{task_key}:{provider}")
+}
+
+fn model_meta_legacy_key(task_key: &str) -> String {
     format!("{MODEL_META_PREFIX}{task_key}")
 }
 
@@ -167,6 +171,12 @@ pub fn tui_provider_now(shared: &Shared, key: &str) -> Option<String> {
             return Some(t.provider_hint.trim().to_string());
         }
     }
+    if let Ok(Some(pin)) = shared.db.meta_get(&format!("tui-pin:{key}")) {
+        let pin = pin.trim();
+        if !pin.is_empty() {
+            return Some(pin.to_string());
+        }
+    }
     let names = shared.config.read().unwrap().tui.providers.clone();
     if names.is_empty() {
         return None;
@@ -174,17 +184,39 @@ pub fn tui_provider_now(shared: &Shared, key: &str) -> Option<String> {
     scheduler::listed_provider_now(shared, &names)
 }
 
-pub fn session_model(db: &Db, key: &str) -> Option<String> {
-    db.meta_get(&model_meta_key(key))
+pub fn session_model_for(db: &Db, key: &str, provider: &str) -> Option<String> {
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return None;
+    }
+    db.meta_get(&model_meta_key(key, provider))
         .ok()
         .flatten()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
+/// `/model` override for the session's **current** provider only.
+pub fn session_model(shared: &Shared, key: &str) -> Option<String> {
+    let p = session_provider_now(shared, key)?;
+    session_model_for(&shared.db, key, &p)
+}
+
+/// Last run that used this provider name (not a foreign provider's model).
+pub(crate) fn last_run_model_for(shared: &Shared, key: &str, provider: &str) -> Option<String> {
+    let runs = shared.db.list_runs(Some(key)).ok()?;
+    runs.iter()
+        .rev()
+        .find(|r| r.provider == provider)
+        .and_then(|r| r.model.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
 /// Apply a stored `/model <id>` override onto the provider used for this turn.
 pub fn apply_session_model(provider: &mut crate::config::Provider, db: &Db, key: &str) {
-    if let Some(m) = session_model(db, key) {
+    if let Some(m) = session_model_for(db, key, &provider.name) {
         provider.model = m;
     }
 }
@@ -384,7 +416,7 @@ pub(crate) fn apply_model_pick(
 }
 
 fn set_model_note(shared: &Shared, key: &str, name: &str) -> Result<Step> {
-    shared.db.meta_set(&model_meta_key(key), name)?;
+    store_session_model(shared, key, name)?;
     Ok(Step::Note(format!(
         "model {name} (this session; next turn uses the provider --model flag)\n{}",
         footer_line(shared, key)
@@ -423,9 +455,18 @@ pub fn classify_line(line: &str) -> &'static str {
     }
 }
 
-pub fn set_session_model(shared: &Shared, key: &str, model: &str) -> Result<()> {
-    shared.db.meta_set(&model_meta_key(key), model.trim())?;
+fn store_session_model(shared: &Shared, key: &str, model: &str) -> Result<()> {
+    let Some(provider) = session_provider_now(shared, key) else {
+        bail!("no provider for session {key}");
+    };
+    shared
+        .db
+        .meta_set(&model_meta_key(key, &provider), model.trim())?;
     Ok(())
+}
+
+pub fn set_session_model(shared: &Shared, key: &str, model: &str) -> Result<()> {
+    store_session_model(shared, key, model)
 }
 
 /// Run a TUI slash/chat classify+apply without spawning a turn.
@@ -615,7 +656,11 @@ fn reset_session(shared: &Shared, key: &str) -> Result<()> {
             shared.db.delete_task(key)?;
         }
     }
-    let _ = shared.db.meta_set(&model_meta_key(key), "");
+    let _ = shared.db.meta_set(&model_meta_legacy_key(key), "");
+    let cfg = shared.config.read().unwrap().clone();
+    for p in &cfg.providers {
+        let _ = shared.db.meta_set(&model_meta_key(key, &p.name), "");
+    }
     Ok(())
 }
 
@@ -814,12 +859,16 @@ fn session_chrome(shared: &Shared, key: &str) -> SessionChrome {
     let runs = shared.db.list_runs(Some(key)).unwrap_or_default();
     let last = runs.last();
     let provider = session_provider_now(shared, key).unwrap_or_else(|| "—".into());
-    let model = session_model(&shared.db, key)
-        .or_else(|| last.and_then(|r| r.model.clone()).filter(|s| !s.is_empty()))
+    let model = session_model_for(&shared.db, key, &provider)
+        .or_else(|| last_run_model_for(shared, key, &provider))
         .or_else(|| {
             cfg.provider(&provider)
                 .map(|p| p.model.clone())
                 .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            cfg.provider(&provider)
+                .and_then(|p| crate::detect::cli_default_model(&p.kind))
         })
         .unwrap_or_else(|| "default".into());
     let mut extras = Vec::new();
@@ -859,7 +908,8 @@ pub fn footer_line(shared: &Shared, key: &str) -> String {
 }
 
 /// Under-composer primary strip: `provider / model` plus tok / cache.
-/// Same source as [`footer_line`] (session pin, then last run, then config).
+/// Same source as [`footer_line`] (this provider's session model, then
+/// this provider's last run, then config / detect).
 pub fn composer_status_line(shared: &Shared, key: &str) -> String {
     session_chrome(shared, key).status_line()
 }
@@ -911,7 +961,18 @@ mod tests {
         assert!(!is_tui_key("tg42"));
         assert!(!is_tui_key("cli-"));
         assert!(!is_tui_key("demo-1"));
-        assert_eq!(model_meta_key("cli-default"), "tui-model:cli-default");
+        assert_eq!(
+            model_meta_key("cli-default", "cursor"),
+            "tui-model:cli-default:cursor"
+        );
+        assert_ne!(
+            model_meta_key("cli-default", "cursor"),
+            model_meta_key("cli-default", "claude")
+        );
+        assert_eq!(
+            model_meta_legacy_key("cli-default"),
+            "tui-model:cli-default"
+        );
     }
 
     #[test]

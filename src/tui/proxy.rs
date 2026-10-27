@@ -7,14 +7,16 @@
 //! inventing a second catalog:
 //!
 //! * `/model` is atr-local (see [`collect_models`]): never a chat turn.
-//!   Codex reads `~/.codex/models_cache.json` slugs (never spawn its TUI).
+//!   Session model is per-provider. Claude seeds documented full ids
+//!   (`claude-sonnet-5-5`, …). Codex reads `~/.codex/models_cache.json`
+//!   slugs (never spawn its TUI).
 //! * `/cli` → spawn the provider CLI *without* `-p` / `exec` / json, on
 //!   the session worktree, resuming when we have an id
 
 use crate::app::Shared;
 use crate::config::Provider;
 use crate::tui::slash::ModelChoice;
-use crate::tui::{session_model, Workspace};
+use crate::tui::{last_run_model_for, session_model_for, Workspace};
 use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -74,9 +76,29 @@ pub(crate) fn models_argv(kind: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-/// Claude `/model` help aliases (Rs-MBP `claude /model`). Not a catalog
-/// invention — these are the ids Claude documents when `claude models`
-/// cannot be listed non-interactively.
+/// Claude Code `--model` / `/model` ids (support.claude.com, Oct 2026).
+/// `claude models` hangs (exit 124); `/model` help is short aliases only;
+/// `~/.claude/settings.json` is a single default, not a catalog. Seed
+/// these the same way Codex seeds slugs.
+pub(crate) const CLAUDE_MODELS: &[&str] = &[
+    "claude-fable-5-1",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+    "claude-opus-4-5-20251101",
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-5-20250929",
+];
+
+/// Claude `/model` help aliases (Rs-MBP `claude /model`). Secondary
+/// rows — the picker leads with [`CLAUDE_MODELS`].
 pub(crate) const CLAUDE_ALIASES: &[&str] = &[
     "sonnet",
     "opus",
@@ -170,7 +192,7 @@ pub(crate) fn collect_models(
         return Vec::new();
     };
     let cfg = shared.config.read().unwrap().clone();
-    let current = session_model(&shared.db, key);
+    let current = session_model_for(&shared.db, key, &pname);
     let mut out: Vec<ModelChoice> = Vec::new();
     let mut push = |name: String, tag: &str| {
         let name = name.trim().to_string();
@@ -202,14 +224,8 @@ pub(crate) fn collect_models(
     if let Some(m) = crate::detect::cli_default_model(&kind) {
         push(m, "detect");
     }
-    if let Ok(runs) = shared.db.list_runs(Some(key)) {
-        if let Some(m) = runs
-            .last()
-            .and_then(|r| r.model.clone())
-            .filter(|s| !s.is_empty())
-        {
-            push(m, "last-run");
-        }
+    if let Some(m) = last_run_model_for(shared, key, &pname) {
+        push(m, "last-run");
     }
     for p in &cfg.providers {
         if p.kind == kind && p.name != pname && !p.model.trim().is_empty() {
@@ -222,6 +238,9 @@ pub(crate) fn collect_models(
         }
     }
     if kind == "claude" {
+        for id in CLAUDE_MODELS {
+            push((*id).to_string(), "catalog");
+        }
         for a in CLAUDE_ALIASES {
             push((*a).to_string(), "alias");
         }
@@ -382,7 +401,10 @@ fn is_junk_model_label(name: &str) -> bool {
 
 fn is_kind_alias(kind: &str, name: &str) -> bool {
     match kind {
-        "claude" => CLAUDE_ALIASES.iter().any(|a| a.eq_ignore_ascii_case(name)),
+        "claude" => CLAUDE_MODELS
+            .iter()
+            .chain(CLAUDE_ALIASES)
+            .any(|a| a.eq_ignore_ascii_case(name)),
         "cursor" => name.eq_ignore_ascii_case("auto"),
         _ => name.eq_ignore_ascii_case("auto"),
     }
@@ -642,7 +664,7 @@ pub(crate) fn run_native_cli(shared: &Shared, key: &str, ws: &Workspace) -> Resu
                 .and_then(|t| t.session_id)
         });
     let mut p = p.clone();
-    if let Some(m) = session_model(&shared.db, key) {
+    if let Some(m) = session_model_for(&shared.db, key, &pname) {
         p.model = m;
     }
     let args = native_argv(&p, sid.as_deref(), &cwd);
@@ -831,6 +853,32 @@ Available models:
     }
 
     #[test]
+    fn claude_catalog_is_full_ids_not_only_aliases() {
+        let ids: Vec<&str> = include_str!("../../tests/fixtures/models/claude_ids.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        assert_eq!(ids, CLAUDE_MODELS);
+        assert!(ids.len() > 1, "{ids:?}");
+        for id in CLAUDE_MODELS {
+            assert!(
+                id.starts_with("claude-") && id.contains('-'),
+                "expected a full Claude id, got {id}"
+            );
+            assert!(accept_model_name("claude", id), "{id}");
+            assert!(
+                !CLAUDE_ALIASES.iter().any(|a| a.eq_ignore_ascii_case(id)),
+                "full id {id} must not be a short alias"
+            );
+        }
+        assert!(CLAUDE_MODELS.contains(&"claude-sonnet-5-5"));
+        assert!(CLAUDE_MODELS.contains(&"claude-opus-5-5"));
+        assert!(CLAUDE_MODELS.contains(&"claude-haiku-5-5"));
+        assert!(CLAUDE_MODELS.contains(&"claude-fable-5-1"));
+    }
+
+    #[test]
     fn codex_fallback_is_more_than_config_placeholder() {
         let ids: Vec<&str> = include_str!("../../tests/fixtures/models/codex_aliases.txt")
             .lines()
@@ -951,6 +999,8 @@ Available models:
         assert!(accept_model_name("cursor", "composer-2.5"));
         assert!(accept_model_name("claude", "sonnet"));
         assert!(accept_model_name("claude", "sonnet[1m]"));
+        assert!(accept_model_name("claude", "claude-sonnet-5-5"));
+        assert!(accept_model_name("claude", "claude-opus-5-5"));
         assert!(accept_model_name("opencode", "moonshotai/kimi-k2.6"));
     }
 

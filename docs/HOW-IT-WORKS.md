@@ -14,11 +14,13 @@ A `[[provider]]` block can be just `name` + `kind`. CLI path, flags, and
 order. A bare `atr` / `atr tui` / `atr ask` follows the session pin, then
 `--provider`, then optional `[tui] providers`, then this list. Serve
 never auto-dispatches `cli-*` TUI sessions. The TUI is a session host:
-`/provider` and `/model` are atr-local pickers (`/model` sets the session
-`--model` override; never a chat turn; the TUI overlay does not dump the
-catalog into the transcript). The under-input strip stays in sync with
-the session provider/model (`/provider` and `/model` are the switchers;
-`/model` lists real CLI ids — never `Available` / help prose;
+`/provider` and `/model` are atr-local pickers (`/model` sets that
+provider's session `--model` override; switching `/provider` restores
+the other provider's last session model; never a chat turn; the TUI
+overlay does not dump the catalog into the transcript). The under-input
+strip stays in sync with the session provider/model (`/provider` and
+`/model` are the switchers; `/model` lists real CLI ids — never
+`Available` / help prose; Claude seeds documented full ids;
 Codex reads `~/.codex/models_cache.json` slugs;
 host `/provider` `/model` stay off the transcript).
 Ctrl+C quits atr; Esc dismisses menus only.

@@ -65,9 +65,11 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   auto-dispatches `cli-*` keys — serve owns daemon work; the TUI / `ask`
   process owns those sessions. Provider: session pin → `--provider` →
   optional `[tui] providers` → global `[[provider]]` order. `/provider`
-  and `/model` are atr-local (list/pick). `/model` sets a per-session
-  `--model` override from config / detect / a cached CLI `models` catalog
-  (Grok / OpenCode / Cursor `id - Label`; Claude aliases; Codex reads
+  and `/model` are atr-local (list/pick). `/model` sets a per-session,
+  per-provider `--model` override from that provider's session / config /
+  detect / last-run / a cached CLI `models` catalog
+  (Grok / OpenCode / Cursor `id - Label`; Claude documented full ids,
+  short aliases secondary; Codex reads
   `~/.codex/models_cache.json` slugs — never spawn its TUI). Host
   `/provider` `/model` do not append to the transcript. Refresh is off the UI thread — never
   forwarded as a headless chat prompt. The TUI overlay does not dump the
