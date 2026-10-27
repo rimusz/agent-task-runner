@@ -143,6 +143,11 @@ async fn model_slash_is_atr_local_for_claude() {
     assert_eq!(tui::classify_line("/model"), "model");
     assert_eq!(tui::classify_line("/model sonnet"), "model");
     assert_eq!(tui::classify_line("/"), "slash-menu");
+    assert_eq!(
+        tui::classify_interrupt(),
+        "quit",
+        "Ctrl+C must exit atr, not cancel-turn-and-stay"
+    );
     let bare = tui::preview_line(&shared, "cli-default", "/").unwrap();
     assert!(
         !bare.starts_with("turn"),

@@ -343,21 +343,14 @@ fn handle_key(
 }
 
 fn ctrl_c(app: &mut App, shared: &Shared, key: &str) -> Result<Option<LoopEnd>> {
+    // Ctrl+C always leaves atr. Best-effort cancel so a live CLI does
+    // not outlive the process. Mid-turn cancel without quit is a later key.
+    debug_assert_eq!(super::classify_interrupt(), "quit");
     if app.busy {
-        match shared.cancel(key, true) {
-            Ok(()) => {
-                app.busy = false;
-                app.push(Role::Error, "cancelled turn");
-            }
-            Err(e) => app.push(Role::Error, format!("{e:#}")),
-        }
-        return Ok(None);
+        let _ = shared.cancel(key, true);
+        app.busy = false;
     }
-    app.slash_menu = None;
-    if !app.input.is_empty() {
-        set_input(app, "");
-    }
-    Ok(None)
+    Ok(Some(LoopEnd::Quit(ExitCode::SUCCESS)))
 }
 
 fn submit_or_queue(
@@ -824,12 +817,12 @@ fn composer_hint(app: &App) -> String {
         return "↵ apply  Tab complete  ↑↓  Esc".into();
     }
     if app.busy {
-        return "↵ queue  ^C cancel turn  PgUp scroll".into();
+        return "↵ queue  ^C quit  PgUp scroll".into();
     }
     if !app.follow {
         return "↑↓ history  PgDn latest  / commands".into();
     }
-    "↵ send  ↑↓ history  / commands  PgUp scroll  ^D quit".into()
+    "↵ send  ↑↓ history  / commands  PgUp scroll  ^C quit".into()
 }
 
 fn draw_slash_menu(f: &mut Frame, body: Rect, input: Rect, menu: &SlashMenu) {

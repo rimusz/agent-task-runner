@@ -398,6 +398,12 @@ fn model_picker_text(shared: &Shared, key: &str, ws: &Workspace) -> String {
     slash::model_pick_usage(&pname, &kind, &list)
 }
 
+/// Raw-mode Ctrl+C: always exit atr (same as `/quit`). Never "cancel the
+/// turn and stay in the TUI". Esc still dismisses overlays only.
+pub fn classify_interrupt() -> &'static str {
+    "quit"
+}
+
 /// What a TUI line would do. Tests lock `/model` out of the turn path.
 pub fn classify_line(line: &str) -> &'static str {
     let line = line.trim();
@@ -930,6 +936,7 @@ mod tests {
         assert_eq!(classify_line("/provider"), "provider");
         assert_eq!(classify_line("/"), "slash-menu");
         assert_eq!(classify_line(" / "), "slash-menu");
+        assert_eq!(classify_interrupt(), "quit");
     }
 
     #[test]

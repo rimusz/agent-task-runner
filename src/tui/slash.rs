@@ -183,6 +183,8 @@ atr (this host)
   /new               fresh atr session (same key)
   /cli               open the provider's own interactive TUI
   /quit              leave atr  (/exit /q)
+  Ctrl+C             leave atr
+  Esc                dismiss menus / pickers (never quits)
 
   `/model` is atr-local for every provider. It is never sent as chat.
   `/cli` is the full native experience (Grok/Claude's own /model picker).
@@ -356,6 +358,7 @@ mod tests {
         assert!(h.contains("/model"), "{h}");
         assert!(h.contains("never sent as chat"), "{h}");
         assert!(h.contains("/cli"), "{h}");
+        assert!(h.contains("Ctrl+C"), "{h}");
         assert!(!h.contains("unknown command"), "{h}");
         assert!(!h.contains("Claude's `/model` works in print mode"), "{h}");
     }

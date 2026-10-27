@@ -35,7 +35,7 @@ An interactive chat TUI (ratatui): scrollable transcript, composer, and an under
 ```bash
 atr ask "what is 2+2?"                 # one-shot / CI
 atr ask "status" --session ci --provider grok
-atr                          # interactive TUI; /quit to leave
+atr                          # interactive TUI; Ctrl+C or /quit to leave
 atr tui                      # same
 atr tui "what is 2+2?"       # also one-shot (convenience)
 atr tui --session work --provider grok
@@ -52,7 +52,7 @@ Provider for a TUI / `ask` session: session pin (`/provider` or `--provider`) �
 | `--dir` / `--repo` | Workspace; omit for answer-only |
 | `--new` | Drop the previous `cli-<name>` task |
 
-atr is a session host. `/provider` and `/model` are atr-local pickers (never sent as chat). `/model` opens immediately for every provider from session / config / detect / last-run (and any cached CLI catalog). `grok models` / `opencode models` (and future peers) refresh in the background and never block the TUI. The ratatui overlay is for selection only — the full table is not added to the transcript. Type `/` for the atr command menu; ↑/↓ in the prompt walks input history (PgUp/PgDn / mouse scroll the transcript). `/model <id>` sets the session override immediately (under-input strip and `/status` footer update from the same session source; next spawn uses that CLI's `--model` flag). If the list is empty: `/model <id>` if you know the id, or `atr providers model <name> <id>`. `/cli` opens the provider's own TUI (full native `/model` picker). `/new` `/quit` `/status` `/help` stay atr-local. Other `/…` (`/compact`, `/plan`, skills) still go to the provider on the next turn. `/atr …` namespaces host commands if a provider slash collides. While a turn is running, Enter queues a follow-up; Ctrl+C cancels the turn (not the TUI).
+atr is a session host. `/provider` and `/model` are atr-local pickers (never sent as chat). `/model` opens immediately for every provider from session / config / detect / last-run (and any cached CLI catalog). `grok models` / `opencode models` (and future peers) refresh in the background and never block the TUI. The ratatui overlay is for selection only — the full table is not added to the transcript. Type `/` for the atr command menu; ↑/↓ in the prompt walks input history (PgUp/PgDn / mouse scroll the transcript). `/model <id>` sets the session override immediately (under-input strip and `/status` footer update from the same session source; next spawn uses that CLI's `--model` flag). If the list is empty: `/model <id>` if you know the id, or `atr providers model <name> <id>`. `/cli` opens the provider's own TUI (full native `/model` picker). `/new` `/quit` `/status` `/help` stay atr-local. Other `/…` (`/compact`, `/plan`, skills) still go to the provider on the next turn. `/atr …` namespaces host commands if a provider slash collides. While a turn is running, Enter queues a follow-up. Ctrl+C quits atr (same as `/quit`; Esc only dismisses menus).
 
 ### First run
 

@@ -25,11 +25,11 @@ A bare `atr` (or `atr tui`) is an interactive in-process chat TUI (transcript + 
 
 ```bash
 atr ask "what is 2+2?"       # one-shot / CI
-atr                          # interactive TUI; /quit to leave
+atr                          # interactive TUI; Ctrl+C or /quit to leave
 atr tui --session work --provider grok
 ```
 
-Mid-session `/provider` sticks and triggers the existing handoff on switch. `/model` / `/model <id>` change atr's session model (under-input strip + next `--model`); they are never forwarded as a Claude/Cursor prompt. `atr serve` stays an explicit subcommand.
+Mid-session `/provider` sticks and triggers the existing handoff on switch. `/model` / `/model <id>` change atr's session model (under-input strip + next `--model`); they are never forwarded as a Claude/Cursor prompt. Ctrl+C quits atr (Esc only dismisses menus). `atr serve` stays an explicit subcommand.
 
 ## Telegram assistant (this chat)
 

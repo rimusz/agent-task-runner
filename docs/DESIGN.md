@@ -72,7 +72,8 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   catalog into the transcript. The under-input strip shows the same
   session `provider / model` as `/status` (plus tok/cache and workspace
   path). `/` opens an atr-local command menu; ↑/↓
-  in the composer walk input history. Other `/…` lines may be proxied. `/cli`
+  in the composer walk input history. Ctrl+C quits atr (same as `/quit`);
+  Esc dismisses overlays only. Other `/…` lines may be proxied. `/cli`
   opens the provider's own interactive TUI. A full PTY host of the vendor
   TUI is out of scope: atr still spawns print-mode / `exec` / `run` per
   turn.
