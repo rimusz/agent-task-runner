@@ -153,7 +153,7 @@ owner's env var, ok/warn/fail and days left without printing values.
 ## 6b. Terminal TUI
 
 - A bare `atr` / `atr tui` is the interactive chat TUI. `atr ask "prompt"` is one-shot / CI (no alternate screen). Both run the engine in-process and do **not** need `atr serve`. Without a TTY, `atr tui` uses line mode.
-- Slash: `/provider` `/model` `/new` `/quit` `/status` `/help` `/cli` are atr-local. `/model` changes atr's session model (never sent as Claude/Cursor chat). Other `/…` go to the provider CLI. Never an "unknown command" for a known slash.
+- Slash: `/provider` `/model` `/new` `/quit` `/status` `/help` `/cli` are atr-local. `/model` changes atr's session model (never sent as Claude/Cursor chat; the TUI picker is an overlay, not a transcript dump). Other `/…` go to the provider CLI. Never an "unknown command" for a known slash.
 - No config yet: on a TTY, atr offers the normal `atr init` (including whether to install the user service) then continues (`Starting atr tui…` / `atr ask`). Without a TTY it exits with a pointer to `atr init` / `atr init --yes` (no auto `--yes`).
 - Session keys are `cli-<name>` (default `cli-default`), separate from Telegram. Serve never starts those tasks.
 - No enabled provider: atr prints which CLIs it saw and how to sign in / `atr providers detect` / enable. `atr ask` exits non-zero; the TUI asks whether to continue anyway.

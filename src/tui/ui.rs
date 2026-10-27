@@ -43,6 +43,7 @@ pub(crate) async fn run(
     pin: Option<String>,
 ) -> Result<ExitCode> {
     let mut app = App::new(&shared, &key);
+    proxy::begin_session_models_refresh(&shared, &key, &ws);
     loop {
         let mut term = setup()?;
         let end = event_loop(&mut term, &shared, &key, &ws, pin.as_deref(), &mut app).await;
@@ -170,6 +171,7 @@ async fn event_loop(
 ) -> Result<LoopEnd> {
     let mut ticks = 0u32;
     loop {
+        sync_model_picker(app, shared, key, ws);
         term.draw(|f| draw(f, app, shared, key))?;
         if app.busy {
             scheduler::dispatch_key(shared, key).await?;
@@ -355,7 +357,7 @@ fn picker_apply(
     name: &str,
 ) -> Result<()> {
     let step = match kind {
-        PickerKind::Provider => super::apply_provider_pick(shared, key, name)?,
+        PickerKind::Provider => super::apply_provider_pick(shared, key, ws, name)?,
         PickerKind::Model => super::apply_model_pick(shared, key, ws, name)?,
     };
     if let Step::Note(msg) = step {
@@ -418,10 +420,14 @@ fn apply_step(
             Ok(None)
         }
         Step::OpenModelPicker => {
-            let list = proxy::collect_models(shared, key, ws);
+            // Fast sources + warm cache only. Never spawn a models CLI
+            // here — every kind (claude / cursor / codex / grok / opencode)
+            // must paint the overlay on the next frame.
+            proxy::begin_session_models_refresh(shared, key, ws);
+            let list = proxy::collect_models(shared, key, ws, proxy::CliFetch::Cached);
             let (kind, _, pname) = proxy::current_kind_cli(shared, key)
                 .unwrap_or_else(|| ("?".into(), Default::default(), "none".into()));
-            if list.is_empty() {
+            if list.is_empty() && proxy::models_argv(&kind).is_none() {
                 app.push(Role::System, slash::model_empty_hint(&pname, &kind));
                 return Ok(None);
             }
@@ -434,7 +440,6 @@ fn apply_step(
                 state,
                 kind: PickerKind::Model,
             });
-            app.push(Role::System, slash::model_pick_usage(&pname, &kind, &list));
             Ok(None)
         }
         Step::NativeCli => Ok(Some(LoopEnd::Native)),
@@ -444,6 +449,34 @@ fn apply_step(
             app.busy = true;
             Ok(None)
         }
+    }
+}
+
+fn sync_model_picker(app: &mut App, shared: &Shared, key: &str, ws: &Workspace) {
+    let Some(picker) = app.picker.as_mut() else {
+        return;
+    };
+    if !matches!(picker.kind, PickerKind::Model) {
+        return;
+    }
+    let list = proxy::collect_models(shared, key, ws, proxy::CliFetch::Cached);
+    let names: Vec<String> = list.iter().map(|m| m.name.clone()).collect();
+    if names == picker.items {
+        return;
+    }
+    let keep = picker
+        .state
+        .selected()
+        .and_then(|i| picker.items.get(i).cloned());
+    picker.items = names;
+    let sel = keep
+        .and_then(|n| picker.items.iter().position(|x| *x == n))
+        .or_else(|| list.iter().position(|m| m.current))
+        .unwrap_or(0);
+    if picker.items.is_empty() {
+        picker.state.select(None);
+    } else {
+        picker.state.select(Some(sel.min(picker.items.len() - 1)));
     }
 }
 

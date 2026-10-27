@@ -15,8 +15,53 @@ use crate::config::Provider;
 use crate::tui::slash::ModelChoice;
 use crate::tui::{session_model, Workspace};
 use anyhow::{bail, Context, Result};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// How `/model` may touch a provider `models` CLI.
+///
+/// [`CliFetch::Cached`] never spawns — TUI picker open / overlay refresh.
+/// [`CliFetch::Blocking`] fills the cache on miss (line-mode list, tests).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CliFetch {
+    Cached,
+    Blocking,
+}
+
+const CLI_MODELS_TTL: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct CacheKey {
+    kind: String,
+    cli: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct CacheEntry {
+    ids: Vec<String>,
+    at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct ModelsCache {
+    entries: HashMap<CacheKey, CacheEntry>,
+    inflight: HashSet<CacheKey>,
+}
+
+fn models_cache() -> &'static Mutex<ModelsCache> {
+    static CACHE: OnceLock<Mutex<ModelsCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(ModelsCache::default()))
+}
+
+fn cache_key(kind: &str, cli: &Path) -> CacheKey {
+    CacheKey {
+        kind: kind.to_string(),
+        cli: cli.to_path_buf(),
+    }
+}
 
 pub(crate) fn models_argv(kind: &str) -> Option<&'static [&'static str]> {
     match kind {
@@ -25,7 +70,12 @@ pub(crate) fn models_argv(kind: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-pub(crate) fn collect_models(shared: &Shared, key: &str, ws: &Workspace) -> Vec<ModelChoice> {
+pub(crate) fn collect_models(
+    shared: &Shared,
+    key: &str,
+    ws: &Workspace,
+    fetch: CliFetch,
+) -> Vec<ModelChoice> {
     let Some((kind, cli, pname)) = current_kind_cli(shared, key) else {
         return Vec::new();
     };
@@ -34,7 +84,7 @@ pub(crate) fn collect_models(shared: &Shared, key: &str, ws: &Workspace) -> Vec<
     let mut out: Vec<ModelChoice> = Vec::new();
     let mut push = |name: String, tag: &str| {
         let name = name.trim().to_string();
-        if name.is_empty() {
+        if name.is_empty() || is_banner_prose(&name) {
             return;
         }
         if let Some(e) = out.iter_mut().find(|m| m.name == name) {
@@ -83,10 +133,8 @@ pub(crate) fn collect_models(shared: &Shared, key: &str, ws: &Workspace) -> Vec<
     }
     if models_argv(&kind).is_some() {
         let cwd = session_cwd(shared, key, ws);
-        if let Ok(text) = run_models_list(&cli, &kind, &cwd) {
-            for id in parse_cli_model_ids(&text) {
-                push(id, "cli");
-            }
+        for id in cli_catalog_ids(&kind, &cli, &cwd, fetch) {
+            push(id, "cli");
         }
     }
     if let Some(cur) = &current {
@@ -150,17 +198,121 @@ fn looks_like_cli_model_id(s: &str) -> bool {
     s.contains('-') || s.contains('/') || s.chars().any(|c| c.is_ascii_digit())
 }
 
+fn is_banner_prose(s: &str) -> bool {
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "you" | "are" | "logged" | "in" | "with" | "default" | "available" | "models" | "model"
+    )
+}
+
+fn fresh_cached_ids(kind: &str, cli: &Path) -> Option<Vec<String>> {
+    let key = cache_key(kind, cli);
+    let c = models_cache().lock().unwrap();
+    c.entries
+        .get(&key)
+        .and_then(|e| (e.at.elapsed() < CLI_MODELS_TTL).then(|| e.ids.clone()))
+}
+
+pub(crate) fn cached_cli_model_ids(kind: &str, cli: &Path) -> Vec<String> {
+    let key = cache_key(kind, cli);
+    let c = models_cache().lock().unwrap();
+    c.entries
+        .get(&key)
+        .map(|e| e.ids.clone())
+        .unwrap_or_default()
+}
+
+fn store_cli_model_ids(kind: &str, cli: &Path, ids: Vec<String>) {
+    let key = cache_key(kind, cli);
+    let mut c = models_cache().lock().unwrap();
+    c.entries.insert(
+        key,
+        CacheEntry {
+            ids,
+            at: Instant::now(),
+        },
+    );
+}
+
+pub(crate) fn invalidate_cli_models(kind: &str, cli: &Path) {
+    let key = cache_key(kind, cli);
+    let mut c = models_cache().lock().unwrap();
+    c.entries.remove(&key);
+    c.inflight.remove(&key);
+}
+
+fn fetch_and_store(kind: &str, cli: &Path, cwd: &Path) -> Vec<String> {
+    let ids = run_models_list(cli, kind, cwd)
+        .map(|text| parse_cli_model_ids(&text))
+        .unwrap_or_default();
+    store_cli_model_ids(kind, cli, ids.clone());
+    ids
+}
+
+fn cli_catalog_ids(kind: &str, cli: &Path, cwd: &Path, fetch: CliFetch) -> Vec<String> {
+    match fetch {
+        CliFetch::Cached => cached_cli_model_ids(kind, cli),
+        CliFetch::Blocking => {
+            if let Some(ids) = fresh_cached_ids(kind, cli) {
+                return ids;
+            }
+            fetch_and_store(kind, cli, cwd)
+        }
+    }
+}
+
+/// Spawn `kind models` off the UI thread. No-op when the kind has no
+/// list subcommand, a fresh cache entry exists, or a fetch is in flight.
+pub(crate) fn begin_cli_models_refresh(kind: &str, cli: &Path, cwd: &Path) {
+    if models_argv(kind).is_none() {
+        return;
+    }
+    let key = cache_key(kind, cli);
+    {
+        let mut c = models_cache().lock().unwrap();
+        if let Some(e) = c.entries.get(&key) {
+            if e.at.elapsed() < CLI_MODELS_TTL {
+                return;
+            }
+        }
+        if !c.inflight.insert(key.clone()) {
+            return;
+        }
+    }
+    let kind = kind.to_string();
+    let cli = cli.to_path_buf();
+    let cwd = cwd.to_path_buf();
+    let _ = std::thread::Builder::new()
+        .name("atr-models".into())
+        .spawn(move || {
+            let _ = fetch_and_store(&kind, &cli, &cwd);
+            if let Ok(mut c) = models_cache().lock() {
+                c.inflight.remove(&CacheKey { kind, cli });
+            }
+        });
+}
+
+pub(crate) fn begin_session_models_refresh(shared: &Shared, key: &str, ws: &Workspace) {
+    let Some((kind, cli, _)) = current_kind_cli(shared, key) else {
+        return;
+    };
+    let cwd = session_cwd(shared, key, ws);
+    begin_cli_models_refresh(&kind, &cli, &cwd);
+}
+
 pub(crate) fn run_models_list(cli: &Path, kind: &str, cwd: &Path) -> Result<String> {
     let args = models_argv(kind).context("no models subcommand for this kind")?;
-    let out = Command::new(cli)
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("ATR_TUI_SIDE", "1")
-        .output()
-        .with_context(|| format!("run {} models", cli.display()))?;
+    let out = crate::util::retry_exec_busy(|| {
+        Command::new(cli)
+            .args(args)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("ATR_TUI_SIDE", "1")
+            .output()
+    })
+    .with_context(|| format!("run {} models", cli.display()))?;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     let err = String::from_utf8_lossy(&out.stderr);
     if !err.trim().is_empty() {
@@ -308,6 +460,7 @@ pub(crate) fn run_native_cli(shared: &Shared, key: &str, ws: &Workspace) -> Resu
 mod tests {
     use super::*;
     use crate::config::Provider;
+    use std::time::{Duration, Instant};
 
     const GROK_MODELS_SAMPLE: &str = "\
 You are logged in with grok.com.
@@ -393,6 +546,107 @@ Available models:
         assert_eq!(models_argv("claude"), None);
         assert_eq!(models_argv("cursor"), None);
         assert_eq!(models_argv("codex"), None);
+    }
+
+    fn write_models_cli(dir: &Path, name: &str, log: &Path, body: &str) -> PathBuf {
+        let cli = dir.join(name);
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\nprintf . >> '{}'\nif [ \"$1\" = models ]; then\n{body}\nexit 0\nfi\nexit 1\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        cli
+    }
+
+    fn spawn_count(log: &Path) -> usize {
+        std::fs::read_to_string(log).unwrap_or_default().len()
+    }
+
+    #[test]
+    fn cli_models_cache_hit_skips_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("spawns");
+        let cwd = dir.path();
+        let grok = write_models_cli(
+            dir.path(),
+            "grok",
+            &log,
+            "echo '  * grok-4.7 (default)'\necho '  - grok-4.7-build-fast'\n",
+        );
+        invalidate_cli_models("grok", &grok);
+
+        let cold = cli_catalog_ids("grok", &grok, cwd, CliFetch::Cached);
+        assert!(cold.is_empty(), "{cold:?}");
+        assert_eq!(spawn_count(&log), 0, "Cached must never spawn");
+
+        let first = cli_catalog_ids("grok", &grok, cwd, CliFetch::Blocking);
+        assert!(first.iter().any(|s| s == "grok-4.7"), "{first:?}");
+        assert!(
+            first.iter().any(|s| s == "grok-4.7-build-fast"),
+            "{first:?}"
+        );
+        assert_eq!(spawn_count(&log), 1);
+
+        let hit = cli_catalog_ids("grok", &grok, cwd, CliFetch::Blocking);
+        assert_eq!(hit, first);
+        assert_eq!(spawn_count(&log), 1, "warm Blocking must not spawn");
+
+        let cached = cli_catalog_ids("grok", &grok, cwd, CliFetch::Cached);
+        assert_eq!(cached, first);
+        assert_eq!(spawn_count(&log), 1);
+
+        let oc = write_models_cli(dir.path(), "opencode", &log, "echo moonshotai/kimi-k2.6\n");
+        invalidate_cli_models("opencode", &oc);
+        let oc_cached = cli_catalog_ids("opencode", &oc, cwd, CliFetch::Cached);
+        assert!(oc_cached.is_empty(), "kinds must not share a catalog");
+        assert_eq!(spawn_count(&log), 1);
+        let oc_ids = cli_catalog_ids("opencode", &oc, cwd, CliFetch::Blocking);
+        assert!(
+            oc_ids.iter().any(|s| s == "moonshotai/kimi-k2.6"),
+            "{oc_ids:?}"
+        );
+        assert_eq!(spawn_count(&log), 2);
+
+        invalidate_cli_models("grok", &grok);
+        assert!(cached_cli_model_ids("grok", &grok).is_empty());
+        let again = cli_catalog_ids("grok", &grok, cwd, CliFetch::Blocking);
+        assert!(again.iter().any(|s| s == "grok-4.7"), "{again:?}");
+        assert_eq!(spawn_count(&log), 3);
+    }
+
+    #[test]
+    fn begin_cli_models_refresh_fills_cache_off_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("spawns");
+        let grok = write_models_cli(dir.path(), "grok", &log, "echo '  * grok-4.7 (default)'\n");
+        invalidate_cli_models("grok", &grok);
+        begin_cli_models_refresh("grok", &grok, dir.path());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while cached_cli_model_ids("grok", &grok).is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "background refresh did not store ids"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(cached_cli_model_ids("grok", &grok)
+            .iter()
+            .any(|s| s == "grok-4.7"));
+        let n = spawn_count(&log);
+        begin_cli_models_refresh("grok", &grok, dir.path());
+        assert_eq!(
+            spawn_count(&log),
+            n,
+            "fresh cache must not start another fetch"
+        );
     }
 
     #[test]

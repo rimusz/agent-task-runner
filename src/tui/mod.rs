@@ -346,7 +346,7 @@ pub(crate) fn step_line(
             Ok(Step::Note(format!("new session {key}")))
         }
         Some(slash::Slash::Provider(None)) => Ok(Step::OpenProviderPicker),
-        Some(slash::Slash::Provider(Some(name))) => apply_provider_pick(shared, key, &name),
+        Some(slash::Slash::Provider(Some(name))) => apply_provider_pick(shared, key, ws, &name),
         Some(slash::Slash::Model(None)) => Ok(Step::OpenModelPicker),
         Some(slash::Slash::Model(Some(name))) => apply_model_pick(shared, key, ws, &name),
         Some(slash::Slash::Cli) => Ok(Step::NativeCli),
@@ -360,7 +360,7 @@ pub(crate) fn apply_model_pick(
     ws: &Workspace,
     input: &str,
 ) -> Result<Step> {
-    let list = proxy::collect_models(shared, key, ws);
+    let list = proxy::collect_models(shared, key, ws, proxy::CliFetch::Cached);
     let names: Vec<String> = list.iter().map(|m| m.name.clone()).collect();
     if let Some(name) = slash::pick_choice(&names, input) {
         return set_model_note(shared, key, &name);
@@ -389,7 +389,7 @@ fn set_model_note(shared: &Shared, key: &str, name: &str) -> Result<Step> {
 }
 
 fn model_picker_text(shared: &Shared, key: &str, ws: &Workspace) -> String {
-    let list = proxy::collect_models(shared, key, ws);
+    let list = proxy::collect_models(shared, key, ws, proxy::CliFetch::Blocking);
     let (kind, _, pname) = proxy::current_kind_cli(shared, key)
         .unwrap_or_else(|| ("?".into(), Default::default(), "none".into()));
     slash::model_pick_usage(&pname, &kind, &list)
@@ -435,12 +435,26 @@ pub fn preview_line(shared: &Shared, key: &str, line: &str) -> Result<String> {
     }
 }
 
-pub(crate) fn apply_provider_pick(shared: &Shared, key: &str, input: &str) -> Result<Step> {
+pub(crate) fn apply_provider_pick(
+    shared: &Shared,
+    key: &str,
+    ws: &Workspace,
+    input: &str,
+) -> Result<Step> {
     let list = slash::list_providers(shared, key);
     let names: Vec<String> = list.iter().map(|p| p.name.clone()).collect();
     match slash::pick_choice(&names, input) {
         Some(name) => {
+            let prev = proxy::current_kind_cli(shared, key);
             set_session_provider(shared, key, &name)?;
+            if let Some((kind, cli, _)) = prev {
+                let same = proxy::current_kind_cli(shared, key)
+                    .is_some_and(|(k, c, _)| k == kind && c == cli);
+                if !same {
+                    proxy::invalidate_cli_models(&kind, &cli);
+                }
+            }
+            proxy::begin_session_models_refresh(shared, key, ws);
             Ok(Step::Note(format!(
                 "provider {name} (next turn; handoff if switching)"
             )))

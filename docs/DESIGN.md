@@ -66,11 +66,13 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   process owns those sessions. Provider: session pin → `--provider` →
   optional `[tui] providers` → global `[[provider]]` order. `/provider`
   and `/model` are atr-local (list/pick). `/model` sets a per-session
-  `--model` override from config / detect / CLI `models` (Grok/OpenCode)
-  — never forwarded as a headless chat prompt. Other `/…` lines may be
-  proxied. `/cli` opens the provider's own interactive TUI. A full PTY
-  host of the vendor TUI is out of scope: atr still spawns print-mode /
-  `exec` / `run` per turn.
+  `--model` override from config / detect / a cached CLI `models` catalog
+  (Grok/OpenCode; refresh is off the UI thread for every kind) — never
+  forwarded as a headless chat prompt. The TUI overlay does not dump the
+  catalog into the transcript. Other `/…` lines may be proxied. `/cli`
+  opens the provider's own interactive TUI. A full PTY host of the vendor
+  TUI is out of scope: atr still spawns print-mode / `exec` / `run` per
+  turn.
 - **MCP:** `atr mcp` is stdio (local agents or SSH). Streamable HTTP is
   `POST /mcp` on the existing listener (localhost by default; Tailscale bind
   is optional). HTTP requires a bearer token from `mcp.token_env` (default
