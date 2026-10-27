@@ -280,6 +280,12 @@ impl Shared {
                 self.db
                     .set_provider_session(&t.key, Some(&p), sid.as_deref())?;
             }
+        } else if crate::tui::is_tui_key(&t.key) {
+            if let Some(p) = crate::tui::tui_provider_now(self, &t.key) {
+                let sid = self.db.task_session(&t.key, &p).ok().flatten();
+                self.db
+                    .set_provider_session(&t.key, Some(&p), sid.as_deref())?;
+            }
         }
         Ok(())
     }

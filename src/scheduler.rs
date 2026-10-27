@@ -17,7 +17,7 @@ use std::time::Duration;
 fn notify_run(cfg: &crate::config::TelegramConfig, body: &str, shadow: bool) {
     if body
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-        .any(crate::telegram::is_assistant_key)
+        .any(|k| crate::telegram::is_assistant_key(k) || crate::tui::is_tui_key(k))
     {
         return;
     }
@@ -51,8 +51,21 @@ pub async fn scheduler_loop(shared: Arc<Shared>) {
 }
 
 pub async fn dispatch_available(shared: &Arc<Shared>) -> Result<()> {
+    dispatch_matching(shared, None).await
+}
+
+/// Dispatch at most the runnable work for one task key. Used by `atr tui`
+/// so an in-process turn does not start leftover queued tasks.
+pub async fn dispatch_key(shared: &Arc<Shared>, key: &str) -> Result<()> {
+    dispatch_matching(shared, Some(key)).await
+}
+
+async fn dispatch_matching(shared: &Arc<Shared>, only: Option<&str>) -> Result<()> {
     let keys = order_runnable(shared)?;
     for key in keys {
+        if only.is_some_and(|want| want != key) {
+            continue;
+        }
         if shared.inflight.lock().unwrap().contains_key(&key) {
             continue;
         }
@@ -361,10 +374,17 @@ pub fn pick_provider(
     // only busy/cooling; fall through when none of them can ever run.
     if crate::telegram::is_assistant_key(&task.key) && !cfg.telegram.assistant.providers.is_empty()
     {
-        match assistant_pick(cfg, db, inflight, &tried, clock)? {
-            AssistantPick::Use(p) => return Ok(Some(*p)),
-            AssistantPick::Wait => return Ok(None),
-            AssistantPick::NoneUsable => {}
+        match list_pick(
+            cfg,
+            db,
+            inflight,
+            &tried,
+            clock,
+            &cfg.telegram.assistant.providers,
+        )? {
+            ListPick::Use(p) => return Ok(Some(*p)),
+            ListPick::Wait => return Ok(None),
+            ListPick::NoneUsable => {}
         }
     }
 
@@ -404,6 +424,10 @@ pub fn pick_provider(
         prefers.push(task.provider_hint.clone());
     }
 
+    // TUI session list is a fallback after the session pin / hint, before
+    // the global `[[provider]]` order.
+    let tui_list = crate::tui::is_tui_key(&task.key) && !cfg.tui.providers.is_empty();
+
     for pref in &prefers {
         if tried.contains(&pref.as_str()) {
             continue;
@@ -422,6 +446,14 @@ pub fn pick_provider(
         }
     }
 
+    if tui_list {
+        match list_pick(cfg, db, inflight, &tried, clock, &cfg.tui.providers)? {
+            ListPick::Use(p) => return Ok(Some(*p)),
+            ListPick::Wait => return Ok(None),
+            ListPick::NoneUsable => {}
+        }
+    }
+
     for p in &cfg.providers {
         if tried.contains(&p.name.as_str()) || !capable(p) {
             continue;
@@ -434,22 +466,23 @@ pub fn pick_provider(
     Ok(None)
 }
 
-enum AssistantPick {
+enum ListPick {
     Use(Box<Provider>),
     Wait,
     NoneUsable,
 }
 
-/// Walk `[telegram.assistant] providers` in order, skipping `tried` ones.
-fn assistant_pick(
+/// Walk an ordered provider list, skipping `tried` ones.
+fn list_pick(
     cfg: &Config,
     db: &Db,
     inflight: &HashMap<String, InFlight>,
     tried: &[&str],
     clock: &Clock,
-) -> Result<AssistantPick> {
+    names: &[String],
+) -> Result<ListPick> {
     let mut can_wait = false;
-    for name in &cfg.telegram.assistant.providers {
+    for name in names {
         if tried.contains(&name.as_str()) {
             continue;
         }
@@ -457,19 +490,46 @@ fn assistant_pick(
             continue;
         };
         match unavailable(cfg, p, db, inflight, false, clock)? {
-            None => return Ok(AssistantPick::Use(Box::new(p.clone()))),
+            None => return Ok(ListPick::Use(Box::new(p.clone()))),
             Some("disabled") | Some("missing-cli") => {}
             Some(reason) => {
-                tracing::debug!(provider = %p.name, reason, "assistant provider skipped");
+                tracing::debug!(provider = %p.name, reason, "listed provider skipped");
                 can_wait = true;
             }
         }
     }
     Ok(if can_wait {
-        AssistantPick::Wait
+        ListPick::Wait
     } else {
-        AssistantPick::NoneUsable
+        ListPick::NoneUsable
     })
+}
+
+/// First name in `names` that is usable now, or the first still-enabled one
+/// when every listed provider is only busy/cooling.
+pub fn listed_provider_now(shared: &Shared, names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let cfg = shared.config.read().unwrap().clone();
+    let inflight = shared.inflight.lock().unwrap().clone();
+    match list_pick(&cfg, &shared.db, &inflight, &[], &Clock::system(), names) {
+        Ok(ListPick::Use(p)) => Some(p.name),
+        Ok(ListPick::Wait) => names
+            .iter()
+            .find(|n| {
+                cfg.provider(n).is_some_and(|p| {
+                    shared
+                        .db
+                        .enabled_override(&p.name)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(p.enabled)
+                })
+            })
+            .cloned(),
+        _ => None,
+    }
 }
 
 /// The provider a new Telegram assistant turn would use right now (for the
@@ -479,26 +539,7 @@ pub fn assistant_provider_now(shared: &Shared) -> Option<String> {
     let cfg = shared.config.read().unwrap().clone();
     let ast = &cfg.telegram.assistant;
     if !ast.providers.is_empty() {
-        let inflight = shared.inflight.lock().unwrap().clone();
-        return match assistant_pick(&cfg, &shared.db, &inflight, &[], &Clock::system()) {
-            Ok(AssistantPick::Use(p)) => Some(p.name),
-            // All listed ones busy/cooling: it waits for the first of them.
-            Ok(AssistantPick::Wait) => ast
-                .providers
-                .iter()
-                .find(|n| {
-                    cfg.provider(n).is_some_and(|p| {
-                        shared
-                            .db
-                            .enabled_override(&p.name)
-                            .ok()
-                            .flatten()
-                            .unwrap_or(p.enabled)
-                    })
-                })
-                .cloned(),
-            _ => None,
-        };
+        return listed_provider_now(shared, &ast.providers);
     }
     let pin = ast.provider.trim();
     (!pin.is_empty()).then(|| pin.to_string())
@@ -613,6 +654,9 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     if assistant {
         provider =
             crate::telegram::apply_assistant_timeout(&provider, cfg.telegram.assistant.timeout);
+    }
+    if crate::tui::is_tui_key(&key) {
+        crate::tui::apply_session_model(&mut provider, &shared.db, &key);
     }
     let task = shared
         .db

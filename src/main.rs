@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use atr::{app, config::default_config_path, load_config, Shared, SubmitOutcome, EX_TEMPFAIL};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -15,7 +15,7 @@ struct Cli {
     #[arg(long, global = true, env = "ATR_CONFIG")]
     config: Option<PathBuf>,
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -96,6 +96,27 @@ enum Cmd {
         /// verify with the smallest diff. Needs --repo and verify commands.
         #[arg(long, conflicts_with_all = ["provider", "dir", "needs"])]
         compare: Option<String>,
+    },
+    /// Interactive terminal session (in-process; `atr serve` is not required).
+    /// With a prompt argument, run one turn, print the answer, and exit.
+    Tui {
+        /// One-shot prompt. Omit for the interactive transcript + status footer.
+        prompt: Option<String>,
+        /// Preferred provider for this session (same as `ATR_TUI_PROVIDER`).
+        #[arg(long, env = "ATR_TUI_PROVIDER")]
+        provider: Option<String>,
+        /// Session name (task key `cli-<name>`, default `default`).
+        #[arg(long)]
+        session: Option<String>,
+        /// Local directory workspace (edit in place).
+        #[arg(long, conflicts_with = "repo")]
+        dir: Option<PathBuf>,
+        /// Git repository workspace (worktree / branch).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Drop the previous `cli-<name>` task and start a fresh session.
+        #[arg(long)]
+        new: bool,
     },
     /// Show providers (with order numbers), inflight tasks, and usage.
     Status {
@@ -509,10 +530,27 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<ExitCode> {
     let path = cli.config.unwrap_or_else(default_config_path);
-    if !matches!(cli.cmd, Cmd::Serve) {
+    let cmd = match cli.cmd {
+        Some(c) => c,
+        None if atr::tui::default_is_tui() => Cmd::Tui {
+            prompt: None,
+            provider: None,
+            session: None,
+            dir: None,
+            repo: None,
+            new: false,
+        },
+        None => {
+            let mut cmd = Cli::command();
+            cmd.print_help()?;
+            println!();
+            return Ok(ExitCode::from(2));
+        }
+    };
+    if !matches!(cmd, Cmd::Serve) {
         atr::logrotate::init_tracing(None);
     }
-    match cli.cmd {
+    match cmd {
         Cmd::Init {
             yes,
             force,
@@ -727,6 +765,28 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 SubmitOutcome::Accepted => Ok(ExitCode::SUCCESS),
                 SubmitOutcome::Queued => Ok(ExitCode::from(EX_TEMPFAIL as u8)),
             }
+        }
+        Cmd::Tui {
+            prompt,
+            provider,
+            session,
+            dir,
+            repo,
+            new,
+        } => {
+            let shared = Shared::open(path)?;
+            atr::tui::run(
+                shared,
+                atr::tui::TuiOpts {
+                    prompt,
+                    provider,
+                    session,
+                    dir,
+                    repo,
+                    new,
+                },
+            )
+            .await
         }
         Cmd::Status { json, repo } => {
             let shared = Shared::open(path)?;

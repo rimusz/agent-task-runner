@@ -150,6 +150,13 @@ owner's env var, ok/warn/fail and days left without printing values.
   start; restart atr (`atr service restart`) and reopen the chat.
 - Very long replies arrive as `reply.md` (more than 4 message parts).
 
+## 6b. Terminal TUI
+
+- `atr tui` runs the engine in-process. It does **not** need `atr serve`.
+- Session keys are `cli-<name>` (default `cli-default`), separate from Telegram.
+- No provider: check `atr providers`, `ATR_TUI_PROVIDER`, or `[tui] providers`.
+- `ATR_DEFAULT=tui` only affects a bare `atr`; `atr add` and other subcommands stay the same.
+
 ## 7. Notify hook
 
 `[notify] command` runs (via `sh -c`) for alerts, alongside Telegram:

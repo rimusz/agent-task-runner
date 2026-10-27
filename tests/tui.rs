@@ -1,0 +1,348 @@
+//! `atr tui` runs the engine in-process (no `atr serve`) with fake CLIs.
+use atr::{tui, Shared};
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use tempfile::TempDir;
+
+fn atr() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_atr"))
+}
+
+/// Shared + fake CLIs, **without** starting HTTP/`atr serve`.
+async fn no_serve(providers: &[(&str, bool, &str)]) -> (TempDir, Arc<Shared>, std::path::PathBuf) {
+    let dir = TempDir::new().unwrap();
+    let fake_dir = dir.path().join("fake");
+    fs::create_dir_all(&fake_dir).unwrap();
+    let bin = dir.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agent.sh");
+    for name in ["claude", "grok", "cursor-agent", "codex", "opencode"] {
+        let dest = bin.join(name);
+        fs::copy(&script, &dest).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    for (name, _, beh) in providers {
+        let cli = match *name {
+            "cursor" => "cursor-agent",
+            other => other,
+        };
+        fs::write(fake_dir.join(format!("{cli}.behavior")), beh).unwrap();
+    }
+    let repo = dir.path().join("repo");
+    atr::worktree::init_sample_repo(&repo).unwrap();
+    let prompt = dir.path().join("system-prompt.md");
+    fs::write(&prompt, "STABLE PREFIX\n").unwrap();
+    let db = dir.path().join("state.db");
+    let wt = dir.path().join("work");
+    let cfg_path = dir.path().join("config.toml");
+    let mut text = format!(
+        r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{wt}"
+repo_path = "{repo}"
+system_prompt_file = "{prompt}"
+task_key_prefix = "demo"
+[planner]
+mode = "off"
+[github]
+enabled = false
+[telegram]
+enabled = false
+"#,
+        db = db.display(),
+        wt = wt.display(),
+        repo = repo.display(),
+        prompt = prompt.display(),
+    );
+    for (name, enabled, _) in providers {
+        text.push_str(&provider_block(name, *enabled, &bin));
+    }
+    fs::write(&cfg_path, text).unwrap();
+    let cfg = atr::load_config(&cfg_path).unwrap();
+    let shared = Shared::from_config(cfg_path.clone(), cfg).unwrap();
+    (dir, shared, cfg_path)
+}
+
+fn provider_block(name: &str, enabled: bool, bin: &Path) -> String {
+    let (kind, cli) = match name {
+        "cursor" => ("cursor", "cursor-agent"),
+        other => (other, other),
+    };
+    format!(
+        r#"
+[[provider]]
+name = "{name}"
+kind = "{kind}"
+enabled = {enabled}
+cli = "{cli}"
+model = "test-model"
+max_parallel = 1
+run_timeout = "8s"
+heartbeat_timeout = "2s"
+[provider.health]
+startup_timeout = "2s"
+heartbeat_timeout = "2s"
+"#,
+        name = name,
+        kind = kind,
+        enabled = enabled,
+        cli = bin.join(cli).display(),
+    )
+}
+
+fn opts(prompt: &str, provider: Option<&str>, session: Option<&str>) -> tui::TuiOpts {
+    tui::TuiOpts {
+        prompt: Some(prompt.into()),
+        provider: provider.map(|s| s.to_string()),
+        session: session.map(|s| s.to_string()),
+        ..tui::TuiOpts::default()
+    }
+}
+
+#[tokio::test]
+async fn oneshot_runs_in_process_without_serve() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    let code = tui::run(shared.clone(), opts("what is 2+2?", None, None))
+        .await
+        .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    let task = shared.db.get_task("cli-default").unwrap().unwrap();
+    assert_eq!(task.provider.as_deref(), Some("claude"));
+    assert!(tui::is_tui_key(&task.key));
+    let runs = shared.db.list_runs(Some("cli-default")).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].outcome.as_deref(), Some("success"));
+    let footer = tui::footer_line(&shared, "cli-default");
+    assert!(footer.contains("cli-default"), "{footer}");
+    assert!(footer.contains("claude"), "{footer}");
+}
+
+#[tokio::test]
+async fn atr_tui_provider_prefers_named_provider() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", true, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    tui::run(shared.clone(), opts("hello", Some("grok"), Some("work")))
+        .await
+        .unwrap();
+    let task = shared.db.get_task("cli-work").unwrap().unwrap();
+    assert_eq!(task.key, "cli-work");
+    assert_eq!(task.provider.as_deref(), Some("grok"));
+    assert_ne!(task.provider.as_deref(), Some("claude"));
+}
+
+#[tokio::test]
+async fn session_provider_switch_uses_existing_handoff() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", true, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    tui::run(shared.clone(), opts("first", Some("claude"), None))
+        .await
+        .unwrap();
+    let sid = shared.db.task_session("cli-default", "grok").ok().flatten();
+    shared
+        .db
+        .set_provider_session("cli-default", Some("grok"), sid.as_deref())
+        .unwrap();
+    shared.db.set_provider_hint("cli-default", "grok").unwrap();
+    tui::run(shared.clone(), opts("second", None, None))
+        .await
+        .unwrap();
+    let runs = shared.db.list_runs(Some("cli-default")).unwrap();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_eq!(runs[0].provider, "claude");
+    assert_eq!(runs[1].provider, "grok");
+    assert!(
+        runs[1].handoff.as_deref().is_some_and(|h| !h.is_empty()),
+        "switch should write a handoff brief: {:?}",
+        runs[1].handoff
+    );
+}
+
+#[tokio::test]
+async fn tui_providers_list_beats_global_order() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", true, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    {
+        let mut cfg = shared.config.write().unwrap();
+        cfg.tui.providers = vec!["grok".into(), "claude".into()];
+    }
+    tui::run(shared.clone(), opts("list please", None, None))
+        .await
+        .unwrap();
+    let task = shared.db.get_task("cli-default").unwrap().unwrap();
+    assert_eq!(task.provider.as_deref(), Some("grok"));
+}
+
+#[test]
+fn session_key_helpers() {
+    assert_eq!(tui::tui_task_key("default").unwrap(), "cli-default");
+    assert!(tui::is_tui_key("cli-default"));
+    assert!(!tui::is_tui_key("tg42"));
+}
+
+#[test]
+fn atr_default_bare_command_routes_to_tui() {
+    let (dir, cfg) = setup_bin_cfg();
+    let out = atr()
+        .env("ATR_CONFIG", &cfg)
+        .env("HOME", dir.path().join("home"))
+        .env("ATR_DEFAULT", "tui")
+        .arg("what is two plus two?")
+        .output()
+        .unwrap();
+    // A prompt without a subcommand is still invalid; ATR_DEFAULT only
+    // applies to a bare `atr`. The one-shot form is `atr tui "…"`.
+    assert!(!out.status.success());
+
+    let out = atr()
+        .env("ATR_CONFIG", &cfg)
+        .env("HOME", dir.path().join("home"))
+        .env_remove("ATR_DEFAULT")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("Usage:"), "{help}");
+
+    let out = atr()
+        .env("ATR_CONFIG", &cfg)
+        .env("HOME", dir.path().join("home"))
+        .env("ATR_DEFAULT", "tui")
+        .env("ATR_TUI_PROVIDER", "grok")
+        .args(["tui", "status please", "--session", "bin"])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("cli-bin"), "{text}");
+    assert!(text.contains("grok"), "{text}");
+
+    // Bare `atr` with ATR_DEFAULT=tui is the same as `atr tui` (REPL; EOF ends it).
+    let mut child = atr()
+        .env("ATR_CONFIG", &cfg)
+        .env("HOME", dir.path().join("home"))
+        .env("ATR_DEFAULT", "tui")
+        .env("ATR_TUI_PROVIDER", "grok")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, "hello from default").unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("cli-default"), "{text}");
+    assert!(text.contains("grok"), "{text}");
+}
+
+#[test]
+fn tui_help_documents_flags_and_env() {
+    let out = atr().args(["tui", "--help"]).output().unwrap();
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("--provider"), "{help}");
+    assert!(help.contains("ATR_TUI_PROVIDER"), "{help}");
+    assert!(help.contains("--session"), "{help}");
+    assert!(help.contains("--new"), "{help}");
+}
+
+fn setup_bin_cfg() -> (TempDir, std::path::PathBuf) {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("home")).unwrap();
+    let fake_dir = dir.path().join("fake");
+    fs::create_dir_all(&fake_dir).unwrap();
+    let bin = dir.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agent.sh");
+    for name in ["claude", "grok"] {
+        let dest = bin.join(name);
+        fs::copy(&script, &dest).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(fake_dir.join(format!("{name}.behavior")), "success").unwrap();
+    }
+    let repo = dir.path().join("repo");
+    atr::worktree::init_sample_repo(&repo).unwrap();
+    let prompt = dir.path().join("p.md");
+    fs::write(&prompt, "p\n").unwrap();
+    let cfg = dir.path().join("config.toml");
+    fs::write(
+        &cfg,
+        format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{wt}"
+repo_path = "{repo}"
+system_prompt_file = "{prompt}"
+[planner]
+mode = "off"
+[github]
+enabled = false
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "{claude}"
+model = "test-model"
+run_timeout = "8s"
+[[provider]]
+name = "grok"
+kind = "grok"
+cli = "{grok}"
+model = "test-model"
+run_timeout = "8s"
+"#,
+            db = dir.path().join("state.db").display(),
+            wt = dir.path().join("work").display(),
+            repo = repo.display(),
+            prompt = prompt.display(),
+            claude = bin.join("claude").display(),
+            grok = bin.join("grok").display(),
+        ),
+    )
+    .unwrap();
+    (dir, cfg)
+}

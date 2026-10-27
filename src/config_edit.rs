@@ -419,6 +419,20 @@ model = "opus"
     }
 
     #[test]
+    fn set_and_get_tui_providers() {
+        let (_dir, path) = seed();
+        assert_eq!(get_value(&path, "tui.providers").unwrap(), "(unset)");
+        apply_set(&path, "tui.providers", r#"["claude"]"#).unwrap();
+        assert_eq!(get_value(&path, "tui.providers").unwrap(), r#"["claude"]"#);
+        let cfg = crate::config::load_config(&path).unwrap();
+        assert_eq!(cfg.tui.providers, vec!["claude"]);
+        let err = apply_set(&path, "tui.providers", r#"["nope"]"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a [[provider]]"), "{err}");
+    }
+
+    #[test]
     fn invalid_value_fails_before_write() {
         let (_dir, path) = seed();
         let before = std::fs::read_to_string(&path).unwrap();

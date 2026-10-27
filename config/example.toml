@@ -65,6 +65,11 @@ headline_min_input = 40000
 # GitHub repo used by `atr upgrade`.
 github_repo = "rimusz/agent-task-runner"
 
+# Optional TUI provider order (`atr tui`). Empty = global [[provider]] order
+# after the session pin and ATR_TUI_PROVIDER / --provider.
+# [tui]
+# providers = ["grok", "claude"]
+
 [handoff]
 max_bytes = 16384
 include_diff = true

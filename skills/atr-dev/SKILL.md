@@ -14,6 +14,7 @@ atr is a single Rust binary (`atr`, edition 2021, MSRV 1.85) that runs as a long
 | Path | What |
 |------|------|
 | `src/main.rs` | CLI entry, clap subcommands, dispatch |
+| `src/tui.rs` | `atr tui` in-process session (`cli-<name>` keys) |
 | `src/lib.rs` | module list |
 | `src/config.rs`, `src/config_edit.rs` | `~/.config/atr/config.toml` schema + defaults; in-place edits (`atr config set`, `atr driver set`, …) |
 | `src/providers.rs`, `providers_edit.rs`, `presets.rs`, `opencode_cfg.rs`, `detect.rs` | provider kinds, presets, CLI detection/versions |

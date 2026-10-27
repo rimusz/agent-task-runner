@@ -81,6 +81,9 @@ pub struct RawConfig {
     pub mcp: RawMcp,
     #[serde(default)]
     pub cache: RawCache,
+    /// Optional TUI provider order (`atr tui`). Empty = global `[[provider]]`.
+    #[serde(default)]
+    pub tui: RawTui,
     /// Repeatable intake sources. Empty = current defaults (GitHub if `[github]
     /// enabled`, MCP/CLI/HTTP always, Telegram if enabled, inbox off).
     #[serde(rename = "source", default)]
@@ -109,6 +112,30 @@ impl Default for RawCache {
         Self {
             worktree_pool: true,
             headline_min_input: default_headline_min_input(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RawTui {
+    /// Ordered preference for `atr tui`. First usable name wins; empty = global
+    /// `[[provider]]` order (after a session pin or `ATR_TUI_PROVIDER`).
+    #[serde(default)]
+    pub providers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TuiConfig {
+    pub providers: Vec<String>,
+}
+
+impl TuiConfig {
+    /// Human form: `grok > claude`, or `first available`.
+    pub fn display(&self) -> String {
+        if self.providers.is_empty() {
+            "first available".into()
+        } else {
+            self.providers.join(" > ")
         }
     }
 }
@@ -641,6 +668,7 @@ pub struct Config {
     pub plugin: PluginConfig,
     pub mcp: McpConfig,
     pub cache: CacheConfig,
+    pub tui: TuiConfig,
     /// Explicit `[[source]]` entries. Empty means built-in defaults.
     pub sources: Vec<SourceEntry>,
     pub max_prompt_bytes: u64,
@@ -1680,6 +1708,7 @@ pub fn parse_config_toml(text: &str) -> Result<Config> {
     let mut cfg = Config::from_raw(raw)?;
     cfg.unknown_keys = unknown;
     validate_assistant_providers(&cfg)?;
+    validate_tui_providers(&cfg)?;
     Ok(cfg)
 }
 
@@ -1690,6 +1719,20 @@ fn validate_assistant_providers(cfg: &Config) -> Result<()> {
             let known: Vec<&str> = cfg.providers.iter().map(|p| p.name.as_str()).collect();
             bail!(
                 "telegram.assistant.providers: {n:?} is not a [[provider]] (known: {})",
+                known.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Every `[tui] providers` name must be a `[[provider]]`.
+fn validate_tui_providers(cfg: &Config) -> Result<()> {
+    for n in &cfg.tui.providers {
+        if cfg.provider(n).is_none() {
+            let known: Vec<&str> = cfg.providers.iter().map(|p| p.name.as_str()).collect();
+            bail!(
+                "tui.providers: {n:?} is not a [[provider]] (known: {})",
                 known.join(", ")
             );
         }
@@ -1767,6 +1810,7 @@ fn known_field_names() -> Vec<String> {
     for fields in [
         introspect::fields::<RawConfig>(),
         introspect::fields::<RawCache>(),
+        introspect::fields::<RawTui>(),
         introspect::fields::<RawMcp>(),
         introspect::fields::<RawPlanner>(),
         introspect::fields::<RawReview>(),
@@ -2489,6 +2533,18 @@ impl Config {
             cache: CacheConfig {
                 worktree_pool: raw.cache.worktree_pool,
                 headline_min_input: raw.cache.headline_min_input.max(0),
+            },
+            tui: TuiConfig {
+                providers: {
+                    let mut v: Vec<String> = Vec::new();
+                    for n in &raw.tui.providers {
+                        let n = n.trim();
+                        if !n.is_empty() && !v.iter().any(|x| x == n) {
+                            v.push(n.to_string());
+                        }
+                    }
+                    v
+                },
             },
             sources: {
                 let mut out = Vec::new();
@@ -3496,5 +3552,40 @@ kind = "codex"
         .to_string();
         assert!(err.contains("\"kimi\" is not a [[provider]]"), "{err}");
         assert!(err.contains("claude, grok, codex"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod tui_providers_tests {
+    use super::*;
+
+    const PROVIDERS: &str = r#"
+[[provider]]
+name = "claude"
+kind = "claude"
+[[provider]]
+name = "grok"
+kind = "grok"
+"#;
+
+    #[test]
+    fn tui_providers_parse_dedupe_and_display() {
+        let cfg = parse_config_toml(&format!(
+            "[tui]\nproviders = [\"grok\", \" claude \", \"grok\"]\n{PROVIDERS}"
+        ))
+        .unwrap();
+        assert_eq!(cfg.tui.providers, vec!["grok", "claude"]);
+        assert_eq!(cfg.tui.display(), "grok > claude");
+        let cfg = parse_config_toml(PROVIDERS).unwrap();
+        assert!(cfg.tui.providers.is_empty());
+        assert_eq!(cfg.tui.display(), "first available");
+    }
+
+    #[test]
+    fn tui_providers_must_name_configured_providers() {
+        let err = parse_config_toml(&format!("[tui]\nproviders = [\"kimi\"]\n{PROVIDERS}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"kimi\" is not a [[provider]]"), "{err}");
     }
 }

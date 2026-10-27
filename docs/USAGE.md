@@ -19,13 +19,38 @@ atr add "what is 2+2?"
 atr add "fix the typo in notes.txt" --dir ~/notes
 atr add "open a PR for the README typo" --repo ~/src/my-repo --output pr
 atr submit my-task --body "also fix the footer"
+atr tui "what is 2+2?"
 ```
 
 `--dir` edits in place. atr asks the CLI to stay inside that folder where the CLI supports it (Claude `--add-dir`, Codex sandbox `workspace-write`, Grok `--cwd`, OpenCode `--dir`). That is best-effort: some CLIs can still write outside, and atr does not snapshot-detect outside writes. Prompt files for dir tasks live in the state directory, not a `.atr/` folder in your notes. `--repo` uses a git worktree. Neither flag means answer-only. `--output` is `reply` (default: answer the source), `pr`, `issue-comment`, `branch`, `patch`, `text`, or `webhook`. Prompts (and inbox files) are capped at 256 KiB by default (`max_prompt_bytes`).
 
 Other agents and scripts can also hand it work through MCP, the HTTP API, Telegram, or an inbox folder. See [Hand work to atr](#hand-work-to-atr).
 
-`atr serve` (or the user service) must be running for queued work to start.
+`atr serve` (or the user service) must be running for queued work to start. `atr tui` is the exception: it runs the engine in-process and does not need serve.
+
+### Terminal TUI (`atr tui`)
+
+A thin terminal session: transcript plus a status footer (provider / model / tokens / cache hit % when known). It does **not** clone the dashboard and does **not** share history with Telegram.
+
+```bash
+atr tui                      # interactive; /quit to leave
+atr tui "what is 2+2?"       # one turn, print the answer, exit
+atr tui --session work --provider grok
+```
+
+Sessions are normal atr tasks keyed `cli-<name>` (default `cli-default`), the same idea as Telegram's `tg<chat>` keys but a separate history. Resume, the stable prompt prefix, and provider-switch handoff are the existing task machinery.
+
+Provider for a TUI session: session pin (`/provider` or `--provider`) → `ATR_TUI_PROVIDER` → optional `[tui] providers` list → global `[[provider]]` order. Mid-session `/provider` and `/model` stick for that session; switching provider triggers the existing handoff brief.
+
+| Flag / env | Effect |
+|---|---|
+| `--provider` / `ATR_TUI_PROVIDER` | Preferred provider at launch |
+| `--session <name>` | Task key `cli-<name>` (default `default`) |
+| `--dir` / `--repo` | Workspace; omit for answer-only |
+| `--new` | Drop the previous `cli-<name>` task |
+| `ATR_DEFAULT=tui` | Bare `atr` is `atr tui` (explicit subcommands unchanged) |
+
+Interactive commands: `/help` `/status` `/provider <name>` `/model <name>` `/new` `/quit`.
 
 ### Hand work to atr
 
@@ -373,7 +398,7 @@ While atr is running, open `http://127.0.0.1:7420/`. It is read-only and refresh
 |---|---|
 | `atr doctor` says a CLI is missing | Install that vendor CLI, then `atr providers detect`. |
 | `atr doctor` says you are not signed in | Sign in to that CLI, then restart atr. |
-| `atr submit` / `atr add` does nothing | atr is not running. Try `atr status`, then `atr service restart`. |
+| `atr submit` / `atr add` does nothing | atr is not running. Try `atr status`, then `atr service restart`. (`atr tui` does not need serve.) |
 | GitHub issues ignored | Watching is off, or the label is not `for:atr`. See [GITHUB.md](GITHUB.md). |
 | `atr doctor` — `gh auth` FAIL | Run `gh auth login`, or put `GH_TOKEN` in `shadow.env`. |
 | Cursor / Claude fail over SSH | Run atr on the desktop, not over SSH. |
