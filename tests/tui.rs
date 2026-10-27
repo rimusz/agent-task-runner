@@ -298,6 +298,50 @@ async fn model_slash_lists_real_grok_ids_not_prose() {
     assert_eq!(shared.db.list_runs(Some("cli-default")).unwrap().len(), 1);
 }
 
+#[tokio::test]
+async fn model_slash_lists_cursor_ids_not_available_header() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", false, "success"),
+        ("grok", false, "success"),
+        ("cursor", true, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    let switch = tui::preview_line(&shared, "cli-default", "/provider cursor").unwrap();
+    assert!(switch.starts_with("note"), "{switch}");
+    let list = tui::preview_line(&shared, "cli-default", "/model").unwrap();
+    assert!(list.starts_with("model-picker"), "{list}");
+    assert!(list.contains("Models for cursor"), "{list}");
+    assert!(list.contains("composer-2.5"), "{list}");
+    assert!(list.contains("auto"), "{list}");
+    assert!(
+        !list.contains("Available models")
+            && !list.contains("Composer 2.5")
+            && !list.contains("Auto (default)"),
+        "cursor header/display names must not be picker rows: {list}"
+    );
+}
+
+#[tokio::test]
+async fn model_slash_claude_uses_aliases_not_help_prose() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    let list = tui::preview_line(&shared, "cli-default", "/model").unwrap();
+    assert!(list.starts_with("model-picker"), "{list}");
+    assert!(list.contains("sonnet"), "{list}");
+    assert!(list.contains("opus"), "{list}");
+    assert!(list.contains("haiku"), "{list}");
+    assert!(
+        !list.contains("Available models") && !list.contains("Usage:"),
+        "claude help prose must not be picker rows: {list}"
+    );
+}
+
 #[test]
 fn composer_path_line_tildes_home() {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/tester".into());

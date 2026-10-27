@@ -300,7 +300,8 @@ pub(crate) fn model_pick_usage(provider: &str, kind: &str, list: &[ModelChoice])
 
 pub(crate) fn model_empty_hint(provider: &str, kind: &str) -> String {
     format!(
-        "no model list for {provider} ({kind}). atr does not invent a catalog.\n\
+        "no models parsed — try /cli\n\
+         {provider} ({kind}): atr does not invent a catalog.\n\
          Set this session: /model <id>\n\
          Persist in config: atr providers model {provider} <id>\n\
          Or /cli for {kind}'s own TUI picker."

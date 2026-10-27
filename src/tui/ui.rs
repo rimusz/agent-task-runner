@@ -734,7 +734,7 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str, ws: &Workspace) {
         .constraints([
             Constraint::Length(1),
             Constraint::Min(3),
-            Constraint::Length(3),
+            Constraint::Length(2),
             Constraint::Length(2),
         ])
         .split(area);
@@ -754,12 +754,10 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str, ws: &Workspace) {
     f.render_widget(para, chunks[1]);
 
     let hint = composer_hint(app);
-    let input = Paragraph::new(format!("› {}", app.input)).block(
-        Block::default()
-            .borders(Borders::TOP)
-            .title(hint)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
+    let input = Paragraph::new(vec![
+        Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))),
+        Line::from(format!("› {}", app.input)),
+    ]);
     f.render_widget(input, chunks[2]);
 
     let status = composer_status_line(shared, key);

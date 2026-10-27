@@ -18,8 +18,7 @@ if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
 fi
 
 if [[ "${1:-}" == "models" ]]; then
-  # Real grok 1.0.70 prints a login banner + bullets. The TUI parser
-  # must take the ids and ignore prose tokens (You / Default / Available).
+  # Live Rs-MBP shapes. Parser must take real ids and drop headers.
   if [[ "$KIND" == "grok" ]]; then
     cat <<'EOF'
 You are logged in with grok.com.
@@ -43,6 +42,24 @@ Available models:
   - cursor-gpt-5.6-sol
   - cursor-grok-4.7
 EOF
+    exit 0
+  fi
+  if [[ "$KIND" == "cursor-agent" || "$KIND" == "agent" ]]; then
+    cat <<'EOF'
+Available models
+
+auto - Auto (default)
+composer-2.5 - Composer 2.5
+composer-2.5-fast - Composer 2.5 Fast
+gpt-5.6-sol-high - GPT-5.6 Sol 1M High
+EOF
+    exit 0
+  fi
+  if [[ "$KIND" == "opencode" ]]; then
+    echo "cursorapi/composer-2.5"
+    echo "openai/gpt-5.6"
+    echo "test-model"
+    echo "test-model-2"
     exit 0
   fi
   echo "test-model"

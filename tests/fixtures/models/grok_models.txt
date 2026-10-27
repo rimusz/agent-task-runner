@@ -1,0 +1,24 @@
+=== grok models ===
+AI Stack aliases loaded. Use: ssh-mini, ssh-stack, ssh-spark, ssh-poly, ai-status, ai-upgrade, etc.
+/Users/rimas/.bash_profile: line 36: /Users/rimas/google-cloud-sdk/path.bash.inc: No such file or directory
+/Users/rimas/.bash_profile: line 39: /Users/rimas/google-cloud-sdk/completion.bash.inc: No such file or directory
+You are logged in with grok.com.
+
+Default model: grok-4.7
+
+Available models:
+  * grok-4.7 (default)
+  - grok-4.7-build-fast
+  - grok-4.6
+  - grok-4.5
+  - cline-pass-glm-5.2
+  - cline-pass-deepseek-v4-pro
+  - cline-pass-mimo-v2.5-pro
+  - cline-pass-kimi-k3
+  - cline-pass-qwen3.8-max
+  - cline-pass-minimax-m3
+  - cursor-composer-2.5
+  - deepseek-v4-flash
+  - cursor-claude-opus-5-5
+  - cursor-gpt-5.6-sol
+  - cursor-grok-4.7

@@ -63,12 +63,30 @@ fn cache_key(kind: &str, cli: &Path) -> CacheKey {
     }
 }
 
+/// Live Rs-MBP: `grok models`, `opencode models`, `cursor-agent models`
+/// (and `agent models`) are non-interactive catalogs. `claude models`
+/// hangs; `codex models` starts a TUI and refuses `TERM=dumb`.
 pub(crate) fn models_argv(kind: &str) -> Option<&'static [&'static str]> {
     match kind {
-        "grok" | "opencode" => Some(&["models"]),
+        "grok" | "opencode" | "cursor" => Some(&["models"]),
         _ => None,
     }
 }
+
+/// Claude `/model` help aliases (Rs-MBP `claude /model`). Not a catalog
+/// invention — these are the ids Claude documents when `claude models`
+/// cannot be listed non-interactively.
+pub(crate) const CLAUDE_ALIASES: &[&str] = &[
+    "sonnet",
+    "opus",
+    "haiku",
+    "fable",
+    "best",
+    "sonnet[1m]",
+    "opus[1m]",
+    "fable[1m]",
+    "opusplan",
+];
 
 pub(crate) fn collect_models(
     shared: &Shared,
@@ -84,7 +102,7 @@ pub(crate) fn collect_models(
     let mut out: Vec<ModelChoice> = Vec::new();
     let mut push = |name: String, tag: &str| {
         let name = name.trim().to_string();
-        if name.is_empty() || is_banner_prose(&name) {
+        if !accept_model_name(&kind, &name) {
             return;
         }
         if let Some(e) = out.iter_mut().find(|m| m.name == name) {
@@ -131,6 +149,11 @@ pub(crate) fn collect_models(
             push(b.model.to_string(), "preset");
         }
     }
+    if kind == "claude" {
+        for a in CLAUDE_ALIASES {
+            push((*a).to_string(), "alias");
+        }
+    }
     if models_argv(&kind).is_some() {
         let cwd = session_cwd(shared, key, ws);
         for id in cli_catalog_ids(&kind, &cli, &cwd, fetch) {
@@ -147,18 +170,27 @@ pub(crate) fn collect_models(
     out
 }
 
-/// Model ids from `grok models` / `opencode models` (and similar).
+/// Model ids from a provider `models` CLI (or help text we must not trust).
 ///
-/// Grok 1.0.70 prints a login banner plus bulleted ids:
-/// `Default model: grok-4.7` / `  * grok-4.7 (default)` / `  - grok-4.6`.
-/// First-whitespace-token parsing would keep `You` / `Default` / `Available`
-/// and drop the real ids (the first token is `*` or `-`).
+/// Shapes (Rs-MBP live captures):
+/// * Grok: login banner + `Default model: id` + `Available models:` + bullets
+/// * Cursor / agent: header `Available models` then `id - Display Name`
+/// * OpenCode: one `provider/model` per line
+/// * Claude `/model` help and Codex TUI errors are noise — no junk rows
 pub(crate) fn parse_cli_model_ids(text: &str) -> Vec<String> {
     let text = crate::detect::strip_ansi(text);
     let mut out = crate::detect::parse_models(&text);
     for line in text.lines() {
+        if is_help_or_noise_line(line) {
+            continue;
+        }
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if let Some(id) = cursor_id_from_label_line(line) {
+            push_id(&mut out, &id);
+            continue;
+        }
+        if let Some(id) = labeled_default_model(line) {
+            push_id(&mut out, &id);
             continue;
         }
         let line = line
@@ -166,43 +198,132 @@ pub(crate) fn parse_cli_model_ids(text: &str) -> Vec<String> {
             .trim();
         for raw in line.split_whitespace() {
             let tok = normalize_model_token(raw);
-            if looks_like_cli_model_id(tok) && !out.iter().any(|e| e == tok) {
-                out.push(tok.to_string());
+            if accept_model_name("", tok) {
+                push_id(&mut out, tok);
             }
         }
     }
     out
 }
 
+fn push_id(out: &mut Vec<String>, id: &str) {
+    if !out.iter().any(|e| e == id) {
+        out.push(id.to_string());
+    }
+}
+
+/// Cursor / agent: `composer-2.5 - Composer 2.5` → `composer-2.5`.
+fn cursor_id_from_label_line(line: &str) -> Option<String> {
+    let (id, label) = line.split_once(" - ")?;
+    if label.trim().is_empty() {
+        return None;
+    }
+    let id = normalize_model_token(id.trim());
+    accept_model_name("cursor", id).then(|| id.to_string())
+}
+
+/// `Default model: grok-4.7`
+fn labeled_default_model(line: &str) -> Option<String> {
+    let (left, right) = line.split_once(':')?;
+    let left = left.trim().to_ascii_lowercase();
+    if left != "default model" && left != "current model" {
+        return None;
+    }
+    let tok = normalize_model_token(right.split_whitespace().next().unwrap_or(""));
+    accept_model_name("", tok).then(|| tok.to_string())
+}
+
+fn is_help_or_noise_line(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with("===") {
+        return true;
+    }
+    let lower = t.to_ascii_lowercase();
+    lower.starts_with("available models")
+        || lower.starts_with("usage:")
+        || lower.starts_with("usage ")
+        || lower.starts_with("description")
+        || lower.starts_with("arguments")
+        || lower.starts_with("flags")
+        || lower.starts_with("global flags")
+        || lower.starts_with("subcommands")
+        || lower.starts_with("error")
+        || lower.starts_with("(exit")
+        || lower.starts_with("ai stack")
+        || lower.contains("bash_profile")
+        || lower.contains("refusing to start")
+        || lower.contains("unexpected positional")
+}
+
 fn normalize_model_token(s: &str) -> &str {
     s.trim_matches(|c: char| {
-        !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_' | '.' | '/' | ':')
+        !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_' | '.' | '/' | ':' | '[' | ']')
     })
 }
 
+fn accept_model_name(kind: &str, name: &str) -> bool {
+    let name = name.trim();
+    if is_placeholder_model(name) || is_junk_model_label(name) {
+        return is_kind_alias(kind, name);
+    }
+    is_kind_alias(kind, name) || looks_like_cli_model_id(name)
+}
+
+fn is_placeholder_model(name: &str) -> bool {
+    matches!(name.trim(), "" | "-" | "—" | "*" | "–")
+}
+
+fn is_junk_model_label(name: &str) -> bool {
+    let t = name.trim().trim_end_matches(':').to_ascii_lowercase();
+    if t.is_empty() || t.contains(char::is_whitespace) {
+        return true;
+    }
+    matches!(
+        t.as_str(),
+        "you"
+            | "are"
+            | "logged"
+            | "in"
+            | "with"
+            | "default"
+            | "available"
+            | "models"
+            | "model"
+            | "usage"
+            | "current"
+            | "auto-approve"
+            | "directory"
+    )
+}
+
+fn is_kind_alias(kind: &str, name: &str) -> bool {
+    match kind {
+        "claude" => CLAUDE_ALIASES.iter().any(|a| a.eq_ignore_ascii_case(name)),
+        "cursor" => name.eq_ignore_ascii_case("auto"),
+        _ => name.eq_ignore_ascii_case("auto"),
+    }
+}
+
 fn looks_like_cli_model_id(s: &str) -> bool {
-    if s.len() < 2 {
+    if s.len() < 2 || s.starts_with('/') {
         return false;
     }
     if !s
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '[' | ']'))
     {
         return false;
     }
     if !s.chars().any(|c| c.is_ascii_alphanumeric()) {
         return false;
     }
-    // Banner words (`You`, `Default`, `Available`) are alphabetic only.
-    // Vendor ids have a hyphen, a slash (`provider/model`), or a digit.
-    s.contains('-') || s.contains('/') || s.chars().any(|c| c.is_ascii_digit())
-}
-
-fn is_banner_prose(s: &str) -> bool {
-    matches!(
-        s.trim().to_ascii_lowercase().as_str(),
-        "you" | "are" | "logged" | "in" | "with" | "default" | "available" | "models" | "model"
-    )
+    // Lone versions (`5.5` from `Opus 5.5`) are not ids.
+    if s.chars()
+        .all(|c| c.is_ascii_digit() || c == '.' || c == '[' || c == ']')
+    {
+        return false;
+    }
+    s.contains('-') || s.contains('/') || s.contains('[') || s.chars().any(|c| c.is_ascii_digit())
 }
 
 fn fresh_cached_ids(kind: &str, cli: &Path) -> Option<Vec<String>> {
@@ -543,9 +664,99 @@ Available models:
     fn models_argv_only_for_clis_that_have_it() {
         assert_eq!(models_argv("grok"), Some(&["models"][..]));
         assert_eq!(models_argv("opencode"), Some(&["models"][..]));
+        assert_eq!(models_argv("cursor"), Some(&["models"][..]));
         assert_eq!(models_argv("claude"), None);
-        assert_eq!(models_argv("cursor"), None);
         assert_eq!(models_argv("codex"), None);
+    }
+
+    fn assert_no_junk(ids: &[String]) {
+        for bad in [
+            "Available",
+            "models",
+            "Available models",
+            "You",
+            "Default",
+            "Composer 2.5",
+            "Auto (default)",
+            "Usage",
+            "-",
+        ] {
+            assert!(
+                !ids.iter().any(|s| s.eq_ignore_ascii_case(bad)),
+                "junk {bad:?} leaked into {ids:?}"
+            );
+        }
+        assert!(
+            !ids.iter().any(|s| s.contains(' ')),
+            "display phrase leaked into {ids:?}"
+        );
+    }
+
+    #[test]
+    fn parse_cursor_agent_models_live_sample() {
+        let ids = parse_cli_model_ids(include_str!(
+            "../../tests/fixtures/models/cursor-agent_models.txt"
+        ));
+        assert!(ids.iter().any(|s| s == "composer-2.5"), "{ids:?}");
+        assert!(ids.iter().any(|s| s == "auto"), "{ids:?}");
+        assert!(ids.iter().any(|s| s == "gpt-5.6-sol-high"), "{ids:?}");
+        assert!(ids.iter().any(|s| s == "composer-2.5-fast"), "{ids:?}");
+        assert_no_junk(&ids);
+        let agent =
+            parse_cli_model_ids(include_str!("../../tests/fixtures/models/agent_models.txt"));
+        assert!(agent.iter().any(|s| s == "auto"), "{agent:?}");
+        assert!(agent.iter().any(|s| s == "composer-2.5"), "{agent:?}");
+        assert_no_junk(&agent);
+    }
+
+    #[test]
+    fn parse_live_grok_and_opencode_samples() {
+        let grok = parse_cli_model_ids(include_str!("../../tests/fixtures/models/grok_models.txt"));
+        assert!(grok.iter().any(|s| s == "grok-4.7"), "{grok:?}");
+        assert!(grok.iter().any(|s| s == "grok-4.7-build-fast"), "{grok:?}");
+        assert_no_junk(&grok);
+        let oc = parse_cli_model_ids(include_str!(
+            "../../tests/fixtures/models/opencode_models.txt"
+        ));
+        assert!(oc.iter().any(|s| s == "cursorapi/composer-2.5"), "{oc:?}");
+        assert!(oc.iter().any(|s| s == "openai/gpt-5.6"), "{oc:?}");
+        assert_no_junk(&oc);
+    }
+
+    #[test]
+    fn parse_claude_help_and_codex_tui_are_not_catalogs() {
+        let claude = parse_cli_model_ids(include_str!(
+            "../../tests/fixtures/models/claude__model.txt"
+        ));
+        assert_no_junk(&claude);
+        assert!(
+            claude.is_empty(),
+            "claude /model help must not become picker rows: {claude:?}"
+        );
+        let hung = parse_cli_model_ids(include_str!(
+            "../../tests/fixtures/models/claude_models.txt"
+        ));
+        assert!(hung.is_empty(), "{hung:?}");
+        let codex =
+            parse_cli_model_ids(include_str!("../../tests/fixtures/models/codex_models.txt"));
+        assert!(
+            codex.is_empty(),
+            "codex TUI error is not a catalog: {codex:?}"
+        );
+        assert_no_junk(&codex);
+    }
+
+    #[test]
+    fn reject_placeholder_config_model() {
+        assert!(!accept_model_name("cursor", "-"));
+        assert!(!accept_model_name("claude", ""));
+        assert!(!accept_model_name("grok", "Available"));
+        assert!(!accept_model_name("grok", "Available models"));
+        assert!(accept_model_name("cursor", "auto"));
+        assert!(accept_model_name("cursor", "composer-2.5"));
+        assert!(accept_model_name("claude", "sonnet"));
+        assert!(accept_model_name("claude", "sonnet[1m]"));
+        assert!(accept_model_name("opencode", "moonshotai/kimi-k2.6"));
     }
 
     fn write_models_cli(dir: &Path, name: &str, log: &Path, body: &str) -> PathBuf {
