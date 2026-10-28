@@ -119,6 +119,8 @@ struct Picker {
 enum PickerKind {
     Provider,
     Model,
+    Effort,
+    Context,
     Repo,
 }
 
@@ -462,7 +464,10 @@ fn complete_slash(app: &mut App) {
     let Some(name) = menu.items.get(i).map(|r| r.name.clone()) else {
         return;
     };
-    let with_space = matches!(name.as_str(), "/model" | "/provider" | "/repo");
+    let with_space = matches!(
+        name.as_str(),
+        "/model" | "/provider" | "/repo" | "/effort" | "/context"
+    );
     set_input(app, &if with_space { format!("{name} ") } else { name });
     refresh_slash_menu(app);
 }
@@ -529,7 +534,7 @@ fn handle_picker(
 fn apply_picker_filter(picker: &mut Picker) {
     picker.items = match picker.kind {
         PickerKind::Repo => slash::filter_repo_items(&picker.all, &picker.filter),
-        PickerKind::Provider | PickerKind::Model => {
+        PickerKind::Provider | PickerKind::Model | PickerKind::Effort | PickerKind::Context => {
             slash::filter_names(&picker.all, &picker.filter)
         }
     };
@@ -554,6 +559,12 @@ fn picker_apply(
     let _step = match kind {
         PickerKind::Provider => super::apply_provider_pick(shared, key, ws, name)?,
         PickerKind::Model => super::apply_model_pick(shared, key, ws, name)?,
+        PickerKind::Effort => {
+            super::apply_knob_pick(shared, key, super::knobs::Knob::Effort, name)?
+        }
+        PickerKind::Context => {
+            super::apply_knob_pick(shared, key, super::knobs::Knob::Context, name)?
+        }
         PickerKind::Repo => super::apply_repo_pick(shared, key, ws, name)?,
     };
     Ok(())
@@ -642,6 +653,38 @@ fn apply_step(
             });
             Ok(None)
         }
+        Step::OpenEffortPicker => {
+            let (kind, _) = super::proxy::current_kind_cli(shared, key)
+                .map(|(k, _, n)| (k, n))
+                .unwrap_or_else(|| ("?".into(), "none".into()));
+            if super::knobs::values(super::knobs::Knob::Effort, &kind).is_none() {
+                if !quiet {
+                    app.push(
+                        Role::System,
+                        super::knobs::unsupported_note(super::knobs::Knob::Effort, &kind),
+                    );
+                }
+                return Ok(None);
+            }
+            open_knob_picker(app, super::knobs::Knob::Effort, &kind);
+            Ok(None)
+        }
+        Step::OpenContextPicker => {
+            let (kind, _) = super::proxy::current_kind_cli(shared, key)
+                .map(|(k, _, n)| (k, n))
+                .unwrap_or_else(|| ("?".into(), "none".into()));
+            if super::knobs::values(super::knobs::Knob::Context, &kind).is_none() {
+                if !quiet {
+                    app.push(
+                        Role::System,
+                        super::knobs::unsupported_note(super::knobs::Knob::Context, &kind),
+                    );
+                }
+                return Ok(None);
+            }
+            open_knob_picker(app, super::knobs::Knob::Context, &kind);
+            Ok(None)
+        }
         Step::OpenRepoPicker => {
             let list = super::repo_choices(shared, ws);
             if list.is_empty() {
@@ -672,6 +715,27 @@ fn apply_step(
             Ok(None)
         }
     }
+}
+
+fn open_knob_picker(app: &mut App, knob: super::knobs::Knob, kind: &str) {
+    let items = super::knobs::picker_items(knob, kind);
+    let mut state = ListState::default();
+    state.select(Some(0));
+    let title = match knob {
+        super::knobs::Knob::Effort => "Effort  (Enter / type to find · Esc)",
+        super::knobs::Knob::Context => "Context  (Enter / type to find · Esc)",
+    };
+    app.picker = Some(Picker {
+        title: title.into(),
+        items: items.clone(),
+        all: items,
+        filter: String::new(),
+        state,
+        kind: match knob {
+            super::knobs::Knob::Effort => PickerKind::Effort,
+            super::knobs::Knob::Context => PickerKind::Context,
+        },
+    });
 }
 
 fn sync_model_picker(app: &mut App, shared: &Shared, key: &str, ws: &Workspace) {

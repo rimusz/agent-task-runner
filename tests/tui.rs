@@ -1446,6 +1446,107 @@ async fn repo_pick_binds_next_turn_spawn_cwd() {
     assert_ne!(wt, none_wt);
 }
 
+#[tokio::test]
+async fn effort_and_context_are_atr_local_and_wire_argv() {
+    let (_dir, shared, _) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+        ("opencode", false, "success"),
+    ])
+    .await;
+    assert_eq!(tui::classify_line("/effort"), "effort");
+    assert_eq!(tui::classify_line("/context 200k"), "context");
+    assert_eq!(tui::busy_enter_action("/effort high"), tui::BusyEnter::Host);
+
+    let grok_pick = tui::preview_line(&shared, "cli-default", "/provider grok").unwrap();
+    assert!(grok_pick.starts_with("note"), "{grok_pick}");
+    let list = tui::preview_line(&shared, "cli-default", "/effort").unwrap();
+    assert!(
+        list.starts_with("effort-picker"),
+        "bare /effort opens picker: {list}"
+    );
+    assert!(list.contains("low") && list.contains("xhigh"), "{list}");
+    let set = tui::preview_line(&shared, "cli-default", "/effort high").unwrap();
+    assert!(set.starts_with("note"), "{set}");
+    assert!(!set.starts_with("turn"), "/effort must not be chat: {set}");
+    let strip = tui::composer_status_line(&shared, "cli-default");
+    assert!(
+        strip.contains("effort high"),
+        "strip shows session effort: {strip}"
+    );
+    let grok_ctx = tui::preview_line(&shared, "cli-default", "/context").unwrap();
+    assert!(grok_ctx.contains("not supported for grok"), "{grok_ctx}");
+
+    let mut grok_p = shared
+        .config
+        .read()
+        .unwrap()
+        .provider("grok")
+        .unwrap()
+        .clone();
+    tui::apply_session_model(&mut grok_p, &shared.db, "cli-default");
+    tui::apply_session_knobs(&mut grok_p, &shared.db, "cli-default");
+    let spec = atr::providers::build_command(
+        &grok_p,
+        std::path::Path::new("/wt"),
+        std::path::Path::new("/wt/.atr/prompt.md"),
+        "hi",
+        None,
+        true,
+    );
+    assert!(
+        spec.args.windows(2).any(|w| w == ["--effort", "high"]),
+        "grok next spawn: {:?}",
+        spec.args
+    );
+
+    let claude_sw = tui::preview_line(&shared, "cli-default", "/provider claude").unwrap();
+    assert!(claude_sw.starts_with("note"), "{claude_sw}");
+    let c_set = tui::preview_line(&shared, "cli-default", "/effort max").unwrap();
+    assert!(c_set.contains("effort max"), "{c_set}");
+    let ctx = tui::preview_line(&shared, "cli-default", "/context 200k").unwrap();
+    assert!(ctx.contains("context 200k"), "{ctx}");
+    let strip = tui::composer_status_line(&shared, "cli-default");
+    assert!(
+        strip.contains("effort max") && strip.contains("ctx 200k"),
+        "{strip}"
+    );
+    let mut claude_p = shared
+        .config
+        .read()
+        .unwrap()
+        .provider("claude")
+        .unwrap()
+        .clone();
+    tui::apply_session_model(&mut claude_p, &shared.db, "cli-default");
+    tui::apply_session_knobs(&mut claude_p, &shared.db, "cli-default");
+    let spec = atr::providers::build_command(
+        &claude_p,
+        std::path::Path::new("/wt"),
+        std::path::Path::new("/wt/.atr/prompt.md"),
+        "hi",
+        None,
+        true,
+    );
+    assert!(
+        spec.args.windows(2).any(|w| w == ["--effort", "max"]),
+        "{:?}",
+        spec.args
+    );
+    assert!(
+        spec.args.windows(2).any(|w| w == ["--autocompact", "200k"]),
+        "{:?}",
+        spec.args
+    );
+
+    let oc = tui::preview_line(&shared, "cli-default", "/provider opencode").unwrap();
+    assert!(oc.starts_with("note"), "{oc}");
+    let no = tui::preview_line(&shared, "cli-default", "/effort high").unwrap();
+    assert!(no.contains("not supported for opencode"), "{no}");
+}
+
 fn setup_bin_cfg() -> (TempDir, std::path::PathBuf) {
     let dir = TempDir::new().unwrap();
     fs::create_dir_all(dir.path().join("home")).unwrap();

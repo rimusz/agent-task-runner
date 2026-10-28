@@ -1,8 +1,9 @@
 //! Slash routing for the TUI host.
 //!
-//! atr-local: `/provider`, `/model`, `/repo`, `/new`, `/quit`, `/status`,
-//! `/help`, `/cli`. Every other `/…` is forwarded to the selected provider
-//! CLI. `/model` and `/repo` never become a chat turn.
+//! atr-local: `/provider`, `/model`, `/effort`, `/context`, `/repo`, `/new`,
+//! `/quit`, `/status`, `/help`, `/cli`. Every other `/…` is forwarded to
+//! the selected provider CLI. `/model`, `/effort`, `/context`, and `/repo`
+//! never become a chat turn.
 
 use crate::app::Shared;
 use crate::config::Config;
@@ -29,6 +30,16 @@ pub(crate) const HOST_COMMANDS: &[HostCommand] = &[
         name: "/model",
         aliases: &["/m"],
         hint: "session model (next --model)",
+    },
+    HostCommand {
+        name: "/effort",
+        aliases: &[],
+        hint: "session effort (next spawn)",
+    },
+    HostCommand {
+        name: "/context",
+        aliases: &[],
+        hint: "session context (next spawn)",
     },
     HostCommand {
         name: "/repo",
@@ -71,7 +82,11 @@ pub(crate) fn is_bare_slash(line: &str) -> bool {
 pub(crate) fn quiet_transcript(line: &str) -> bool {
     matches!(
         parse_slash(line),
-        Some(Slash::Provider(_)) | Some(Slash::Model(_)) | Some(Slash::Repo(_))
+        Some(Slash::Provider(_))
+            | Some(Slash::Model(_))
+            | Some(Slash::Effort(_))
+            | Some(Slash::Context(_))
+            | Some(Slash::Repo(_))
     )
 }
 
@@ -174,6 +189,8 @@ pub(crate) enum Slash {
     New,
     Provider(Option<String>),
     Model(Option<String>),
+    Effort(Option<String>),
+    Context(Option<String>),
     Repo(Option<String>),
     Cli,
     /// Full line (`/compact`, `/plan`, …) for the provider proxy path.
@@ -205,6 +222,22 @@ pub(crate) fn parse_slash(line: &str) -> Option<Slash> {
         "/model" | "/m" => {
             let rest: Vec<&str> = parts.collect();
             Some(Slash::Model(if rest.is_empty() {
+                None
+            } else {
+                Some(rest.join(" "))
+            }))
+        }
+        "/effort" => {
+            let rest: Vec<&str> = parts.collect();
+            Some(Slash::Effort(if rest.is_empty() {
+                None
+            } else {
+                Some(rest.join(" "))
+            }))
+        }
+        "/context" => {
+            let rest: Vec<&str> = parts.collect();
+            Some(Slash::Context(if rest.is_empty() {
                 None
             } else {
                 Some(rest.join(" "))
@@ -243,6 +276,8 @@ Chat
 atr (this host)
   /provider [name]   list / pick atr providers (enabled · current)
   /model [id]        list / pick the session model (next spawn --model)
+  /effort [level]    session effort for this provider (next spawn; kind-specific)
+  /context [size]    session context for this provider (next spawn; kind-specific)
   /repo [name|path]  list / pick a git workspace (config [[repo]]; serve optional)
   /repo .            bind the current directory's git root
   /repo none         answer-only (no workspace)
@@ -253,7 +288,8 @@ atr (this host)
   Ctrl+C             leave atr
   Esc                dismiss menus / pickers (never quits)
 
-  `/model` is atr-local for every provider. It is never sent as chat.
+  `/model` `/effort` `/context` are atr-local. They are never sent as chat.
+  `/effort` and `/context` only offer values that kind can pass on argv.
   `/repo` is atr-local. It is never a provider chat turn.
   `/cli` is the full native experience (Grok/Claude's own /model picker).
   `/atr …` namespaces host commands if a provider slash collides.
@@ -674,6 +710,11 @@ mod tests {
         assert!(quiet_transcript("/model"));
         assert!(quiet_transcript("/model gpt-6.1-sol"));
         assert!(quiet_transcript("/m"));
+        assert!(quiet_transcript("/effort"));
+        assert!(quiet_transcript("/effort high"));
+        assert!(quiet_transcript("/context"));
+        assert!(quiet_transcript("/context 200k"));
+        assert!(quiet_transcript("/atr effort high"));
         assert!(quiet_transcript("/repo"));
         assert!(quiet_transcript("/repo none"));
         assert!(quiet_transcript("/repo ."));
@@ -693,6 +734,16 @@ mod tests {
             Some(Slash::Model(Some("grok-code".into())))
         );
         assert_eq!(parse_slash("/m"), Some(Slash::Model(None)));
+        assert_eq!(parse_slash("/effort"), Some(Slash::Effort(None)));
+        assert_eq!(
+            parse_slash("/effort high"),
+            Some(Slash::Effort(Some("high".into())))
+        );
+        assert_eq!(parse_slash("/context"), Some(Slash::Context(None)));
+        assert_eq!(
+            parse_slash("/context 1m"),
+            Some(Slash::Context(Some("1m".into())))
+        );
         assert_eq!(
             parse_slash("/compact"),
             Some(Slash::Proxy("/compact".into()))
@@ -721,6 +772,8 @@ mod tests {
         assert!(h.contains("Provider CLI"), "{h}");
         assert!(h.contains("/provider"), "{h}");
         assert!(h.contains("/model"), "{h}");
+        assert!(h.contains("/effort"), "{h}");
+        assert!(h.contains("/context"), "{h}");
         assert!(h.contains("/repo"), "{h}");
         assert!(h.contains("/repo none"), "{h}");
         assert!(h.contains("/repo ."), "{h}");
@@ -737,6 +790,8 @@ mod tests {
         let all = filter_host_commands("/");
         assert_eq!(all.len(), HOST_COMMANDS.len(), "{all:?}");
         assert!(all.iter().any(|c| c.name == "/model"));
+        assert!(all.iter().any(|c| c.name == "/effort"));
+        assert!(all.iter().any(|c| c.name == "/context"));
         assert!(all.iter().any(|c| c.name == "/provider"));
         assert!(all.iter().any(|c| c.name == "/repo"));
         assert!(all.iter().any(|c| c.name == "/quit"));
@@ -744,6 +799,10 @@ mod tests {
         let m = filter_host_commands("/m");
         assert!(m.iter().any(|c| c.name == "/model"), "{m:?}");
         assert!(m.iter().all(|c| c.name == "/model"), "{m:?}");
+
+        let e = filter_host_commands("/eff");
+        assert!(e.iter().any(|c| c.name == "/effort"), "{e:?}");
+        assert!(e.iter().all(|c| c.name == "/effort"), "{e:?}");
 
         let q = filter_host_commands("/q");
         assert!(q.iter().any(|c| c.name == "/quit"), "{q:?}");

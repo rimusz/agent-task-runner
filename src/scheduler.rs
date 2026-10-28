@@ -676,6 +676,9 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         crate::tui::apply_session_model(&mut provider, &shared.db, &key);
     }
     crate::tui::sanitize_spawn_model(&mut provider);
+    if crate::tui::is_tui_key(&key) {
+        crate::tui::apply_session_knobs(&mut provider, &shared.db, &key);
+    }
     let task = shared
         .db
         .get_task(&key)?

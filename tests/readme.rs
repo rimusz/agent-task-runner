@@ -439,6 +439,8 @@ fn readme_headings_and_commands_match_help() {
         "/mcp",
         "/provider",
         "/model",
+        "/effort",
+        "/context",
         "/repo",
         "/new",
         "/quit",

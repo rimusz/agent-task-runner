@@ -35,7 +35,9 @@ strip stays in sync with the session provider/model (`/provider` and
 Grok strip/picker use a real catalog id, never `Available`;
 Codex reads `~/.codex/models_cache.json` slugs (chat ids only —
 not `codex-auto-review`);
-host `/provider` `/model` `/repo` stay off the transcript).
+host `/provider` `/model` `/effort` `/context` `/repo` stay off the transcript).
+`/effort` and `/context` are per-provider session knobs (next spawn argv
+only; unsupported kinds say so — no fake flags).
 The under-input strip and `/status` show the real workspace kind
 (`answer-only`, `dir <path>`, or `git <name|path> [@ branch]`), never
 process cwd when the session is answer-only. `/repo` picks a config git

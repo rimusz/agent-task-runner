@@ -20,8 +20,9 @@
 //! The interactive UI is a session host: transcript, composer, and an
 //! under-input status strip (provider / model, plus honest workspace
 //! kind: `answer-only` / `dir …` / `git …`). atr-local slashes are
-//! `/provider`, `/model`, `/repo`, `/new`, `/quit`, `/status`, `/help`,
-//! `/cli`. `/model` and `/repo` are never sent as chat. Other `/…` may
+//! `/provider`, `/model`, `/effort`, `/context`, `/repo`, `/new`, `/quit`,
+//! `/status`, `/help`, `/cli`. `/model`, `/effort`, `/context`, and `/repo`
+//! are never sent as chat. Other `/…` may
 //! be proxied. `atr ask` never opens the alternate screen.
 //!
 //! First run on a TTY offers [`crate::init::ensure_config`] (the normal
@@ -29,6 +30,7 @@
 //! fails with a pointer to `atr init` / `atr init --yes`.
 
 mod history;
+mod knobs;
 mod proxy;
 mod slash;
 mod ui;
@@ -98,6 +100,8 @@ pub(crate) enum Step {
     Turn(String),
     OpenProviderPicker,
     OpenModelPicker,
+    OpenEffortPicker,
+    OpenContextPicker,
     OpenRepoPicker,
     NativeCli,
 }
@@ -277,6 +281,12 @@ pub fn apply_session_model(provider: &mut crate::config::Provider, db: &Db, key:
     sanitize_spawn_model(provider);
 }
 
+/// Apply stored `/effort` / `/context` after model sanitize (Cursor brackets
+/// must not be treated as a junk `--model` id).
+pub fn apply_session_knobs(provider: &mut crate::config::Provider, db: &Db, key: &str) {
+    knobs::apply_session_knobs(provider, db, key);
+}
+
 /// Drop catalog-junk / alias `--model` values before CLI argv is built.
 pub fn sanitize_spawn_model(provider: &mut crate::config::Provider) {
     if proxy::accept_model_name(&provider.kind, &provider.model) {
@@ -427,6 +437,12 @@ async fn line_interactive(
             Step::OpenModelPicker => {
                 println!("{}", model_picker_text(&shared, &key, &ws));
             }
+            Step::OpenEffortPicker => {
+                println!("{}", knob_picker_text(&shared, &key, knobs::Knob::Effort));
+            }
+            Step::OpenContextPicker => {
+                println!("{}", knob_picker_text(&shared, &key, knobs::Knob::Context));
+            }
             Step::OpenRepoPicker => {
                 println!("{}", repo_picker_text(&shared, &ws));
             }
@@ -485,6 +501,14 @@ pub(crate) fn step_line(
         Some(slash::Slash::Provider(Some(name))) => apply_provider_pick(shared, key, ws, &name),
         Some(slash::Slash::Model(None)) => Ok(Step::OpenModelPicker),
         Some(slash::Slash::Model(Some(name))) => apply_model_pick(shared, key, ws, &name),
+        Some(slash::Slash::Effort(None)) => knob_open_or_note(shared, key, knobs::Knob::Effort),
+        Some(slash::Slash::Effort(Some(v))) => {
+            apply_knob_pick(shared, key, knobs::Knob::Effort, &v)
+        }
+        Some(slash::Slash::Context(None)) => knob_open_or_note(shared, key, knobs::Knob::Context),
+        Some(slash::Slash::Context(Some(v))) => {
+            apply_knob_pick(shared, key, knobs::Knob::Context, &v)
+        }
         Some(slash::Slash::Repo(None)) => {
             reload_tui_config(shared);
             Ok(Step::OpenRepoPicker)
@@ -527,6 +551,54 @@ pub(crate) fn apply_model_pick(
         }
     }
     set_model_note(shared, key, name)
+}
+
+fn current_kind_name(shared: &Shared, key: &str) -> (String, String) {
+    match proxy::current_kind_cli(shared, key) {
+        Some((kind, _, name)) => (kind, name),
+        None => ("?".into(), "none".into()),
+    }
+}
+
+fn knob_open_or_note(shared: &Shared, key: &str, knob: knobs::Knob) -> Result<Step> {
+    let (kind, _) = current_kind_name(shared, key);
+    if knobs::values(knob, &kind).is_none() {
+        return Ok(Step::Note(knobs::unsupported_note(knob, &kind)));
+    }
+    Ok(match knob {
+        knobs::Knob::Effort => Step::OpenEffortPicker,
+        knobs::Knob::Context => Step::OpenContextPicker,
+    })
+}
+
+pub(crate) fn apply_knob_pick(
+    shared: &Shared,
+    key: &str,
+    knob: knobs::Knob,
+    input: &str,
+) -> Result<Step> {
+    let (kind, _) = current_kind_name(shared, key);
+    let Some(provider) = session_provider_now(shared, key) else {
+        bail!("no provider for session {key}");
+    };
+    let items = knobs::picker_items(knob, &kind);
+    let picked = slash::pick_choice(&items, input).unwrap_or_else(|| input.trim().to_string());
+    match knobs::parse_knob(knob, &kind, &picked) {
+        Ok(value) => {
+            knobs::store_knob(&shared.db, key, &provider, knob, value.as_deref())?;
+            let ws = load_workspace(shared, key).unwrap_or(Workspace {
+                kind: WorkspaceKind::None,
+                repo: None,
+            });
+            let shown = value.as_deref().unwrap_or("default");
+            Ok(Step::Note(format!(
+                "{} {shown} (this session; next spawn)\n{}",
+                knob.word(),
+                status_text(shared, key, &ws)
+            )))
+        }
+        Err(msg) => Ok(Step::Note(msg)),
+    }
 }
 
 fn set_model_note(shared: &Shared, key: &str, name: &str) -> Result<Step> {
@@ -588,6 +660,11 @@ fn model_picker_text(shared: &Shared, key: &str, ws: &Workspace) -> String {
     slash::model_pick_usage(&pname, &kind, &list)
 }
 
+fn knob_picker_text(shared: &Shared, key: &str, knob: knobs::Knob) -> String {
+    let (kind, _) = current_kind_name(shared, key);
+    knobs::usage_line(knob, &kind)
+}
+
 /// Raw-mode Ctrl+C: always exit atr (same as `/quit`). Never "cancel the
 /// turn and stay in the TUI". Esc still dismisses overlays only.
 pub fn classify_interrupt() -> &'static str {
@@ -646,6 +723,8 @@ pub fn busy_enter_action(line: &str) -> BusyEnter {
         | Some(slash::Slash::New)
         | Some(slash::Slash::Provider(_))
         | Some(slash::Slash::Model(_))
+        | Some(slash::Slash::Effort(_))
+        | Some(slash::Slash::Context(_))
         | Some(slash::Slash::Repo(_))
         | Some(slash::Slash::Cli) => BusyEnter::Host,
         None | Some(slash::Slash::Proxy(_)) => BusyEnter::Queue,
@@ -695,6 +774,8 @@ pub fn classify_line(line: &str) -> &'static str {
         Some(slash::Slash::New) => "new",
         Some(slash::Slash::Provider(_)) => "provider",
         Some(slash::Slash::Model(_)) => "model",
+        Some(slash::Slash::Effort(_)) => "effort",
+        Some(slash::Slash::Context(_)) => "context",
         Some(slash::Slash::Repo(_)) => "repo",
         Some(slash::Slash::Cli) => "cli",
         Some(slash::Slash::Proxy(_)) => "proxy",
@@ -738,6 +819,14 @@ pub fn preview_line(shared: &Shared, key: &str, line: &str) -> Result<String> {
         Step::OpenModelPicker => Ok(format!(
             "model-picker\n{}",
             model_picker_text(shared, key, &ws)
+        )),
+        Step::OpenEffortPicker => Ok(format!(
+            "effort-picker\n{}",
+            knob_picker_text(shared, key, knobs::Knob::Effort)
+        )),
+        Step::OpenContextPicker => Ok(format!(
+            "context-picker\n{}",
+            knob_picker_text(shared, key, knobs::Knob::Context)
         )),
         Step::OpenProviderPicker => Ok("provider-picker".into()),
         Step::OpenRepoPicker => Ok(format!("repo-picker\n{}", repo_picker_text(shared, &ws))),
@@ -1186,6 +1275,7 @@ fn reset_session(shared: &Shared, key: &str) -> Result<()> {
     let cfg = shared.config.read().unwrap().clone();
     for p in &cfg.providers {
         let _ = shared.db.meta_set(&model_meta_key(key, &p.name), "");
+        knobs::clear_session_knobs(&shared.db, key, &p.name);
     }
     Ok(())
 }
@@ -1425,6 +1515,12 @@ fn session_chrome(shared: &Shared, key: &str) -> SessionChrome {
             }
         }
     }
+    if let Some(e) = knobs::session_effort(&shared.db, key, &provider) {
+        extras.push(format!("effort {e}"));
+    }
+    if let Some(c) = knobs::session_context(&shared.db, key, &provider) {
+        extras.push(format!("ctx {c}"));
+    }
     SessionChrome {
         provider,
         model,
@@ -1526,6 +1622,11 @@ mod tests {
         assert_eq!(classify_line("/model"), "model");
         assert_eq!(classify_line("/model sonnet"), "model");
         assert_eq!(classify_line("/m"), "model");
+        assert_eq!(classify_line("/effort"), "effort");
+        assert_eq!(classify_line("/effort high"), "effort");
+        assert_eq!(classify_line("/context"), "context");
+        assert_eq!(classify_line("/context 200k"), "context");
+        assert_eq!(classify_line("/atr effort max"), "effort");
         assert_eq!(classify_line("/atr model opus"), "model");
         assert_eq!(classify_line("/compact"), "proxy");
         assert_eq!(classify_line("hello"), "chat");
@@ -1558,6 +1659,8 @@ mod tests {
         assert_eq!(busy_enter_action("/compact"), BusyEnter::Queue);
         assert_eq!(busy_enter_action("/repo"), BusyEnter::Host);
         assert_eq!(busy_enter_action("/model"), BusyEnter::Host);
+        assert_eq!(busy_enter_action("/effort"), BusyEnter::Host);
+        assert_eq!(busy_enter_action("/context 1m"), BusyEnter::Host);
         assert_eq!(busy_enter_action("/quit"), BusyEnter::Host);
         assert_eq!(busy_enter_action(""), BusyEnter::Ignore);
         let mut q = PendingTurns::default();
