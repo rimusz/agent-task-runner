@@ -94,6 +94,7 @@ with it.
 | macOS | `~/Library/Logs/atr/atr.log` (`[log] path`), startup errors in `~/Library/Logs/atr.boot.err` |
 | Linux | `journalctl --user -u atr -f`, plus `[log] path` (default `~/.local/share/atr/atr.log`) |
 | Both | `atr logs -f` follows `[log] path` |
+| TUI | Tracing never writes to the TUI (composer / transcript). Follow `[log] path`. |
 
 Search for `ERROR`, `GitHub auth failure`, `github poll failed`, `telegram`.
 
@@ -153,6 +154,7 @@ owner's env var, ok/warn/fail and days left without printing values.
 ## 6b. Terminal TUI
 
 - A bare `atr` / `atr tui` is the interactive chat TUI. `atr ask "prompt"` is one-shot / CI (no alternate screen). Both run the engine in-process and do **not** need `atr serve`. Without a TTY, `atr tui` uses line mode.
+- Timestamped `INFO queued follow-up` lines must not appear on the composer. Those go to `[log] path`. User turns are labelled `You`.
 - Slash: `/provider` `/model` `/new` `/quit` `/status` `/help` `/cli` are atr-local. `/model` changes atr's session model for the **current** provider only (never sent as Claude/Cursor chat; the TUI picker is an overlay, not a transcript dump). Switching `/provider` restores that provider's last session model. The under-input strip shows that provider/model (same source as `/status`). `/model` lists real ids (`cursor-agent models` `id - Label`, grok bullets, OpenCode `provider/model`); Claude seeds documented full ids (`claude-sonnet-5-5`, …; no bare aliases); Codex reads `~/.codex/models_cache.json` slugs (does not spawn its TUI). `/provider` `/model` do not append to the transcript. Other `/…` go to the provider CLI. Never an "unknown command" for a known slash. Ctrl+C quits atr; Esc only dismisses menus.
 - No config yet: on a TTY, atr offers the normal `atr init` (including whether to install the user service) then continues (`Starting atr tui…` / `atr ask`). Without a TTY it exits with a pointer to `atr init` / `atr init --yes` (no auto `--yes`).
 - Session keys are `cli-<name>` (default `cli-default`), separate from Telegram. Serve never starts those tasks.

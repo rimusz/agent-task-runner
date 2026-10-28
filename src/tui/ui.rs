@@ -43,6 +43,7 @@ pub(crate) async fn run(
     ws: Workspace,
     pin: Option<String>,
 ) -> Result<ExitCode> {
+    let _quiet = crate::logrotate::TuiConsoleQuiet::enter();
     let mut app = App::new(&shared, &key);
     proxy::begin_session_models_refresh(&shared, &key, &ws);
     loop {
@@ -867,18 +868,22 @@ fn draw_slash_menu(f: &mut Frame, body: Rect, input: Rect, menu: &SlashMenu) {
     f.render_stateful_widget(list, pop, &mut state);
 }
 
+fn role_chrome(role: Role) -> (&'static str, Color) {
+    match role {
+        Role::You => ("You", Color::Cyan),
+        Role::Assistant => ("atr", Color::Green),
+        Role::System => ("atr", Color::Yellow),
+        Role::Error => ("err", Color::Red),
+    }
+}
+
 fn transcript_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for (i, m) in app.messages.iter().enumerate() {
         if i > 0 {
             lines.push(Line::from(""));
         }
-        let (label, color) = match m.role {
-            Role::You => ("you", Color::Cyan),
-            Role::Assistant => ("atr", Color::Green),
-            Role::System => ("atr", Color::Yellow),
-            Role::Error => ("err", Color::Red),
-        };
+        let (label, color) = role_chrome(m.role);
         lines.push(Line::from(Span::styled(
             label,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -930,5 +935,18 @@ fn centered(area: Rect, height: u16) -> Rect {
         y,
         width: w,
         height: h,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_transcript_label_is_grok_style_you() {
+        assert_eq!(role_chrome(Role::You).0, "You");
+        assert_ne!(role_chrome(Role::You).0, "you");
+        assert_eq!(role_chrome(Role::Assistant).0, "atr");
+        assert_eq!(role_chrome(Role::System).0, "atr");
     }
 }

@@ -26,6 +26,9 @@ Grok strip/picker use a real catalog id, never `Available`;
 Codex reads `~/.codex/models_cache.json` slugs (chat ids only —
 not `codex-auto-review`);
 host `/provider` `/model` stay off the transcript).
+User turns are labelled `You` (Grok-style). Tracing INFO never paints
+on the TUI composer — it goes to `[log] path` (or
+`~/Library/Logs/atr/atr.log` / `~/.local/share/atr/atr.log`).
 Ctrl+C quits atr; Esc dismisses menus only.
 `/new` `/quit` `/status` `/help`
 `/cli` stay in atr; other `/…` lines may be proxied. `/cli` opens the

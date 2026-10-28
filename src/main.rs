@@ -584,7 +584,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             },
         },
     };
-    if !matches!(cmd, Cmd::Serve) {
+    if !matches!(cmd, Cmd::Serve | Cmd::Tui { .. } | Cmd::Ask { .. }) {
         atr::logrotate::init_tracing(None);
     }
     match cmd {
@@ -805,10 +805,18 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Cmd::Ask { prompt, sess } => {
             let shared = open_after_init(path, "atr ask").await?;
+            {
+                let log = shared.config.read().unwrap().log.clone();
+                atr::logrotate::init_session_tracing(&log);
+            }
             atr::tui::run_oneshot(shared, sess.into_tui_opts(Some(prompt), true)).await
         }
         Cmd::Tui { prompt, sess } => {
             let shared = open_after_init(path, "atr tui").await?;
+            {
+                let log = shared.config.read().unwrap().log.clone();
+                atr::logrotate::init_session_tracing(&log);
+            }
             atr::tui::run(shared, sess.into_tui_opts(prompt, false)).await
         }
         Cmd::Status { json, repo } => {
