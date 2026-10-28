@@ -714,8 +714,11 @@ pub fn banner_text(shared: &Shared, key: &str) -> String {
         None => format!("atr tui · {status} · {workspace}"),
         Some(name) => format!("atr tui  {name} · {status} · {workspace}"),
     };
-    format!("{head}\n/  host commands · /cli provider TUI · /quit\n")
+    format!("{head}\n{BANNER_COMMANDS}\n")
 }
+
+/// Second welcome line. Host slashes stay visible here; `/repo` is one of them.
+pub const BANNER_COMMANDS: &str = "/  host commands · /repo workspace · /cli provider TUI · /quit";
 
 pub fn provider_list_short(cfg: &crate::config::Config) -> String {
     if cfg.providers.is_empty() {
@@ -1450,6 +1453,9 @@ mod tests {
 
     #[test]
     fn banner_helpers_are_tight() {
+        assert!(BANNER_COMMANDS.contains("/repo"), "{BANNER_COMMANDS}");
+        assert!(BANNER_COMMANDS.contains("/cli"), "{BANNER_COMMANDS}");
+        assert!(BANNER_COMMANDS.contains("/quit"), "{BANNER_COMMANDS}");
         assert!(format_daemon_line(true).contains("atr status"));
         assert!(format_daemon_line(false).contains("atr service install"));
         assert!(daemon_line(std::path::Path::new("/tmp")).contains("atr"));

@@ -14,6 +14,10 @@ use std::process::ExitCode;
 struct Cli {
     #[arg(long, global = true, env = "ATR_CONFIG")]
     config: Option<PathBuf>,
+    /// Session flags for a bare `atr` (same as `atr tui`). Ignored when a
+    /// subcommand is present — `atr tui` / `atr ask` have their own copy.
+    #[command(flatten)]
+    sess: CliSessionArgs,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -327,6 +331,12 @@ impl CliSessionArgs {
     }
 }
 
+/// Bare `atr` is `atr tui` with the top-level session flags (`--repo`, `--dir`,
+/// `--provider`, `--session`, `--new`). A present subcommand keeps its own args.
+fn command_or_tui(cmd: Option<Cmd>, sess: CliSessionArgs) -> Cmd {
+    cmd.unwrap_or(Cmd::Tui { prompt: None, sess })
+}
+
 #[derive(Subcommand, Debug)]
 enum CompareCmd {
     /// Show a compare task's arms, outcomes, diff sizes, decision and PR URL.
@@ -571,19 +581,7 @@ async fn open_after_init(path: PathBuf, starting: &str) -> Result<std::sync::Arc
 
 async fn run(cli: Cli) -> Result<ExitCode> {
     let path = cli.config.unwrap_or_else(default_config_path);
-    let cmd = match cli.cmd {
-        Some(c) => c,
-        None => Cmd::Tui {
-            prompt: None,
-            sess: CliSessionArgs {
-                provider: None,
-                session: None,
-                dir: None,
-                repo: None,
-                new: false,
-            },
-        },
-    };
+    let cmd = command_or_tui(cli.cmd, cli.sess);
     if !matches!(cmd, Cmd::Serve | Cmd::Tui { .. } | Cmd::Ask { .. }) {
         atr::logrotate::init_tracing(None);
     }
@@ -1431,4 +1429,71 @@ fn http_cancel(listen: &str, auth: Option<&str>, key: &str, force: bool) -> Resu
         bail!("{msg}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn bare_session_flags_parse_as_tui() {
+        let cli = Cli::try_parse_from(["atr", "--repo", "demo"]).expect("atr --repo demo");
+        assert!(cli.cmd.is_none(), "bare atr is not a subcommand");
+        assert_eq!(cli.sess.repo.as_deref(), Some("demo"));
+        match command_or_tui(cli.cmd, cli.sess) {
+            Cmd::Tui { prompt, sess } => {
+                assert!(prompt.is_none());
+                assert_eq!(sess.repo.as_deref(), Some("demo"));
+                assert!(sess.dir.is_none());
+                assert!(!sess.new);
+            }
+            other => panic!("expected Tui, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "atr",
+            "--dir",
+            "/tmp/notes",
+            "--provider",
+            "grok",
+            "--session",
+            "work",
+            "--new",
+        ])
+        .expect("bare session flags");
+        assert_eq!(cli.sess.provider.as_deref(), Some("grok"));
+        assert_eq!(cli.sess.session.as_deref(), Some("work"));
+        assert_eq!(
+            cli.sess.dir.as_deref(),
+            Some(std::path::Path::new("/tmp/notes"))
+        );
+        assert!(cli.sess.new);
+        assert!(cli.sess.repo.is_none());
+
+        let cli = Cli::try_parse_from(["atr", "--repo", "."]).expect("atr --repo .");
+        assert_eq!(cli.sess.repo.as_deref(), Some("."));
+
+        let cli = Cli::try_parse_from(["atr", "tui", "--repo", "other"]).expect("atr tui --repo");
+        match cli.cmd {
+            Some(Cmd::Tui { sess, .. }) => {
+                assert_eq!(sess.repo.as_deref(), Some("other"));
+            }
+            other => panic!("expected Tui subcommand, got {other:?}"),
+        }
+        assert!(
+            cli.sess.repo.is_none(),
+            "subcommand --repo stays on tui, not the unused top-level flatten"
+        );
+    }
+
+    #[test]
+    fn bare_unknown_flag_still_rejected() {
+        let err = Cli::try_parse_from(["atr", "--nope"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unexpected argument") || msg.contains("--nope"),
+            "{msg}"
+        );
+    }
 }

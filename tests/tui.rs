@@ -932,8 +932,42 @@ fn bare_atr_launches_tui() {
     assert!(help.contains("tui"), "{help}");
     assert!(help.contains("ask"), "{help}");
     assert!(help.contains("serve"), "{help}");
+    assert!(help.contains("--repo"), "{help}");
+    assert!(help.contains("--dir"), "{help}");
+    assert!(help.contains("--provider"), "{help}");
+    assert!(help.contains("--session"), "{help}");
+    assert!(help.contains("--new"), "{help}");
     assert!(!help.contains("ATR_DEFAULT"), "{help}");
     assert!(!help.contains("ATR_TUI_PROVIDER"), "{help}");
+
+    for args in [
+        vec!["--repo", ".", "--help"],
+        vec![
+            "--dir",
+            "/tmp",
+            "--provider",
+            "grok",
+            "--session",
+            "work",
+            "--new",
+            "--help",
+        ],
+    ] {
+        let out = atr().args(&args).output().unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.status.success(),
+            "bare atr session flags must parse: {args:?}\n{text}"
+        );
+        assert!(
+            !text.contains("unexpected argument"),
+            "bare atr rejected session flags {args:?}: {text}"
+        );
+    }
 
     let out = atr()
         .env("ATR_CONFIG", &cfg)

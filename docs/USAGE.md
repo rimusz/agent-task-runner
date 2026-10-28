@@ -36,6 +36,8 @@ An interactive chat TUI (ratatui): scrollable transcript, composer, and an under
 atr ask "what is 2+2?"                 # one-shot / CI
 atr ask "status" --session ci --provider grok
 atr                          # interactive TUI; Ctrl+C or /quit to leave
+atr --repo .                 # same TUI; `.` is the current directory's git root
+atr --repo demo              # config name or path; full path not required
 atr tui                      # same (answer-only unless --repo / --dir)
 atr tui --repo demo                    # git workspace from config / path
 atr tui --dir ~/notes                  # local directory workspace
@@ -45,7 +47,7 @@ atr tui --session work --provider grok
 
 Sessions are normal atr tasks keyed `cli-<name>` (default `cli-default` — the in-process TUI session, not a model). Same idea as Telegram's `tg<chat>` keys but a separate history. Resume, the stable prompt prefix, and provider-switch handoff are the existing task machinery. Serve owns daemon work (Telegram, GitHub, `atr add`); the TUI / `ask` process owns `cli-*`.
 
-Provider for a TUI / `ask` session: session pin (`/provider` or `--provider`) → optional `[tui] providers` list → global `[[provider]]` order. Mid-session `/provider` and `/model` stick for that session; switching provider triggers the existing handoff brief. Both commands take `--provider`, `--session`, `--dir` / `--repo`, and `--new`.
+Provider for a TUI / `ask` session: session pin (`/provider` or `--provider`) → optional `[tui] providers` list → global `[[provider]]` order. Mid-session `/provider` and `/model` stick for that session; switching provider triggers the existing handoff brief. A bare `atr` takes the same `--provider`, `--session`, `--dir` / `--repo`, and `--new` as `atr tui` / `atr ask`.
 
 | Flag | Effect |
 |---|---|
