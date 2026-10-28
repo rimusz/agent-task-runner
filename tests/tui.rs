@@ -1141,6 +1141,8 @@ fn tui_help_documents_flags() {
     assert!(help.contains("--provider"), "{help}");
     assert!(help.contains("--session"), "{help}");
     assert!(help.contains("--new"), "{help}");
+    assert!(help.contains("--repo"), "{help}");
+    assert!(help.contains("--dir"), "{help}");
     assert!(!help.contains("ATR_TUI_PROVIDER"), "{help}");
     assert!(!help.contains("ATR_DEFAULT"), "{help}");
 
@@ -1153,6 +1155,156 @@ fn tui_help_documents_flags() {
     assert!(help.contains("--new"), "{help}");
     assert!(!help.contains("ATR_TUI_PROVIDER"), "{help}");
     assert!(!help.contains("ATR_DEFAULT"), "{help}");
+    assert!(help.contains("--repo") || help.contains("--dir"), "{help}");
+}
+
+#[tokio::test]
+async fn workspace_chrome_is_honest() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let none = tui::workspace_chrome_for(&shared, "none", None).unwrap();
+    assert!(none.starts_with("answer-only"), "{none}");
+    assert!(
+        !none.contains(&cwd),
+        "answer-only must not paint process cwd {cwd}: {none}"
+    );
+    let notes = _dir.path().join("notes");
+    fs::create_dir_all(&notes).unwrap();
+    let dir_line =
+        tui::workspace_chrome_for(&shared, "dir", Some(&notes.display().to_string())).unwrap();
+    assert!(dir_line.starts_with("dir "), "{dir_line}");
+    assert!(!dir_line.starts_with("answer-only"), "{dir_line}");
+
+    let repo = shared.config.read().unwrap().repo_path.clone();
+    let git = tui::workspace_chrome_for(&shared, "git", Some(&repo.display().to_string())).unwrap();
+    assert!(git.starts_with("git "), "{git}");
+    assert!(git.contains("demo") || git.contains("repo"), "{git}");
+    assert!(git.contains("(watched)"), "{git}");
+    // Cheap git succeeds on the sample repo (branch is optional if git fails).
+    if git.contains('@') {
+        assert!(git.contains("main"), "{git}");
+    }
+
+    tui::run_oneshot(shared.clone(), opts("hello", None, None))
+        .await
+        .unwrap();
+    let footer = tui::footer_line(&shared, "cli-default");
+    assert!(footer.contains("answer-only"), "{footer}");
+    assert!(
+        !footer.contains(&cwd) || footer.contains("answer-only"),
+        "footer must not treat cwd as the workspace: {footer}"
+    );
+    let status = tui::preview_line(&shared, "cli-default", "/status").unwrap();
+    assert!(status.contains("answer-only"), "{status}");
+}
+
+#[tokio::test]
+async fn repo_slash_resolves_and_clears_bound_session() {
+    let (_dir, shared, cfg_path) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    let repo = shared.config.read().unwrap().repo_path.clone();
+    assert_eq!(tui::classify_line("/repo"), "repo");
+    assert_eq!(tui::classify_line("/repo none"), "repo");
+
+    let picker = tui::preview_line(&shared, "cli-default", "/repo").unwrap();
+    assert!(picker.starts_with("repo-picker"), "{picker}");
+    assert!(picker.contains("none"), "{picker}");
+    assert!(picker.contains("demo"), "{picker}");
+    assert!(
+        picker.contains("[[repo]]") || picker.contains("serve optional"),
+        "{picker}"
+    );
+
+    let none = tui::preview_line(&shared, "cli-default", "/repo none").unwrap();
+    assert!(none.contains("answer-only"), "{none}");
+
+    let by_name = tui::preview_line(&shared, "cli-default", "/repo demo").unwrap();
+    assert!(by_name.contains("git "), "{by_name}");
+    assert!(
+        by_name.contains("demo") || by_name.contains("watched"),
+        "{by_name}"
+    );
+
+    let by_path =
+        tui::preview_line(&shared, "cli-default", &format!("/repo {}", repo.display())).unwrap();
+    assert!(by_path.contains("git "), "{by_path}");
+
+    tui::run_oneshot(
+        shared.clone(),
+        tui::TuiOpts {
+            prompt: Some("bound turn".into()),
+            repo: Some(repo.display().to_string()),
+            ..tui::TuiOpts::default()
+        },
+    )
+    .await
+    .unwrap();
+    let task = shared.db.get_task("cli-default").unwrap().unwrap();
+    assert!(
+        task.repo.as_deref().is_some_and(|s| !s.is_empty())
+            || task.worktree.as_deref().is_some_and(|s| !s.is_empty())
+            || task.session_id.as_deref().is_some_and(|s| !s.is_empty()),
+        "oneshot --repo should bind the cli-* task: {task:?}"
+    );
+
+    let cleared = tui::preview_line(&shared, "cli-default", "/repo none").unwrap();
+    assert!(cleared.contains("answer-only"), "{cleared}");
+    assert!(
+        shared.db.get_task("cli-default").unwrap().is_none(),
+        "switching away from a bound session must clear like /new"
+    );
+
+    tui::run_oneshot(
+        shared.clone(),
+        tui::TuiOpts {
+            prompt: Some("bind again".into()),
+            repo: Some("demo".into()),
+            ..tui::TuiOpts::default()
+        },
+    )
+    .await
+    .unwrap();
+    shared.db.set_status("cli-default", "running").unwrap();
+    let err = tui::preview_line(&shared, "cli-default", "/repo none").unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("running"), "{msg}");
+
+    // Shorthand repo_path that is not a git root is not one mega-repo.
+    let nest = _dir.path().join("src-nest");
+    fs::create_dir_all(&nest).unwrap();
+    let text = fs::read_to_string(&cfg_path).unwrap();
+    let text = text.replace(
+        &format!("repo_path = \"{}\"", repo.display()),
+        &format!("repo_path = \"{}\"", nest.display()),
+    );
+    fs::write(&cfg_path, text).unwrap();
+    let picker = tui::preview_line(&shared, "cli-work", "/repo").unwrap();
+    assert!(picker.contains("none"), "{picker}");
+    assert!(
+        !picker
+            .lines()
+            .any(|l| l.split_whitespace().any(|t| t == "demo")),
+        "non-git shorthand must not appear as a git pick: {picker}"
+    );
+    let refused = tui::preview_line(&shared, "cli-work", "/repo demo").unwrap();
+    assert!(
+        refused.contains("not a git") || refused.contains("mega-repo") || refused.contains("usage"),
+        "{refused}"
+    );
 }
 
 fn setup_bin_cfg() -> (TempDir, std::path::PathBuf) {

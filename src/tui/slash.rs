@@ -1,11 +1,14 @@
 //! Slash routing for the TUI host.
 //!
-//! atr-local: `/provider`, `/model`, `/new`, `/quit`, `/status`, `/help`,
-//! `/cli`. Every other `/…` is forwarded to the selected provider CLI.
-//! `/model` never becomes a chat turn.
+//! atr-local: `/provider`, `/model`, `/repo`, `/new`, `/quit`, `/status`,
+//! `/help`, `/cli`. Every other `/…` is forwarded to the selected provider
+//! CLI. `/model` and `/repo` never become a chat turn.
 
 use crate::app::Shared;
+use crate::config::Config;
 use crate::tui::tui_provider_now;
+use crate::worktree;
+use std::path::{Path, PathBuf};
 
 /// Atr-local host commands shown in the `/` autocomplete menu.
 /// Order is the display order (Grok-style).
@@ -26,6 +29,11 @@ pub(crate) const HOST_COMMANDS: &[HostCommand] = &[
         name: "/model",
         aliases: &["/m"],
         hint: "session model (next --model)",
+    },
+    HostCommand {
+        name: "/repo",
+        aliases: &[],
+        hint: "git workspace / answer-only",
     },
     HostCommand {
         name: "/status",
@@ -58,12 +66,12 @@ pub(crate) fn is_bare_slash(line: &str) -> bool {
     line.trim() == "/"
 }
 
-/// `/provider` and `/model` stay in overlays / the under-input strip.
-/// Do not append them (or their confirmations) to the chat transcript.
+/// `/provider`, `/model`, and `/repo` stay in overlays / the under-input
+/// strip. Do not append them (or their confirmations) to the chat transcript.
 pub(crate) fn quiet_transcript(line: &str) -> bool {
     matches!(
         parse_slash(line),
-        Some(Slash::Provider(_)) | Some(Slash::Model(_))
+        Some(Slash::Provider(_)) | Some(Slash::Model(_)) | Some(Slash::Repo(_))
     )
 }
 
@@ -128,6 +136,7 @@ pub(crate) enum Slash {
     New,
     Provider(Option<String>),
     Model(Option<String>),
+    Repo(Option<String>),
     Cli,
     /// Full line (`/compact`, `/plan`, …) for the provider proxy path.
     Proxy(String),
@@ -147,6 +156,14 @@ pub(crate) fn parse_slash(line: &str) -> Option<Slash> {
         "/status" => Some(Slash::Status),
         "/new" => Some(Slash::New),
         "/provider" => Some(Slash::Provider(parts.next().map(str::to_string))),
+        "/repo" => {
+            let rest: Vec<&str> = parts.collect();
+            Some(Slash::Repo(if rest.is_empty() {
+                None
+            } else {
+                Some(rest.join(" "))
+            }))
+        }
         "/model" | "/m" => {
             let rest: Vec<&str> = parts.collect();
             Some(Slash::Model(if rest.is_empty() {
@@ -188,7 +205,10 @@ Chat
 atr (this host)
   /provider [name]   list / pick atr providers (enabled · current)
   /model [id]        list / pick the session model (next spawn --model)
-  /status            session, provider, model, tokens, cache
+  /repo [name|path]  list / pick a git workspace (config [[repo]]; serve optional)
+  /repo .            bind the current directory's git root
+  /repo none         answer-only (no workspace)
+  /status            session, provider, model, tokens, workspace
   /new               fresh atr session (same key)
   /cli               open the provider's own interactive TUI
   /quit              leave atr  (/exit /q)
@@ -196,8 +216,10 @@ atr (this host)
   Esc                dismiss menus / pickers (never quits)
 
   `/model` is atr-local for every provider. It is never sent as chat.
+  `/repo` is atr-local. It is never a provider chat turn.
   `/cli` is the full native experience (Grok/Claude's own /model picker).
   `/atr …` namespaces host commands if a provider slash collides.
+  `atr tui --repo …` / `--dir …` set the launch workspace; omit for answer-only.
 
 Provider CLI slashes
   Other /commands (/compact, /plan, skills, …) go to the current
@@ -307,6 +329,164 @@ pub(crate) fn model_pick_usage(provider: &str, kind: &str, list: &[ModelChoice])
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepoSection {
+    None,
+    Cwd,
+    Config,
+    Recent,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RepoChoice {
+    pub token: String,
+    pub label: String,
+    pub section: RepoSection,
+    pub current: bool,
+}
+
+/// Config `[[repo]]` / `effective_repos()` that are real git roots, plus
+/// cwd git root (`.`) and recent typed paths. Shorthand `repo_path=~/src`
+/// is omitted unless that path itself is a git root (not a mega-repo).
+pub(crate) fn list_repos(
+    cfg: &Config,
+    current: Option<&Path>,
+    recent: &[String],
+) -> Vec<RepoChoice> {
+    let mut out = vec![RepoChoice {
+        token: "none".into(),
+        label: "answer-only".into(),
+        section: RepoSection::None,
+        current: current.is_none(),
+    }];
+    let cwd_root = cwd_git_root();
+    let config_roots = config_git_repos(cfg);
+    if let Some(root) = cwd_root.as_ref() {
+        let already = config_roots
+            .iter()
+            .any(|(p, _)| crate::config::paths_eq(p, root));
+        if !already {
+            out.push(RepoChoice {
+                token: ".".into(),
+                label: format!("cwd {}", shorten_choice(root)),
+                section: RepoSection::Cwd,
+                current: current.is_some_and(|c| crate::config::paths_eq(c, root)),
+            });
+        }
+    }
+    for (path, name) in &config_roots {
+        let token = if !name.is_empty() {
+            name.clone()
+        } else {
+            path.display().to_string()
+        };
+        let watched = " (watched)";
+        out.push(RepoChoice {
+            token,
+            label: format!("{}{watched}", shorten_choice(path)),
+            section: RepoSection::Config,
+            current: current.is_some_and(|c| crate::config::paths_eq(c, path)),
+        });
+    }
+    for raw in recent {
+        let p = crate::config::expand_path(raw);
+        if !worktree::is_git_repo(&p) {
+            continue;
+        }
+        if config_roots
+            .iter()
+            .any(|(c, _)| crate::config::paths_eq(c, &p))
+        {
+            continue;
+        }
+        if cwd_root
+            .as_ref()
+            .is_some_and(|c| crate::config::paths_eq(c, &p))
+        {
+            continue;
+        }
+        if out
+            .iter()
+            .any(|c| crate::config::paths_eq(Path::new(&c.token), &p))
+        {
+            continue;
+        }
+        out.push(RepoChoice {
+            token: p.display().to_string(),
+            label: format!("recent {}", shorten_choice(&p)),
+            section: RepoSection::Recent,
+            current: current.is_some_and(|c| crate::config::paths_eq(c, &p)),
+        });
+    }
+    out
+}
+
+pub(crate) fn config_git_repos(cfg: &Config) -> Vec<(PathBuf, String)> {
+    cfg.effective_repos()
+        .into_iter()
+        .filter(|r| worktree::is_git_repo(&r.path))
+        .map(|r| (r.path, r.name))
+        .collect()
+}
+
+pub(crate) fn cwd_git_root() -> Option<PathBuf> {
+    git_root_from(&std::env::current_dir().ok()?)
+}
+
+pub(crate) fn git_root_from(start: &Path) -> Option<PathBuf> {
+    let mut p = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    loop {
+        if worktree::is_git_repo(&p) {
+            return Some(p);
+        }
+        if !p.pop() {
+            return None;
+        }
+    }
+}
+
+fn shorten_choice(path: &Path) -> String {
+    crate::tui::composer_path_line(path)
+}
+
+pub(crate) fn format_repo_list(list: &[RepoChoice]) -> String {
+    if list.is_empty() {
+        return "no git workspaces. add [[repo]] in config (atr serve optional) or /repo <path>"
+            .into();
+    }
+    let mut lines = vec!["Workspace  (* current)  — config [[repo]] (serve optional)".to_string()];
+    let mut last = None;
+    for (i, r) in list.iter().enumerate() {
+        if last != Some(r.section) {
+            let header = match r.section {
+                RepoSection::None => None,
+                RepoSection::Cwd => Some("cwd"),
+                RepoSection::Config => Some("config"),
+                RepoSection::Recent => Some("recent"),
+            };
+            if let Some(h) = header {
+                lines.push(format!("  [{h}]"));
+            }
+            last = Some(r.section);
+        }
+        let mark = if r.current { "*" } else { " " };
+        lines.push(format!(
+            "  {:>2}  {:<16} {mark}  {}",
+            i + 1,
+            r.token,
+            r.label
+        ));
+    }
+    lines.join("\n")
+}
+
+pub(crate) fn repo_pick_usage(list: &[RepoChoice]) -> String {
+    format!(
+        "{}\n\nusage: /repo <name|path|.|none>\n       atr tui --repo <name|path>   atr tui --dir <path>",
+        format_repo_list(list)
+    )
+}
+
 pub(crate) fn model_empty_hint(provider: &str, kind: &str) -> String {
     format!(
         "no models parsed — try /cli\n\
@@ -332,11 +512,26 @@ mod tests {
             parse_slash("/provider grok"),
             Some(Slash::Provider(Some("grok".into())))
         );
+        assert_eq!(parse_slash("/repo"), Some(Slash::Repo(None)));
+        assert_eq!(
+            parse_slash("/repo none"),
+            Some(Slash::Repo(Some("none".into())))
+        );
+        assert_eq!(parse_slash("/repo ."), Some(Slash::Repo(Some(".".into()))));
+        assert_eq!(
+            parse_slash("/repo ~/src/demo"),
+            Some(Slash::Repo(Some("~/src/demo".into())))
+        );
         assert!(quiet_transcript("/provider"));
         assert!(quiet_transcript("/provider codex"));
         assert!(quiet_transcript("/model"));
         assert!(quiet_transcript("/model gpt-6.1-sol"));
         assert!(quiet_transcript("/m"));
+        assert!(quiet_transcript("/repo"));
+        assert!(quiet_transcript("/repo none"));
+        assert!(quiet_transcript("/repo ."));
+        assert!(quiet_transcript("/atr repo"));
+        assert!(quiet_transcript("/atr /repo none"));
         assert!(quiet_transcript("/atr provider"));
         assert!(quiet_transcript("/atr /provider grok"));
         assert!(quiet_transcript("/atr model"));
@@ -379,6 +574,10 @@ mod tests {
         assert!(h.contains("Provider CLI"), "{h}");
         assert!(h.contains("/provider"), "{h}");
         assert!(h.contains("/model"), "{h}");
+        assert!(h.contains("/repo"), "{h}");
+        assert!(h.contains("/repo none"), "{h}");
+        assert!(h.contains("/repo ."), "{h}");
+        assert!(h.contains("atr tui --repo"), "{h}");
         assert!(h.contains("never sent as chat"), "{h}");
         assert!(h.contains("/cli"), "{h}");
         assert!(h.contains("Ctrl+C"), "{h}");
@@ -392,6 +591,7 @@ mod tests {
         assert_eq!(all.len(), HOST_COMMANDS.len(), "{all:?}");
         assert!(all.iter().any(|c| c.name == "/model"));
         assert!(all.iter().any(|c| c.name == "/provider"));
+        assert!(all.iter().any(|c| c.name == "/repo"));
         assert!(all.iter().any(|c| c.name == "/quit"));
 
         let m = filter_host_commands("/m");

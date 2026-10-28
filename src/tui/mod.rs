@@ -18,11 +18,11 @@
 //! sessions via [`crate::scheduler::dispatch_key`].
 //!
 //! The interactive UI is a session host: transcript, composer, and an
-//! under-input status strip (provider / model, plus workspace path).
-//! atr-local slashes are `/provider`, `/model`, `/new`, `/quit`,
-//! `/status`, `/help`, `/cli`. `/model` changes the session `--model`
-//! override and is never sent as chat. Other `/…` may be proxied.
-//! `atr ask` never opens the alternate screen.
+//! under-input status strip (provider / model, plus honest workspace
+//! kind: `answer-only` / `dir …` / `git …`). atr-local slashes are
+//! `/provider`, `/model`, `/repo`, `/new`, `/quit`, `/status`, `/help`,
+//! `/cli`. `/model` and `/repo` are never sent as chat. Other `/…` may
+//! be proxied. `atr ask` never opens the alternate screen.
 //!
 //! First run on a TTY offers [`crate::init::ensure_config`] (the normal
 //! `atr init`) when config is missing, then continues. Non-TTY / CI
@@ -57,6 +57,9 @@ pub const ASK_PROMPT_REQUIRED: &str =
     "atr ask requires a prompt. Example: atr ask \"what is 2+2?\"  (use `atr tui` for the interactive session)";
 
 const MODEL_META_PREFIX: &str = "tui-model:";
+const WS_META_PREFIX: &str = "tui-ws:";
+const REPO_RECENT_META: &str = "tui-repo-recent";
+const REPO_RECENT_MAX: usize = 8;
 
 #[derive(Debug, Clone, Default)]
 pub struct TuiOpts {
@@ -94,6 +97,7 @@ pub(crate) enum Step {
     Turn(String),
     OpenProviderPicker,
     OpenModelPicker,
+    OpenRepoPicker,
     NativeCli,
 }
 
@@ -307,6 +311,7 @@ pub async fn run(shared: Arc<Shared>, opts: TuiOpts) -> Result<ExitCode> {
         reset_session(&shared, &key)?;
     }
     let ws = resolve_workspace(&shared, &opts)?;
+    save_workspace(&shared, &key, &ws);
     warn_if_no_provider(
         &shared,
         opts.require_prompt || opts.prompt.as_deref().is_some_and(|s| !s.trim().is_empty()),
@@ -363,7 +368,7 @@ async fn interactive(
 async fn line_interactive(
     shared: Arc<Shared>,
     key: String,
-    ws: Workspace,
+    mut ws: Workspace,
     pin: Option<String>,
 ) -> Result<ExitCode> {
     let tty = std::io::stdin().is_terminal();
@@ -383,7 +388,7 @@ async fn line_interactive(
         if line.is_empty() {
             continue;
         }
-        match step_line(&shared, &key, &ws, pin.as_deref(), &line)? {
+        match step_line(&shared, &key, &mut ws, pin.as_deref(), &line)? {
             Step::Quit => break,
             Step::Note(msg) => {
                 if !msg.is_empty() {
@@ -398,6 +403,9 @@ async fn line_interactive(
             }
             Step::OpenModelPicker => {
                 println!("{}", model_picker_text(&shared, &key, &ws));
+            }
+            Step::OpenRepoPicker => {
+                println!("{}", repo_picker_text(&shared, &ws));
             }
             Step::NativeCli => {
                 if interactive_tty() {
@@ -427,7 +435,7 @@ async fn line_interactive(
 pub(crate) fn step_line(
     shared: &Shared,
     key: &str,
-    ws: &Workspace,
+    ws: &mut Workspace,
     pin: Option<&str>,
     line: &str,
 ) -> Result<Step> {
@@ -442,7 +450,7 @@ pub(crate) fn step_line(
         None => Ok(Step::Turn(line.to_string())),
         Some(slash::Slash::Quit) => Ok(Step::Quit),
         Some(slash::Slash::Help) => Ok(Step::Note(slash::slash_help().to_string())),
-        Some(slash::Slash::Status) => Ok(Step::Note(footer_line(shared, key))),
+        Some(slash::Slash::Status) => Ok(Step::Note(status_text(shared, key, ws))),
         Some(slash::Slash::New) => {
             reset_session(shared, key)?;
             if let Some(p) = pin {
@@ -454,6 +462,11 @@ pub(crate) fn step_line(
         Some(slash::Slash::Provider(Some(name))) => apply_provider_pick(shared, key, ws, &name),
         Some(slash::Slash::Model(None)) => Ok(Step::OpenModelPicker),
         Some(slash::Slash::Model(Some(name))) => apply_model_pick(shared, key, ws, &name),
+        Some(slash::Slash::Repo(None)) => {
+            reload_tui_config(shared);
+            Ok(Step::OpenRepoPicker)
+        }
+        Some(slash::Slash::Repo(Some(spec))) => apply_repo_pick(shared, key, ws, &spec),
         Some(slash::Slash::Cli) => Ok(Step::NativeCli),
         Some(slash::Slash::Proxy(cmd)) => Ok(Step::Turn(cmd)),
     }
@@ -495,10 +508,54 @@ pub(crate) fn apply_model_pick(
 
 fn set_model_note(shared: &Shared, key: &str, name: &str) -> Result<Step> {
     store_session_model(shared, key, name)?;
+    let ws = load_workspace(shared, key).unwrap_or(Workspace {
+        kind: WorkspaceKind::None,
+        repo: None,
+    });
     Ok(Step::Note(format!(
         "model {name} (this session; next turn uses the provider --model flag)\n{}",
-        footer_line(shared, key)
+        status_text(shared, key, &ws)
     )))
+}
+
+pub(crate) fn apply_repo_pick(
+    shared: &Shared,
+    key: &str,
+    ws: &mut Workspace,
+    input: &str,
+) -> Result<Step> {
+    reload_tui_config(shared);
+    let list = repo_choices(shared, ws);
+    let tokens: Vec<String> = list.iter().map(|r| r.token.clone()).collect();
+    let spec = slash::pick_choice(&tokens, input).unwrap_or_else(|| input.trim().to_string());
+    if spec.is_empty() {
+        return Ok(Step::OpenRepoPicker);
+    }
+    match resolve_repo_spec(shared, &spec) {
+        Ok(next) => {
+            switch_workspace(shared, key, ws, next)?;
+            Ok(Step::Note(workspace_chrome_line(shared, ws)))
+        }
+        Err(e) => Ok(Step::Note(format!(
+            "{e:#}.\n{}",
+            slash::repo_pick_usage(&list)
+        ))),
+    }
+}
+
+fn repo_picker_text(shared: &Shared, ws: &Workspace) -> String {
+    reload_tui_config(shared);
+    slash::repo_pick_usage(&repo_choices(shared, ws))
+}
+
+pub(crate) fn repo_choices(shared: &Shared, ws: &Workspace) -> Vec<slash::RepoChoice> {
+    let cfg = shared.config.read().unwrap().clone();
+    let current = ws
+        .repo
+        .as_deref()
+        .filter(|_| ws.kind == WorkspaceKind::Git)
+        .map(Path::new);
+    slash::list_repos(&cfg, current, &load_recent_repos(shared))
 }
 
 fn model_picker_text(shared: &Shared, key: &str, ws: &Workspace) -> String {
@@ -531,6 +588,7 @@ pub fn classify_line(line: &str) -> &'static str {
         Some(slash::Slash::New) => "new",
         Some(slash::Slash::Provider(_)) => "provider",
         Some(slash::Slash::Model(_)) => "model",
+        Some(slash::Slash::Repo(_)) => "repo",
         Some(slash::Slash::Cli) => "cli",
         Some(slash::Slash::Proxy(_)) => "proxy",
     }
@@ -563,11 +621,11 @@ pub fn set_session_model(shared: &Shared, key: &str, model: &str) -> Result<()> 
 /// Run a TUI slash/chat classify+apply without spawning a turn.
 /// Returns `turn` only when the line would enqueue a provider run.
 pub fn preview_line(shared: &Shared, key: &str, line: &str) -> Result<String> {
-    let ws = Workspace {
+    let mut ws = load_workspace(shared, key).unwrap_or(Workspace {
         kind: WorkspaceKind::None,
         repo: None,
-    };
-    match step_line(shared, key, &ws, None, line)? {
+    });
+    match step_line(shared, key, &mut ws, None, line)? {
         Step::Turn(_) => Ok("turn".into()),
         Step::Note(s) => Ok(format!("note\n{s}")),
         Step::OpenModelPicker => Ok(format!(
@@ -575,6 +633,7 @@ pub fn preview_line(shared: &Shared, key: &str, line: &str) -> Result<String> {
             model_picker_text(shared, key, &ws)
         )),
         Step::OpenProviderPicker => Ok("provider-picker".into()),
+        Step::OpenRepoPicker => Ok(format!("repo-picker\n{}", repo_picker_text(shared, &ws))),
         Step::Quit => Ok("quit".into()),
         Step::NativeCli => Ok("cli".into()),
     }
@@ -646,9 +705,14 @@ fn warn_if_no_provider(shared: &Shared, oneshot: bool) -> Result<()> {
 
 pub fn banner_text(shared: &Shared, key: &str) -> String {
     let status = composer_status_line(shared, key);
+    let ws = load_workspace(shared, key).unwrap_or(Workspace {
+        kind: WorkspaceKind::None,
+        repo: None,
+    });
+    let workspace = workspace_chrome_line(shared, &ws);
     let head = match session_chrome_label(key) {
-        None => format!("atr tui · {status}"),
-        Some(name) => format!("atr tui  {name} · {status}"),
+        None => format!("atr tui · {status} · {workspace}"),
+        Some(name) => format!("atr tui  {name} · {status} · {workspace}"),
     };
     format!("{head}\n/  host commands · /cli provider TUI · /quit\n")
 }
@@ -694,7 +758,6 @@ fn print_oneshot(out: &TurnResult) -> Result<()> {
 }
 
 fn resolve_workspace(shared: &Shared, opts: &TuiOpts) -> Result<Workspace> {
-    let cfg = shared.config.read().unwrap().clone();
     if let Some(d) = &opts.dir {
         let p = task::resolve_dir(&d.display().to_string())?;
         return Ok(Workspace {
@@ -703,22 +766,266 @@ fn resolve_workspace(shared: &Shared, opts: &TuiOpts) -> Result<Workspace> {
         });
     }
     if let Some(r) = opts.repo.as_deref() {
-        if let Some(entry) = cfg.resolve_repo_filter(r) {
-            return Ok(Workspace {
-                kind: WorkspaceKind::Git,
-                repo: Some(entry.path.display().to_string()),
-            });
-        }
-        let p = task::resolve_git_repo(r)?;
-        return Ok(Workspace {
-            kind: WorkspaceKind::Git,
-            repo: Some(p.display().to_string()),
-        });
+        return resolve_repo_spec(shared, r);
     }
     Ok(Workspace {
         kind: WorkspaceKind::None,
         repo: None,
     })
+}
+
+fn reload_tui_config(shared: &Shared) {
+    if let Err(e) = shared.reload() {
+        tracing::warn!(error = %e, "tui config reload skipped");
+    }
+}
+
+/// Same resolve as `atr tui --repo` / `resolve_repo_filter`, plus `.` and `none`.
+/// Config entries that are not git roots are refused (no mega-repo).
+fn resolve_repo_spec(shared: &Shared, spec: &str) -> Result<Workspace> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        bail!("empty /repo spec");
+    }
+    if spec.eq_ignore_ascii_case("none") {
+        return Ok(Workspace {
+            kind: WorkspaceKind::None,
+            repo: None,
+        });
+    }
+    if spec == "." {
+        let Some(root) = slash::cwd_git_root() else {
+            bail!("current directory is not inside a git repository");
+        };
+        return Ok(Workspace {
+            kind: WorkspaceKind::Git,
+            repo: Some(root.display().to_string()),
+        });
+    }
+    let cfg = shared.config.read().unwrap().clone();
+    if let Some(entry) = cfg.resolve_repo_filter(spec) {
+        if !crate::worktree::is_git_repo(&entry.path) {
+            bail!(
+                "{} is not a git repository (shorthand repo_path is not one mega-repo)",
+                entry.path.display()
+            );
+        }
+        return Ok(Workspace {
+            kind: WorkspaceKind::Git,
+            repo: Some(entry.path.display().to_string()),
+        });
+    }
+    let p = task::resolve_git_repo(spec)?;
+    Ok(Workspace {
+        kind: WorkspaceKind::Git,
+        repo: Some(p.display().to_string()),
+    })
+}
+
+fn switch_workspace(shared: &Shared, key: &str, ws: &mut Workspace, next: Workspace) -> Result<()> {
+    if workspace_same(ws, &next) {
+        return Ok(());
+    }
+    if session_is_bound(shared, key)? {
+        reset_session(shared, key)?;
+    }
+    if next.kind == WorkspaceKind::Git {
+        if let Some(p) = next.repo.as_deref() {
+            remember_recent_repo(shared, p);
+        }
+    }
+    *ws = next;
+    save_workspace(shared, key, ws);
+    Ok(())
+}
+
+fn workspace_same(a: &Workspace, b: &Workspace) -> bool {
+    if a.kind != b.kind {
+        return false;
+    }
+    match (a.repo.as_deref(), b.repo.as_deref()) {
+        (None, None) => true,
+        (Some(x), Some(y)) => crate::config::paths_eq(Path::new(x), Path::new(y)),
+        _ => false,
+    }
+}
+
+fn session_is_bound(shared: &Shared, key: &str) -> Result<bool> {
+    let Some(t) = shared.db.get_task(key)? else {
+        return Ok(false);
+    };
+    if t.repo.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+        return Ok(true);
+    }
+    if t.worktree.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+        return Ok(true);
+    }
+    if t.session_id
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return Ok(true);
+    }
+    let cfg = shared.config.read().unwrap().clone();
+    for p in &cfg.providers {
+        if shared
+            .db
+            .task_session(key, &p.name)
+            .ok()
+            .flatten()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn save_workspace(shared: &Shared, key: &str, ws: &Workspace) {
+    let value = match ws.kind {
+        WorkspaceKind::None => "none".to_string(),
+        WorkspaceKind::Dir => format!("dir\t{}", ws.repo.as_deref().unwrap_or("")),
+        WorkspaceKind::Git => format!("git\t{}", ws.repo.as_deref().unwrap_or("")),
+    };
+    let _ = shared
+        .db
+        .meta_set(&format!("{WS_META_PREFIX}{key}"), &value);
+}
+
+fn load_workspace(shared: &Shared, key: &str) -> Option<Workspace> {
+    let raw = shared
+        .db
+        .meta_get(&format!("{WS_META_PREFIX}{key}"))
+        .ok()??;
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "none" {
+        return Some(Workspace {
+            kind: WorkspaceKind::None,
+            repo: None,
+        });
+    }
+    let (kind, path) = raw.split_once('\t').unwrap_or((raw, ""));
+    let repo = path.trim();
+    match kind {
+        "dir" if !repo.is_empty() => Some(Workspace {
+            kind: WorkspaceKind::Dir,
+            repo: Some(repo.to_string()),
+        }),
+        "git" if !repo.is_empty() => Some(Workspace {
+            kind: WorkspaceKind::Git,
+            repo: Some(repo.to_string()),
+        }),
+        "none" => Some(Workspace {
+            kind: WorkspaceKind::None,
+            repo: None,
+        }),
+        _ => None,
+    }
+}
+
+pub(crate) fn load_recent_repos(shared: &Shared) -> Vec<String> {
+    let raw = shared
+        .db
+        .meta_get(REPO_RECENT_META)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    raw.lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn remember_recent_repo(shared: &Shared, path: &str) {
+    let path = path.trim();
+    if path.is_empty() {
+        return;
+    }
+    let mut items = load_recent_repos(shared);
+    items.retain(|p| !crate::config::paths_eq(Path::new(p), Path::new(path)));
+    items.insert(0, path.to_string());
+    items.truncate(REPO_RECENT_MAX);
+    let _ = shared.db.meta_set(REPO_RECENT_META, &items.join("\n"));
+}
+
+/// Honest workspace chrome: `answer-only` | `dir <path>` | `git <name|path> [@ branch]`.
+/// Never paints process cwd as the workspace when [`WorkspaceKind::None`].
+pub(crate) fn workspace_chrome_line(shared: &Shared, ws: &Workspace) -> String {
+    let mut line = workspace_kind_text(shared, ws);
+    if tui_serve_loaded(shared) {
+        line.push_str(" · serve");
+    }
+    line
+}
+
+/// Test helper: chrome for an explicit kind/path (ignores session meta).
+pub fn workspace_chrome_for(shared: &Shared, kind: &str, repo: Option<&str>) -> Result<String> {
+    let ws = match kind {
+        "none" => Workspace {
+            kind: WorkspaceKind::None,
+            repo: None,
+        },
+        "dir" => Workspace {
+            kind: WorkspaceKind::Dir,
+            repo: Some(repo.unwrap_or("").to_string()),
+        },
+        "git" => Workspace {
+            kind: WorkspaceKind::Git,
+            repo: Some(repo.unwrap_or("").to_string()),
+        },
+        other => bail!("unknown workspace kind {other}"),
+    };
+    Ok(workspace_chrome_line(shared, &ws))
+}
+
+fn workspace_kind_text(shared: &Shared, ws: &Workspace) -> String {
+    match ws.kind {
+        WorkspaceKind::None => "answer-only".into(),
+        WorkspaceKind::Dir => {
+            let path = ws.repo.as_deref().unwrap_or("");
+            format!("dir {}", composer_path_line(Path::new(path)))
+        }
+        WorkspaceKind::Git => {
+            let path = ws.repo.as_deref().unwrap_or("");
+            let p = Path::new(path);
+            let cfg = shared.config.read().unwrap().clone();
+            let label = cfg
+                .repo_for_path(p)
+                .map(|r| r.name)
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| composer_path_line(p));
+            let mut s = format!("git {label}");
+            if let Some(b) = crate::worktree::current_branch(p) {
+                s.push_str(" @ ");
+                s.push_str(&b);
+            }
+            if cfg.effective_repos().iter().any(|r| {
+                r.enabled
+                    && crate::worktree::is_git_repo(&r.path)
+                    && crate::config::paths_eq(&r.path, p)
+            }) {
+                s.push_str(" (watched)");
+            }
+            s
+        }
+    }
+}
+
+fn tui_serve_loaded(shared: &Shared) -> bool {
+    let label = crate::service::launchd_label_for(&shared.config_path);
+    crate::service::service_loaded(&label)
+        || crate::service::service_loaded(crate::service::LAUNCHD_LABEL)
+}
+
+fn status_text(shared: &Shared, key: &str, ws: &Workspace) -> String {
+    let chrome = session_chrome(shared, key).footer_line(key);
+    let workspace = workspace_chrome_line(shared, ws);
+    if chrome.is_empty() {
+        workspace
+    } else {
+        format!("{chrome} · {workspace}")
+    }
 }
 
 fn reset_session(shared: &Shared, key: &str) -> Result<()> {
@@ -986,10 +1293,14 @@ fn session_chrome(shared: &Shared, key: &str) -> SessionChrome {
     }
 }
 
-/// Line-mode / `/status` chrome: `key · provider / model · tok · cache`.
+/// Line-mode / `/status` chrome: `key · provider / model · tok · cache · workspace`.
 /// Same session provider+model as [`composer_status_line`].
 pub fn footer_line(shared: &Shared, key: &str) -> String {
-    session_chrome(shared, key).footer_line(key)
+    let ws = load_workspace(shared, key).unwrap_or(Workspace {
+        kind: WorkspaceKind::None,
+        repo: None,
+    });
+    status_text(shared, key, &ws)
 }
 
 /// Under-composer primary strip: `provider / model` plus tok / cache.
@@ -1081,6 +1392,9 @@ mod tests {
         assert_eq!(classify_line("hello"), "chat");
         assert_eq!(classify_line("what can you do for me?"), "chat");
         assert_eq!(classify_line("/provider"), "provider");
+        assert_eq!(classify_line("/repo"), "repo");
+        assert_eq!(classify_line("/repo none"), "repo");
+        assert_eq!(classify_line("/repo ."), "repo");
         assert_eq!(classify_line("/"), "slash-menu");
         assert_eq!(classify_line(" / "), "slash-menu");
         assert_eq!(classify_line(""), "ignore");

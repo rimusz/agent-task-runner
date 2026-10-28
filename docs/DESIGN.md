@@ -66,18 +66,20 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   separate from Telegram `tg<chat>`. Serve is not required and never
   auto-dispatches `cli-*` keys — serve owns daemon work; the TUI / `ask`
   process owns those sessions. Provider: session pin → `--provider` →
-  optional `[tui] providers` → global `[[provider]]` order. `/provider`
-  and `/model` are atr-local (list/pick). `/model` sets a per-session,
+  optional `[tui] providers` → global `[[provider]]` order.   `/provider`
+  and `/model` are atr-local (list/pick). `/repo` is the mid-session git
+  workspace picker (config `[[repo]]` roots; `/repo .`; `/repo none`).
+  `/model` sets a per-session,
   per-provider `--model` override from that provider's session / config /
   detect / last-run / a cached CLI `models` catalog
   (Grok / OpenCode / Cursor `id - Label`; Claude documented full ids
   only, no bare aliases; Codex reads
   `~/.codex/models_cache.json` slugs — never spawn its TUI). Host
-  `/provider` `/model` do not append to the transcript. Refresh is off the UI thread — never
+  `/provider` `/model` `/repo` do not append to the transcript. Refresh is off the UI thread — never
   forwarded as a headless chat prompt. The TUI overlay does not dump the
   catalog into the transcript. The under-input strip shows the same
-  session `provider / model` as `/status` (plus tok/cache and workspace
-  path). Transcript user rows are `>` plus a right-aligned local clock;
+  session `provider / model` as `/status` (plus tok/cache and honest
+  workspace kind: `answer-only` / `dir …` / `git …`). Transcript user rows are `>` plus a right-aligned local clock;
   assistant text has no `You` / `atr` chip. `/` opens an atr-local command menu; ↑/↓
   in the composer walk input history. Ctrl+C quits atr (same as `/quit`);
   Esc dismisses overlays only. Other `/…` lines may be proxied. `/cli`

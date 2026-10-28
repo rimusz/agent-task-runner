@@ -34,13 +34,18 @@ strip stays in sync with the session provider/model (`/provider` and
 Grok strip/picker use a real catalog id, never `Available`;
 Codex reads `~/.codex/models_cache.json` slugs (chat ids only —
 not `codex-auto-review`);
-host `/provider` `/model` stay off the transcript).
+host `/provider` `/model` `/repo` stay off the transcript).
+The under-input strip and `/status` show the real workspace kind
+(`answer-only`, `dir <path>`, or `git <name|path> [@ branch]`), never
+process cwd when the session is answer-only. `/repo` picks a config git
+root (serve optional; the list is `[[repo]]`), `/repo .` the cwd git
+root, `/repo none` answer-only.
 User turns are prefixed `>` with a right-aligned local clock; replies have no role chip. Tracing INFO never paints
 on the TUI composer — it goes to `[log] path` (or
 `~/Library/Logs/atr/atr.log` / `~/.local/share/atr/atr.log`).
 Ctrl+C quits atr; Esc dismisses menus only.
 `/new` `/quit` `/status` `/help`
-`/cli` stay in atr; other `/…` lines may be proxied. `/cli` opens the
+`/cli` `/repo` stay in atr; other `/…` lines may be proxied. `/cli` opens the
 vendor TUI.
 
 `atr init` and `atr providers detect` look on `PATH` and common install dirs

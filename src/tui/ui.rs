@@ -9,8 +9,8 @@ use super::history::InputHistory;
 use super::proxy;
 use super::slash;
 use super::{
-    collect_result, composer_path_line, composer_status_line, enqueue_turn, step_line,
-    truncate_middle_end, turn_is_idle, Step, Workspace,
+    collect_result, composer_status_line, enqueue_turn, step_line, truncate_middle_end,
+    turn_is_idle, workspace_chrome_line, Step, Workspace,
 };
 use crate::app::Shared;
 use crate::scheduler;
@@ -45,11 +45,12 @@ pub(crate) async fn run(
     pin: Option<String>,
 ) -> Result<ExitCode> {
     let _quiet = crate::logrotate::TuiConsoleQuiet::enter();
+    let mut ws = ws;
     let mut app = App::new(&shared, &key);
     proxy::begin_session_models_refresh(&shared, &key, &ws);
     loop {
         let mut term = setup()?;
-        let end = event_loop(&mut term, &shared, &key, &ws, pin.as_deref(), &mut app).await;
+        let end = event_loop(&mut term, &shared, &key, &mut ws, pin.as_deref(), &mut app).await;
         restore()?;
         match end? {
             LoopEnd::Quit(code) => return Ok(code),
@@ -116,6 +117,7 @@ struct Picker {
 enum PickerKind {
     Provider,
     Model,
+    Repo,
 }
 
 #[derive(Clone, Copy)]
@@ -182,7 +184,7 @@ async fn event_loop(
     term: &mut Terminal<CrosstermBackend<Stdout>>,
     shared: &Arc<Shared>,
     key: &str,
-    ws: &Workspace,
+    ws: &mut Workspace,
     pin: Option<&str>,
     app: &mut App,
 ) -> Result<LoopEnd> {
@@ -231,7 +233,7 @@ fn handle_key(
     app: &mut App,
     shared: &Shared,
     key: &str,
-    ws: &Workspace,
+    ws: &mut Workspace,
     pin: Option<&str>,
     ev: KeyEvent,
 ) -> Result<Option<LoopEnd>> {
@@ -346,7 +348,7 @@ fn submit_or_queue(
     app: &mut App,
     shared: &Shared,
     key: &str,
-    ws: &Workspace,
+    ws: &mut Workspace,
     pin: Option<&str>,
 ) -> Result<Option<LoopEnd>> {
     if let Some(cmd) = take_slash_selection(app) {
@@ -370,6 +372,7 @@ fn submit_or_queue(
             | Some(slash::Slash::New)
             | Some(slash::Slash::Provider(_))
             | Some(slash::Slash::Model(_))
+            | Some(slash::Slash::Repo(_))
             | Some(slash::Slash::Cli) => {
                 return submit_line(app, shared, key, ws, pin, trimmed);
             }
@@ -449,7 +452,7 @@ fn complete_slash(app: &mut App) {
     let Some(name) = menu.items.get(i).map(|r| r.name.clone()) else {
         return;
     };
-    let with_space = matches!(name.as_str(), "/model" | "/provider");
+    let with_space = matches!(name.as_str(), "/model" | "/provider" | "/repo");
     set_input(app, &if with_space { format!("{name} ") } else { name });
     refresh_slash_menu(app);
 }
@@ -458,7 +461,7 @@ fn handle_picker(
     app: &mut App,
     shared: &Shared,
     key: &str,
-    ws: &Workspace,
+    ws: &mut Workspace,
     ev: KeyEvent,
 ) -> Result<Option<LoopEnd>> {
     let Some(picker) = app.picker.as_mut() else {
@@ -527,15 +530,16 @@ fn picker_apply(
     _app: &mut App,
     shared: &Shared,
     key: &str,
-    ws: &Workspace,
+    ws: &mut Workspace,
     kind: PickerKind,
     name: &str,
 ) -> Result<()> {
-    // Overlay pick: strip already shows the new provider/model.
+    // Overlay pick: strip already shows the new provider/model/repo.
     // Do not push You/System confirmations into the transcript.
     let _step = match kind {
         PickerKind::Provider => super::apply_provider_pick(shared, key, ws, name)?,
         PickerKind::Model => super::apply_model_pick(shared, key, ws, name)?,
+        PickerKind::Repo => super::apply_repo_pick(shared, key, ws, name)?,
     };
     Ok(())
 }
@@ -544,7 +548,7 @@ fn submit_line(
     app: &mut App,
     shared: &Shared,
     key: &str,
-    ws: &Workspace,
+    ws: &mut Workspace,
     pin: Option<&str>,
     line: &str,
 ) -> Result<Option<LoopEnd>> {
@@ -552,22 +556,15 @@ fn submit_line(
     if !quiet {
         app.push(Role::You, line.to_string());
     }
-    apply_step(
-        app,
-        shared,
-        key,
-        ws,
-        pin,
-        quiet,
-        step_line(shared, key, ws, pin, line)?,
-    )
+    let step = step_line(shared, key, ws, pin, line)?;
+    apply_step(app, shared, key, ws, pin, quiet, step)
 }
 
 fn apply_step(
     app: &mut App,
     shared: &Shared,
     key: &str,
-    ws: &Workspace,
+    ws: &mut Workspace,
     pin: Option<&str>,
     quiet: bool,
     step: Step,
@@ -627,6 +624,28 @@ fn apply_step(
                 filter: String::new(),
                 state,
                 kind: PickerKind::Model,
+            });
+            Ok(None)
+        }
+        Step::OpenRepoPicker => {
+            let list = super::repo_choices(shared, ws);
+            if list.is_empty() {
+                if !quiet {
+                    app.push(Role::System, super::slash::repo_pick_usage(&list));
+                }
+                return Ok(None);
+            }
+            let sel = list.iter().position(|p| p.current).unwrap_or(0);
+            let mut state = ListState::default();
+            state.select(Some(sel));
+            let items: Vec<String> = list.iter().map(|p| p.token.clone()).collect();
+            app.picker = Some(Picker {
+                title: "Repo  (Enter / type to find · Esc)".into(),
+                items: items.clone(),
+                all: items,
+                filter: String::new(),
+                state,
+                kind: PickerKind::Repo,
             });
             Ok(None)
         }
@@ -761,13 +780,16 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str, ws: &Workspace) {
     f.render_widget(input, chunks[2]);
 
     let status = composer_status_line(shared, key);
-    let path = truncate_middle_end(
-        &composer_path_line(&proxy::session_cwd(shared, key, ws)),
+    let workspace = truncate_middle_end(
+        &workspace_chrome_line(shared, ws),
         chunks[3].width.max(1) as usize,
     );
     let strip = vec![
         Line::from(Span::styled(status, Style::default().fg(Color::Gray))),
-        Line::from(Span::styled(path, Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            workspace,
+            Style::default().fg(Color::DarkGray),
+        )),
     ];
     f.render_widget(Paragraph::new(strip), chunks[3]);
 
