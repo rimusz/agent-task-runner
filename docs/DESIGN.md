@@ -78,15 +78,20 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   `/provider` `/model` `/effort` `/context` `/repo` do not append to the transcript.
   `/effort` / `/context` are per-provider session knobs applied on the next
   spawn (grok `--effort`, claude `--effort`/`--autocompact`, cursor
-  parameterized `--model`, codex `-c model_reasoning_effort`). Refresh is off the UI thread — never
+  parameterized `--model`, codex `-c model_reasoning_effort`). Empty
+  `/effort` opens the list only when that kind has a real effort flag.
+  Bare `/context` always opens the shared size catalog; apply is claude
+  `--autocompact` / cursor brackets only — grok/codex get an honesty
+  note (no invented argv). Refresh is off the UI thread — never
   forwarded as a headless chat prompt. The TUI overlay does not dump the
   catalog into the transcript. The under-input strip shows the same
   session `provider / model` as `/status` (plus tok/cache and honest
   workspace kind: `answer-only` / `dir …` / `git …`). Transcript user rows are `>` plus a right-aligned local clock;
   assistant text has no `You` / `atr` chip. `/` opens an atr-local command menu; ↑/↓
   in the composer walk input history. PgUp/PgDn page the transcript by the
-  viewport (mouse capture stays off). Enter while a turn is busy parks the
-  next line locally (FIFO) until idle; it is not sent to the live CLI stdin.
+  viewport (mouse capture stays off). Enter while a turn is busy parks
+  composer lines locally (FIFO); host slashes still run. After idle, the
+  oldest parked line sends like idle Enter — not to the live CLI stdin.
   Ctrl+C quits atr (same as `/quit`);
   Esc dismisses overlays only. Other `/…` lines may be proxied. `/cli`
   opens the provider's own interactive TUI. A full PTY host of the vendor

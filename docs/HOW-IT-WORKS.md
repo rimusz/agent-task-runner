@@ -37,7 +37,10 @@ Codex reads `~/.codex/models_cache.json` slugs (chat ids only —
 not `codex-auto-review`);
 host `/provider` `/model` `/effort` `/context` `/repo` stay off the transcript).
 `/effort` and `/context` are per-provider session knobs (next spawn argv
-only; unsupported kinds say so — no fake flags).
+only). Empty `/effort` opens the list when that kind has a real effort
+flag; other kinds get a “not supported” note. Bare `/context` always
+opens the shared size catalog; apply is claude `--autocompact` / cursor
+model brackets only — grok/codex get an honesty note (no invented argv).
 The under-input strip and `/status` show the real workspace kind
 (`answer-only`, `dir <path>`, or `git <name|path> [@ branch]`), never
 process cwd when the session is answer-only. `/repo` picks a config git
@@ -48,8 +51,9 @@ shorthand `repo_path` mega-folder), `/repo .` the cwd git root,
 User turns are prefixed `>` with a right-aligned local clock; replies have no role chip. Tracing INFO never paints
 on the TUI composer — it goes to `[log] path` (or
 `~/Library/Logs/atr/atr.log` / `~/.local/share/atr/atr.log`).
-Enter while a turn is busy parks the next line locally until the turn
-finishes (not a second spawn mid-turn). Ctrl+C quits atr; Esc dismisses menus only.
+Enter while a turn is busy parks composer lines locally (FIFO); host
+slashes still run. After the turn finishes, the oldest parked line
+sends like idle Enter (not a second spawn mid-turn). Ctrl+C quits atr; Esc dismisses menus only.
 `/new` `/quit` `/status` `/help`
 `/cli` `/repo` stay in atr; other `/…` lines may be proxied. `/cli` opens the
 vendor TUI.
