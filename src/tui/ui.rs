@@ -941,7 +941,7 @@ fn user_turn_lines(text: &str, width: u16, clock: &str) -> Vec<Line<'static>> {
 }
 
 fn split_user_head(first: &str, width: usize, clock: &str) -> (String, String) {
-    let prefix_w = 2;
+    let prefix_w: usize = 2;
     let clock_w = clock.chars().count();
     let budget = width.saturating_sub(prefix_w.saturating_add(clock_w).saturating_add(1));
     if budget == 0 || first.chars().count() <= budget {
