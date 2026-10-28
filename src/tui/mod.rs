@@ -241,15 +241,25 @@ pub fn session_model(shared: &Shared, key: &str) -> Option<String> {
 }
 
 /// Last run that used this provider name (not a foreign provider's model).
+/// Catalog junk (`Available`, …) is dropped — never a spawn `--model`.
 pub(crate) fn last_run_model_for(shared: &Shared, key: &str, provider: &str) -> Option<String> {
     let runs = shared.db.list_runs(Some(key)).ok()?;
-    runs.iter()
+    let raw = runs
+        .iter()
         .rev()
         .find(|r| r.provider == provider)
         .and_then(|r| r.model.as_deref())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
+        .map(ToString::to_string)?;
+    let kind = shared
+        .config
+        .read()
+        .ok()?
+        .provider(provider)
+        .map(|p| p.kind.clone())
+        .unwrap_or_default();
+    proxy::accept_model_name(&kind, &raw).then_some(raw)
 }
 
 /// Apply a stored `/model <id>` override onto the provider used for this turn.
@@ -259,6 +269,23 @@ pub fn apply_session_model(provider: &mut crate::config::Provider, db: &Db, key:
             provider.model = m;
         }
     }
+    sanitize_spawn_model(provider);
+}
+
+/// Drop catalog-junk / alias `--model` values before CLI argv is built.
+pub fn sanitize_spawn_model(provider: &mut crate::config::Provider) {
+    if proxy::accept_model_name(&provider.kind, &provider.model) {
+        return;
+    }
+    if !provider.model.trim().is_empty() {
+        tracing::warn!(
+            provider = %provider.name,
+            kind = %provider.kind,
+            model = %provider.model,
+            "ignoring unusable --model"
+        );
+    }
+    provider.model.clear();
 }
 
 pub async fn run(shared: Arc<Shared>, opts: TuiOpts) -> Result<ExitCode> {
@@ -851,30 +878,26 @@ pub(crate) fn check_provider_available(shared: &Shared, key: &str) -> Result<()>
     Ok(())
 }
 
-pub(crate) fn collect_result(shared: &Shared, key: &str) -> TurnResult {
+/// Assistant bubble for the **latest** run only. Never falls back to
+/// `tasks.result_text` (that can be an older success — Rs-MBP painted
+/// Claude's "stray keystroke" over a dead grok run).
+pub fn collect_result(shared: &Shared, key: &str) -> TurnResult {
     let runs = shared.db.list_runs(Some(key)).unwrap_or_default();
     let last = runs.last();
     let ok = last
         .and_then(|r| r.outcome.as_deref())
         .is_some_and(|o| o == "success");
-    let text = last
-        .and_then(|r| {
-            let events = shared.db.events_for_run(r.id).ok()?;
-            crate::handoff::last_assistant_text(&events)
-        })
-        .or_else(|| {
-            shared
-                .db
-                .get_task(key)
-                .ok()
-                .flatten()
-                .map(|t| t.result_text)
-                .filter(|s| !s.trim().is_empty())
-        })
-        .unwrap_or_else(|| {
-            last.and_then(|r| r.outcome.clone())
-                .unwrap_or_else(|| "(no assistant text)".into())
-        });
+    let from_events = last.and_then(|r| {
+        let events = shared.db.events_for_run(r.id).ok()?;
+        crate::handoff::last_assistant_text(&events)
+    });
+    let text = if let Some(t) = from_events.filter(|s| !s.trim().is_empty()) {
+        t
+    } else {
+        last.and_then(|r| r.outcome.clone())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "(no assistant text)".into())
+    };
     let footer = footer_line(shared, key);
     let (provider, model) = last
         .map(|r| (r.provider.clone(), r.model.clone().unwrap_or_default()))
@@ -1132,5 +1155,33 @@ enabled = false
         let list = provider_list_short(&cfg);
         assert!(list.contains("claude"), "{list}");
         assert!(list.contains("grok (off)"), "{list}");
+    }
+
+    fn grok_provider(model: &str) -> crate::config::Provider {
+        let cfg = crate::config::parse_config_toml(&format!(
+            r#"
+[[provider]]
+name = "grok"
+kind = "grok"
+model = "{model}"
+enabled = true
+"#
+        ))
+        .unwrap();
+        cfg.provider("grok").unwrap().clone()
+    }
+
+    #[test]
+    fn available_is_never_a_spawn_model() {
+        let mut p = grok_provider("Available");
+        sanitize_spawn_model(&mut p);
+        assert!(
+            p.model.is_empty(),
+            "Available must not reach --model: {:?}",
+            p.model
+        );
+        let mut ok = grok_provider("grok-4.7");
+        sanitize_spawn_model(&mut ok);
+        assert_eq!(ok.model, "grok-4.7");
     }
 }

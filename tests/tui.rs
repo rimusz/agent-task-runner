@@ -176,6 +176,96 @@ async fn english_prompt_is_a_provider_turn_not_stray_keystroke() {
 }
 
 #[tokio::test]
+async fn zombie_run_stale_result_text_is_not_the_next_assistant() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", true, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    let stray =
+        "That looks like a stray keystroke — nothing for me to act on. What did you want to do?";
+    shared.db.upsert_task("cli-default", "", None).unwrap();
+    shared.db.set_status("cli-default", "failed").unwrap();
+    shared
+        .db
+        .set_task_result("cli-default", stray, "", None)
+        .unwrap();
+    let claude = shared
+        .db
+        .start_run("cli-default", "claude", "claude-opus-5-5")
+        .unwrap();
+    shared
+        .db
+        .insert_event(
+            claude,
+            "assistant",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"That looks like a stray keystroke — nothing for me to act on. What did you want to do?"}]}}"#,
+        )
+        .unwrap();
+    shared.db.finish_run(claude, "success", Some(0)).unwrap();
+    let grok = shared
+        .db
+        .start_run("cli-default", "grok", "Available")
+        .unwrap();
+    shared.db.set_run_pid(grok, 1_999_999_999).unwrap();
+    shared
+        .db
+        .enqueue_message("cli-default", "hello", "cli")
+        .unwrap();
+
+    let snap = tui::collect_result(&shared, "cli-default");
+    assert!(
+        !snap.text.to_ascii_lowercase().contains("stray keystroke"),
+        "latest run has no events; must not paint old result_text: {}",
+        snap.text
+    );
+
+    shared
+        .db
+        .meta_set(&tui::model_meta_key("cli-default", "grok"), "Available")
+        .unwrap();
+    let mut grok_p = shared
+        .config
+        .read()
+        .unwrap()
+        .provider("grok")
+        .unwrap()
+        .clone();
+    tui::apply_session_model(&mut grok_p, &shared.db, "cli-default");
+    assert!(
+        !grok_p.model.eq_ignore_ascii_case("available"),
+        "session Available must not become --model: {}",
+        grok_p.model
+    );
+    let strip = tui::composer_status_line(&shared, "cli-default");
+    assert!(
+        !strip.to_ascii_lowercase().contains("available"),
+        "last-run Available must not reach chrome: {strip}"
+    );
+
+    let code = tui::run_oneshot(
+        shared.clone(),
+        opts("what can you do for me?", Some("grok"), None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    let after = tui::collect_result(&shared, "cli-default");
+    assert!(
+        !after.text.to_ascii_lowercase().contains("stray keystroke"),
+        "new turn must not replay stale Claude result: {}",
+        after.text
+    );
+    let runs = shared.db.list_runs(Some("cli-default")).unwrap();
+    let last = runs.last().expect("new run");
+    assert_eq!(last.provider, "grok");
+    assert_eq!(last.outcome.as_deref(), Some("success"));
+    assert_ne!(last.model.as_deref(), Some("Available"));
+}
+
+#[tokio::test]
 async fn model_slash_is_atr_local_for_claude() {
     let (_dir, shared, _cfg) = no_serve(&[
         ("claude", true, "success"),

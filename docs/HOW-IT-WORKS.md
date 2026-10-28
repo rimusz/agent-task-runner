@@ -16,7 +16,11 @@ order. A bare `atr` / `atr tui` / `atr ask` follows the session pin, then
 never auto-dispatches `cli-*` TUI sessions. The TUI is the provider CLI
 with atr as the proxy (token cache / session reuse). Host chrome is
 slashes, pickers, and the transcript layout — atr does not invent chat
-replies. Default task key `cli-default` is the in-process session (not a
+replies. A dead or never-started run (`outcome` NULL, PID gone) is
+reclaimed so pending messages can run; the assistant bubble is the latest
+run only (never an older `tasks.result_text`). Catalog junk such as
+`Available` is rejected on spawn, not only the picker. Default task key
+`cli-default` is the in-process session (not a
 model) and is omitted from the title. Mouse capture is off so the
 terminal can select/copy. The TUI is a session host:
 `/provider` and `/model` are atr-local pickers (`/model` sets that

@@ -198,6 +198,7 @@ impl Shared {
             let needs = crate::task::parse_needs(&opts.needs)?;
             self.db.set_task_needs(key, &needs.join(","))?;
         }
+        let _ = crate::scheduler::reclaim_dead_open_run(self, key);
         let running = self.inflight.lock().unwrap().contains_key(key)
             || self.db.task_is_running(key)?
             || self.db.open_run_for_task(key)?.is_some();

@@ -58,6 +58,11 @@ pub async fn dispatch_available(shared: &Arc<Shared>) -> Result<()> {
 /// / `atr ask` so an in-process turn does not start leftover queued tasks,
 /// including `cli-*` sessions that serve never auto-dispatches.
 pub async fn dispatch_key(shared: &Arc<Shared>, key: &str) -> Result<()> {
+    // TUI / ask never run `reconcile_loop`. A dead CLI with `outcome` NULL
+    // would block forever (`open_run_for_task` → skip) while messages sit
+    // unconsumed. Reclaim first so this tick can start a real turn.
+    let _ = reclaim_dead_open_run(shared, key);
+    let _ = requeue_if_pending(shared, key);
     dispatch_matching(shared, Some(key)).await
 }
 
@@ -670,6 +675,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     if crate::tui::is_tui_key(&key) {
         crate::tui::apply_session_model(&mut provider, &shared.db, &key);
     }
+    crate::tui::sanitize_spawn_model(&mut provider);
     let task = shared
         .db
         .get_task(&key)?
@@ -1976,34 +1982,67 @@ pub async fn reconcile_loop(shared: std::sync::Arc<Shared>) {
     }
 }
 
+/// Fail an open run (`outcome` NULL) whose CLI is dead or never started.
+/// In-flight runs owned by this process are left alone. Does not overwrite
+/// a non-empty `tasks.result_text` (that may be an older success).
+pub fn reclaim_dead_open_run(shared: &Shared, key: &str) -> Result<bool> {
+    if shared.inflight.lock().unwrap().contains_key(key) {
+        return Ok(false);
+    }
+    let Some(run_id) = shared.db.open_run_for_task(key)? else {
+        return Ok(false);
+    };
+    let runs = shared.db.list_runs(Some(key))?;
+    let Some(r) = runs.into_iter().rev().find(|row| row.id == run_id) else {
+        return Ok(false);
+    };
+    let alive = r.pid.filter(|p| *p > 0).is_some_and(pid_alive);
+    if alive {
+        return Ok(false);
+    }
+    tracing::warn!(
+        run = r.id,
+        task = %key,
+        pid = ?r.pid,
+        "reclaiming dead or never-started run"
+    );
+    shared.db.finish_run(run_id, "failed", Some(-1))?;
+    if let Ok(Some(t)) = shared.db.get_task(key) {
+        if t.status == "running" {
+            shared.db.set_status(key, "failed")?;
+        }
+        if t.result_text.is_empty() {
+            let _ = shared
+                .db
+                .set_task_result(key, "orphaned run (process gone)", "", None);
+        }
+    }
+    Ok(true)
+}
+
+/// After a zombie is closed, pending messages must become `queued` or
+/// `runnable_keys` (status IN queued/waiting) will never see them.
+pub fn requeue_if_pending(shared: &Shared, key: &str) -> Result<bool> {
+    if shared.inflight.lock().unwrap().contains_key(key) {
+        return Ok(false);
+    }
+    if shared.db.open_run_for_task(key)?.is_some() {
+        return Ok(false);
+    }
+    if shared.db.pending_messages(key)?.is_empty() {
+        return Ok(false);
+    }
+    shared.db.queue_unless_running(key)
+}
+
 pub fn reconcile(shared: &Shared) -> Result<usize> {
     let runs = shared.db.open_runs()?;
     let mut n = 0;
+    let mut touched: Vec<String> = Vec::new();
     for r in runs {
-        if shared.inflight.lock().unwrap().contains_key(&r.task_key) {
-            continue;
-        }
-        let alive = r.pid.map(pid_alive).unwrap_or(false);
-        if !alive {
-            tracing::warn!(
-                run = r.id,
-                task = %r.task_key,
-                pid = ?r.pid,
-                "reconciling run whose PID is gone"
-            );
-            shared.db.finish_run(r.id, "failed", Some(-1))?;
-            if let Ok(Some(t)) = shared.db.get_task(&r.task_key) {
-                if t.result_text.is_empty() {
-                    let _ = shared.db.set_task_result(
-                        &r.task_key,
-                        "orphaned run (process gone)",
-                        "",
-                        None,
-                    );
-                }
-            }
-            shared.db.set_status(&r.task_key, "failed")?;
+        if reclaim_dead_open_run(shared, &r.task_key)? {
             n += 1;
+            touched.push(r.task_key);
         }
     }
     for t in shared.db.list_tasks()? {
@@ -2042,6 +2081,10 @@ pub fn reconcile(shared: &Shared) -> Result<usize> {
         }
         shared.db.set_status(&t.key, "failed")?;
         n += 1;
+        touched.push(t.key);
+    }
+    for key in touched {
+        let _ = requeue_if_pending(shared, &key);
     }
     Ok(n)
 }
@@ -2801,6 +2844,56 @@ cli = "{cli}"
             t.result_text
         );
     }
+
+    #[test]
+    fn reclaim_dead_open_run_requeues_pending_without_clobbering_result_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_for_reconcile(dir.path());
+        shared.db.upsert_task("cli-default", "", None).unwrap();
+        shared.db.set_status("cli-default", "failed").unwrap();
+        shared
+            .db
+            .set_task_result(
+                "cli-default",
+                "That looks like a stray keystroke — nothing for me to act on. What did you want to do?",
+                "",
+                None,
+            )
+            .unwrap();
+        let run = shared
+            .db
+            .start_run("cli-default", "grok", "Available")
+            .unwrap();
+        shared.db.set_run_pid(run, 1_999_999_999).unwrap();
+        shared
+            .db
+            .enqueue_message("cli-default", "what can you do for me?", "cli")
+            .unwrap();
+        assert!(shared
+            .db
+            .open_run_for_task("cli-default")
+            .unwrap()
+            .is_some());
+        assert!(reclaim_dead_open_run(&shared, "cli-default").unwrap());
+        assert!(shared
+            .db
+            .open_run_for_task("cli-default")
+            .unwrap()
+            .is_none());
+        let t = shared.db.get_task("cli-default").unwrap().unwrap();
+        assert!(
+            t.result_text.contains("stray keystroke"),
+            "do not clobber older success: {}",
+            t.result_text
+        );
+        assert!(requeue_if_pending(&shared, "cli-default").unwrap());
+        assert_eq!(
+            shared.db.get_task("cli-default").unwrap().unwrap().status,
+            "queued"
+        );
+        assert_eq!(shared.db.pending_messages("cli-default").unwrap().len(), 1);
+    }
+
     #[test]
     fn provider_hint_wins_over_config_order() {
         // Regression: `atr add --provider grok` must go to grok even though
