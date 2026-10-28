@@ -1288,11 +1288,15 @@ async fn repo_slash_resolves_and_clears_bound_session() {
     .await
     .unwrap();
     let task = shared.db.get_task("cli-default").unwrap().unwrap();
+    assert_eq!(task.workspace_kind, "git", "{task:?}");
     assert!(
-        task.repo.as_deref().is_some_and(|s| !s.is_empty())
-            || task.worktree.as_deref().is_some_and(|s| !s.is_empty())
-            || task.session_id.as_deref().is_some_and(|s| !s.is_empty()),
-        "oneshot --repo should bind the cli-* task: {task:?}"
+        task.repo.as_deref().is_some_and(|s| !s.is_empty()),
+        "oneshot --repo should bind the cli-* task repo: {task:?}"
+    );
+    let wt = task.worktree.as_deref().unwrap_or("");
+    assert!(
+        !wt.is_empty() && !wt.contains("/_none/") && !wt.ends_with("/_none"),
+        "spawn cwd must not stay answer-only _none: {task:?}"
     );
 
     let cleared = tui::preview_line(&shared, "cli-default", "/repo none").unwrap();
@@ -1352,6 +1356,51 @@ async fn repo_slash_resolves_and_clears_bound_session() {
         bound.contains("atr-pr65") || bound.contains("watched"),
         "{bound}"
     );
+}
+
+#[tokio::test]
+async fn repo_pick_binds_next_turn_spawn_cwd() {
+    let (_dir, shared, _) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    tui::run_oneshot(shared.clone(), opts("hello none", None, None))
+        .await
+        .unwrap();
+    let before = shared.db.get_task("cli-default").unwrap().unwrap();
+    let none_wt = before.worktree.as_deref().unwrap_or("").to_string();
+    assert!(
+        none_wt.contains("_none"),
+        "answer-only first turn uses _none: {before:?}"
+    );
+
+    let repo = shared.config.read().unwrap().repo_path.clone();
+    let picked =
+        tui::preview_line(&shared, "cli-default", &format!("/repo {}", repo.display())).unwrap();
+    assert!(picked.contains("git "), "{picked}");
+    assert!(
+        shared.db.get_task("cli-default").unwrap().is_none(),
+        "switching from _none must reset the leftover task"
+    );
+
+    tui::run_session_turn(shared.clone(), "default", "analyze the code")
+        .await
+        .unwrap();
+    let after = shared.db.get_task("cli-default").unwrap().unwrap();
+    assert_eq!(after.workspace_kind, "git", "{after:?}");
+    let wt = after.worktree.as_deref().unwrap_or("");
+    assert!(
+        !wt.contains("_none"),
+        "spawn cwd must leave _none: {after:?}"
+    );
+    assert!(
+        atr::worktree::is_git_repo(Path::new(wt)),
+        "spawn cwd must be a git worktree: {wt}"
+    );
+    assert_ne!(wt, none_wt);
 }
 
 fn setup_bin_cfg() -> (TempDir, std::path::PathBuf) {

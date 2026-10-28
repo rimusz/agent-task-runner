@@ -309,8 +309,16 @@ pub async fn run(shared: Arc<Shared>, opts: TuiOpts) -> Result<ExitCode> {
     }
     if opts.new {
         reset_session(&shared, &key)?;
+        save_workspace(
+            &shared,
+            &key,
+            &Workspace {
+                kind: WorkspaceKind::None,
+                repo: None,
+            },
+        );
     }
-    let ws = resolve_workspace(&shared, &opts)?;
+    let ws = resolve_workspace(&shared, &key, &opts)?;
     save_workspace(&shared, &key, &ws);
     warn_if_no_provider(
         &shared,
@@ -342,6 +350,20 @@ pub async fn run(shared: Arc<Shared>, opts: TuiOpts) -> Result<ExitCode> {
 pub async fn run_oneshot(shared: Arc<Shared>, mut opts: TuiOpts) -> Result<ExitCode> {
     opts.require_prompt = true;
     run(shared, opts).await
+}
+
+/// Next turn using the persisted `/repo` workspace (same as interactive Enter).
+pub async fn run_session_turn(
+    shared: Arc<Shared>,
+    session: &str,
+    text: &str,
+) -> Result<TurnResult> {
+    let key = tui_task_key(session)?;
+    let ws = load_workspace(&shared, &key).unwrap_or(Workspace {
+        kind: WorkspaceKind::None,
+        repo: None,
+    });
+    run_turn(&shared, &key, &ws, text, None).await
 }
 
 fn interactive_tty() -> bool {
@@ -760,7 +782,7 @@ fn print_oneshot(out: &TurnResult) -> Result<()> {
     Ok(())
 }
 
-fn resolve_workspace(shared: &Shared, opts: &TuiOpts) -> Result<Workspace> {
+fn resolve_workspace(shared: &Shared, key: &str, opts: &TuiOpts) -> Result<Workspace> {
     if let Some(d) = &opts.dir {
         let p = task::resolve_dir(&d.display().to_string())?;
         return Ok(Workspace {
@@ -770,6 +792,9 @@ fn resolve_workspace(shared: &Shared, opts: &TuiOpts) -> Result<Workspace> {
     }
     if let Some(r) = opts.repo.as_deref() {
         return resolve_repo_spec(shared, r);
+    }
+    if let Some(ws) = load_workspace(shared, key) {
+        return Ok(ws);
     }
     Ok(Workspace {
         kind: WorkspaceKind::None,
@@ -833,7 +858,9 @@ fn switch_workspace(shared: &Shared, key: &str, ws: &mut Workspace, next: Worksp
     if workspace_same(ws, &next) {
         return Ok(());
     }
-    if session_is_bound(shared, key)? {
+    // Any existing cli-* row (even a leftover answer-only `_none` tree)
+    // must die so the next spawn cannot resume that cwd / grok session.
+    if shared.db.get_task(key)?.is_some() {
         reset_session(shared, key)?;
     }
     if next.kind == WorkspaceKind::Git {
@@ -857,35 +884,54 @@ fn workspace_same(a: &Workspace, b: &Workspace) -> bool {
     }
 }
 
-fn session_is_bound(shared: &Shared, key: &str) -> Result<bool> {
+/// Drop a leftover `_none` tree / provider session when chrome is now git/dir
+/// so the next dispatch cannot resume answer-only cwd.
+fn reconcile_task_workspace(shared: &Shared, key: &str, ws: &Workspace) -> Result<()> {
     let Some(t) = shared.db.get_task(key)? else {
-        return Ok(false);
+        return Ok(());
     };
-    if t.repo.as_deref().is_some_and(|s| !s.trim().is_empty()) {
-        return Ok(true);
+    if workspace_matches_task(&t, ws) {
+        return Ok(());
     }
-    if t.worktree.as_deref().is_some_and(|s| !s.trim().is_empty()) {
-        return Ok(true);
+    let running = t.status == "running" || shared.inflight.lock().unwrap().contains_key(key);
+    if running {
+        return Ok(());
     }
-    if t.session_id
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty())
-    {
-        return Ok(true);
+    forget_task_sessions(shared, key)?;
+    shared.db.clear_worktree(key)?;
+    Ok(())
+}
+
+fn workspace_matches_task(t: &crate::db::Task, ws: &Workspace) -> bool {
+    let kind = WorkspaceKind::parse(&t.workspace_kind)
+        .unwrap_or_else(|_| task::infer_workspace_kind(t.repo.as_deref().unwrap_or("")));
+    if kind != ws.kind {
+        return false;
     }
-    let cfg = shared.config.read().unwrap().clone();
-    for p in &cfg.providers {
-        if shared
-            .db
-            .task_session(key, &p.name)
-            .ok()
-            .flatten()
-            .is_some_and(|s| !s.trim().is_empty())
-        {
-            return Ok(true);
+    match ws.kind {
+        WorkspaceKind::None => !t
+            .worktree
+            .as_deref()
+            .is_some_and(|w| !crate::worktree::is_none_workspace(Path::new(w)) && !w.is_empty()),
+        WorkspaceKind::Dir | WorkspaceKind::Git => {
+            let want = ws.repo.as_deref().unwrap_or("");
+            let have = t.repo.as_deref().unwrap_or("");
+            !want.is_empty()
+                && crate::config::paths_eq(Path::new(have), Path::new(want))
+                && t.worktree
+                    .as_deref()
+                    .is_none_or(|w| !crate::worktree::is_none_workspace(Path::new(w)))
         }
     }
-    Ok(false)
+}
+
+fn forget_task_sessions(shared: &Shared, key: &str) -> Result<()> {
+    let cfg = shared.config.read().unwrap().clone();
+    for p in &cfg.providers {
+        let _ = shared.db.set_provider_session(key, Some(&p.name), None);
+    }
+    let _ = shared.db.set_provider_session(key, None, None);
+    Ok(())
 }
 
 fn save_workspace(shared: &Shared, key: &str, ws: &Workspace) {
@@ -1105,6 +1151,7 @@ pub(crate) fn enqueue_turn(
     let cfg = shared.config.read().unwrap().clone();
     task::check_prompt_bytes(text, cfg.max_prompt_bytes)?;
     let none = ws.kind == WorkspaceKind::None;
+    reconcile_task_workspace(shared, key, ws)?;
     let _ = shared.submit_with(
         key,
         text,

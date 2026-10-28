@@ -754,10 +754,12 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             }
             // Compare arms get their own worktree (never a pool slot), and a
             // promoted compare parent keeps the winner's tree.
-            let own_tree = task
-                .worktree
-                .as_deref()
-                .filter(|w| !task.compare_decision.is_empty() && std::path::Path::new(w).exists());
+            // Never reuse an answer-only `_none` scratch path as a git tree.
+            let own_tree = task.worktree.as_deref().filter(|w| {
+                !task.compare_decision.is_empty()
+                    && std::path::Path::new(w).exists()
+                    && !worktree::is_none_workspace(std::path::Path::new(w))
+            });
             if let Some(w) = own_tree {
                 std::path::PathBuf::from(w)
             } else if task.role == crate::compare::ARM_ROLE {
@@ -769,12 +771,16 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                     &base_branch,
                 )?
             } else if cfg.cache.worktree_pool {
+                let existing_wt = task
+                    .worktree
+                    .as_deref()
+                    .filter(|w| !worktree::is_none_workspace(std::path::Path::new(w)));
                 let slot = pick_pool_slot(
                     &shared,
                     &repo,
                     &provider.name,
                     &key,
-                    task.worktree.as_deref(),
+                    existing_wt,
                     provider.max_parallel.max(1),
                 );
                 let dest =
@@ -812,6 +818,11 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         worktree::ensure_worktree_no_push(&wt)?;
     }
     shared.db.set_worktree(&key, &wt.display().to_string())?;
+    if spawn_workspace_changed(task.worktree.as_deref(), &wt) {
+        let _ = shared
+            .db
+            .set_provider_session(&key, Some(&provider.name), None);
+    }
     crate::intake::materialize_attachments(&cfg.state_db, &key, &wt)?;
 
     if task.role == "plan" {
@@ -1780,6 +1791,13 @@ fn grok_fork_from(
         Ok(session.filter(|s| !s.is_empty()).map(|s| s.to_string()))
     } else {
         Ok(None)
+    }
+}
+
+fn spawn_workspace_changed(previous: Option<&str>, next: &std::path::Path) -> bool {
+    match previous.map(str::trim).filter(|s| !s.is_empty()) {
+        None => false,
+        Some(prev) => !crate::config::paths_eq(std::path::Path::new(prev), next),
     }
 }
 

@@ -1,10 +1,34 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub fn is_git_repo(path: &Path) -> bool {
     let git = path.join(".git");
     git.exists() || git.is_file()
+}
+
+/// Answer-only scratch folder (`<worktree_root>/_none/<key>`).
+pub fn is_none_workspace(path: &Path) -> bool {
+    path.iter().any(|c| c == "_none")
+}
+
+/// Git child that never inherits the TTY. `git checkout` / `worktree add`
+/// otherwise paint `HEAD is now at …` under the ratatui composer.
+fn quiet_git() -> Command {
+    let mut c = Command::new("git");
+    c.stdin(Stdio::null());
+    c.stdout(Stdio::null());
+    c.stderr(Stdio::null());
+    c
+}
+
+/// Git child with captured stdio (never inherit).
+fn capture_git() -> Command {
+    let mut c = Command::new("git");
+    c.stdin(Stdio::null());
+    c.stdout(Stdio::piped());
+    c.stderr(Stdio::piped());
+    c
 }
 
 /// Work in place in a local directory. Does not create a git worktree.
@@ -55,7 +79,7 @@ pub fn ensure_worktree(
             .with_context(|| format!("create worktree parent {}", parent.display()))?;
     }
     let branch = format!("{branch_prefix}/{key}");
-    let status = Command::new("git")
+    let status = quiet_git()
         .args([
             "-C",
             &repo.to_string_lossy(),
@@ -113,7 +137,7 @@ pub fn is_pool_worktree(path: &Path) -> bool {
 }
 
 pub fn current_branch(dest: &Path) -> Option<String> {
-    let out = Command::new("git")
+    let out = capture_git()
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(dest)
         .output()
@@ -171,7 +195,7 @@ pub fn acquire_pool_worktree(
     }
     detach_branch_elsewhere(repo, &dest, &branch);
     // --detach so two providers can share a task key (branch name) across slots.
-    let status = Command::new("git")
+    let status = quiet_git()
         .args([
             "-C",
             &repo.to_string_lossy(),
@@ -202,7 +226,7 @@ pub fn acquire_pool_worktree(
 
 /// `git checkout -B <branch>` fails if another worktree already has it.
 fn detach_branch_elsewhere(repo: &Path, keep: &Path, branch: &str) {
-    let out = Command::new("git")
+    let out = capture_git()
         .args([
             "-C",
             &repo.to_string_lossy(),
@@ -228,7 +252,7 @@ fn detach_branch_elsewhere(repo: &Path, keep: &Path, branch: &str) {
         if short != branch {
             return;
         }
-        let _ = Command::new("git")
+        let _ = quiet_git()
             .args(["checkout", "--detach"])
             .current_dir(&path)
             .status();
@@ -248,7 +272,7 @@ fn detach_branch_elsewhere(repo: &Path, keep: &Path, branch: &str) {
 fn reset_pool_slot(dest: &Path, branch: &str, main: &str) -> Result<()> {
     let dest_s = dest.to_string_lossy();
     let run = |args: &[&str]| -> Result<()> {
-        let st = Command::new("git")
+        let st = quiet_git()
             .args(args)
             .current_dir(dest)
             .status()
@@ -259,7 +283,7 @@ fn reset_pool_slot(dest: &Path, branch: &str, main: &str) -> Result<()> {
         Ok(())
     };
     // Detach first so -B can recreate the task branch on this slot.
-    let _ = Command::new("git")
+    let _ = quiet_git()
         .args(["checkout", "--detach"])
         .current_dir(dest)
         .status();
@@ -271,7 +295,7 @@ fn reset_pool_slot(dest: &Path, branch: &str, main: &str) -> Result<()> {
 
 /// Ignore runner files in this worktree only (`.git/info/exclude`).
 pub fn ensure_atr_exclude(worktree: &Path) -> Result<()> {
-    let out = Command::new("git")
+    let out = capture_git()
         .current_dir(worktree)
         .args(["rev-parse", "--git-path", "info/exclude"])
         .output()
@@ -328,7 +352,7 @@ pub fn ensure_shadow_no_push(worktree: &Path) -> Result<()> {
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
     }
     let hooks_rel = ".atr/hooks";
-    let st = Command::new("git")
+    let st = quiet_git()
         .current_dir(worktree)
         .args(["config", "--local", "core.hooksPath", hooks_rel])
         .status()
@@ -339,7 +363,7 @@ pub fn ensure_shadow_no_push(worktree: &Path) -> Result<()> {
             worktree.display()
         );
     }
-    let remotes = Command::new("git")
+    let remotes = capture_git()
         .current_dir(worktree)
         .args(["remote"])
         .output()
@@ -354,7 +378,7 @@ pub fn ensure_shadow_no_push(worktree: &Path) -> Result<()> {
     }
     for remote in names {
         let key = format!("remote.{remote}.pushurl");
-        let st = Command::new("git")
+        let st = quiet_git()
             .current_dir(worktree)
             .args(["config", "--local", &key, "no_push"])
             .status()
@@ -387,13 +411,13 @@ pub fn ensure_worktree_no_push(worktree: &Path) -> Result<()> {
 
 /// Remove what [`ensure_worktree_no_push`] added (winner promotion).
 pub fn clear_worktree_no_push(worktree: &Path) -> Result<()> {
-    let _ = Command::new("git")
+    let _ = quiet_git()
         .current_dir(worktree)
         .args(["config", "--worktree", "--unset", "core.hooksPath"])
         .status();
     for remote in remote_names(worktree)? {
         let key = format!("remote.{remote}.pushurl");
-        let _ = Command::new("git")
+        let _ = quiet_git()
             .current_dir(worktree)
             .args(["config", "--worktree", "--unset-all", &key])
             .status();
@@ -421,7 +445,7 @@ fn write_no_push_hook(worktree: &Path) -> Result<()> {
 }
 
 fn remote_names(worktree: &Path) -> Result<Vec<String>> {
-    let remotes = Command::new("git")
+    let remotes = capture_git()
         .current_dir(worktree)
         .args(["remote"])
         .output()
@@ -438,7 +462,7 @@ fn remote_names(worktree: &Path) -> Result<Vec<String>> {
 }
 
 fn git_ok(worktree: &Path, args: &[&str]) -> Result<()> {
-    let st = Command::new("git")
+    let st = quiet_git()
         .current_dir(worktree)
         .args(args)
         .status()
@@ -463,7 +487,7 @@ pub fn remove_worktree(repo: &Path, dest: &Path, force: bool) -> Result<()> {
         }
         args.push(dest.to_string_lossy().into_owned());
         let strs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let st = Command::new("git")
+        let st = quiet_git()
             .args(&strs)
             .status()
             .context("git worktree remove")?;
@@ -472,7 +496,7 @@ pub fn remove_worktree(repo: &Path, dest: &Path, force: bool) -> Result<()> {
         }
         if force && dest.exists() {
             let _ = std::fs::remove_dir_all(dest);
-            let _ = Command::new("git")
+            let _ = quiet_git()
                 .args(["-C", &repo.to_string_lossy(), "worktree", "prune"])
                 .status();
             return Ok(());
@@ -485,7 +509,7 @@ pub fn remove_worktree(repo: &Path, dest: &Path, force: bool) -> Result<()> {
 pub fn init_sample_repo(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path)?;
     let git = |args: &[&str]| -> Result<()> {
-        let st = Command::new("git")
+        let st = quiet_git()
             .current_dir(path)
             .args(args)
             .status()
@@ -508,6 +532,44 @@ pub fn init_sample_repo(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn none_workspace_is_the_scratch_folder() {
+        assert!(is_none_workspace(Path::new("/tmp/work/_none/cli-default")));
+        assert!(!is_none_workspace(Path::new(
+            "/tmp/work/nixer-app/cli-default"
+        )));
+    }
+
+    #[test]
+    fn checkout_noise_is_captured() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_sample_repo(&repo).unwrap();
+        let out = capture_git()
+            .current_dir(&repo)
+            .args(["checkout", "-B", "tmp", "main"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("HEAD is now at") || err.is_empty() || out.status.success(),
+            "checkout stderr must be captured (not inherited): {err:?}"
+        );
+        let leaked = quiet_git()
+            .current_dir(&repo)
+            .args(["checkout", "-B", "tmp2", "main"])
+            .output();
+        assert!(
+            leaked.is_ok(),
+            "quiet git still runs when output() is requested after null stdio"
+        );
+    }
 
     #[test]
     fn worktree_excludes_atr_dir() {

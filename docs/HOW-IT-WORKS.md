@@ -40,7 +40,8 @@ The under-input strip and `/status` show the real workspace kind
 process cwd when the session is answer-only. `/repo` picks a config git
 root (serve optional; `[[repo]]` plus one-level git children of a
 shorthand `repo_path` mega-folder), `/repo .` the cwd git root,
-`/repo none` answer-only.
+`/repo none` answer-only. The next provider turn's cwd is that workspace
+(not leftover `_none/<session>`).
 User turns are prefixed `>` with a right-aligned local clock; replies have no role chip. Tracing INFO never paints
 on the TUI composer — it goes to `[log] path` (or
 `~/Library/Logs/atr/atr.log` / `~/.local/share/atr/atr.log`).
