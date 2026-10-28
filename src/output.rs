@@ -52,7 +52,7 @@ pub fn git_diff(wt: &Path) -> String {
     if !crate::worktree::is_git_repo(wt) {
         return String::new();
     }
-    let staged = Command::new("git")
+    let staged = crate::util::git_capture()
         .args(["diff", "HEAD"])
         .current_dir(wt)
         .output();
@@ -209,7 +209,7 @@ fn push_branch(task: &Task) -> Result<()> {
     if !crate::worktree::is_git_repo(wt) {
         anyhow::bail!("branch output needs a git worktree");
     }
-    let status = Command::new("git")
+    let status = crate::util::git_command()
         .args(["push", "-u", "origin", "HEAD"])
         .current_dir(wt)
         .status();

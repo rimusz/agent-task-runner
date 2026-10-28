@@ -2,8 +2,81 @@ use crate::config::LogConfig;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::fmt::MakeWriter;
+
+/// When true, the console tracing layer drops writes (TUI owns the tty).
+static TUI_CONSOLE_QUIET: AtomicBool = AtomicBool::new(false);
+
+/// Silence stderr tracing while the ratatui host owns the terminal.
+/// Restores the previous flag on drop so line-mode / `atr ask` still log.
+pub struct TuiConsoleQuiet(bool);
+
+impl TuiConsoleQuiet {
+    pub fn enter() -> Self {
+        let prev = TUI_CONSOLE_QUIET.swap(true, Ordering::Relaxed);
+        Self(prev)
+    }
+}
+
+impl Drop for TuiConsoleQuiet {
+    fn drop(&mut self) {
+        TUI_CONSOLE_QUIET.store(self.0, Ordering::Relaxed);
+    }
+}
+
+pub fn tui_console_is_quiet() -> bool {
+    TUI_CONSOLE_QUIET.load(Ordering::Relaxed)
+}
+
+/// Default file when `[log] path` is empty (TUI / ask still need a sink).
+pub fn default_cli_log_path() -> PathBuf {
+    match std::env::var_os("HOME") {
+        Some(home) if cfg!(target_os = "macos") => {
+            PathBuf::from(home).join("Library/Logs/atr/atr.log")
+        }
+        Some(home) => PathBuf::from(home).join(".local/share/atr/atr.log"),
+        None => PathBuf::from("atr.log"),
+    }
+}
+
+/// File + gated stderr. Empty path uses [`default_cli_log_path`].
+pub fn init_session_tracing(log: &LogConfig) {
+    let mut log = log.clone();
+    if log.path.as_os_str().is_empty() {
+        log.path = default_cli_log_path();
+    }
+    init_tracing(Some(&log));
+}
+
+/// Stderr writer that no-ops while [`TuiConsoleQuiet`] is held.
+#[derive(Clone, Copy, Debug, Default)]
+struct GatedStderr;
+
+impl Write for GatedStderr {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if TUI_CONSOLE_QUIET.load(Ordering::Relaxed) {
+            return Ok(buf.len());
+        }
+        io::stderr().write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if TUI_CONSOLE_QUIET.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        io::stderr().flush()
+    }
+}
+
+impl<'a> MakeWriter<'a> for GatedStderr {
+    type Writer = GatedStderr;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        GatedStderr
+    }
+}
 
 struct Inner {
     path: PathBuf,
@@ -132,6 +205,7 @@ pub fn init_tracing(log: Option<&LogConfig>) {
 
     let env = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let stderr = tracing_subscriber::fmt::layer()
+        .with_writer(GatedStderr)
         .with_target(false)
         .compact();
     if let Some(cfg) = log {
@@ -191,6 +265,64 @@ mod tests {
                 .unwrap_or_default()
                 .len();
         assert!(total > 32, "writes must survive rotation ({total})");
+    }
+
+    #[test]
+    fn tui_quiet_drops_console_tracing_info() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                if tui_console_is_quiet() {
+                    return Ok(buf.len());
+                }
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(Buf(buf.clone()))
+            .with_target(false)
+            .compact()
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let _quiet = TuiConsoleQuiet::enter();
+            assert!(tui_console_is_quiet());
+            tracing::info!(
+                task = "cli-default",
+                source = "cli",
+                "queued follow-up; live run not interrupted"
+            );
+        });
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            !text.contains("queued follow-up"),
+            "TUI console must not paint INFO: {text:?}"
+        );
+        assert!(!tui_console_is_quiet());
+    }
+
+    #[test]
+    fn default_cli_log_path_is_under_home() {
+        let p = default_cli_log_path();
+        let s = p.to_string_lossy();
+        assert!(
+            s.ends_with("atr.log"),
+            "expected a file named atr.log, got {s}"
+        );
     }
 
     #[test]

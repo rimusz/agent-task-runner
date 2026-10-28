@@ -57,6 +57,46 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   with a different request is 409. Optional `files` are stored under the state
   directory and copied into the worktree by filename once the tree exists.
 - **CLI:** `atr add` (prompt + `--dir` / `--repo` / neither) and `atr submit`.
+- **TUI / ask:** a bare `atr` (or `atr tui`) is an interactive in-process
+  chat TUI (ratatui transcript + composer + under-input status strip). `atr ask "prompt"` is
+  the one-shot / CI entrypoint on the same engine (no alternate screen).
+  The TUI is the provider CLI; atr proxies the turn and keeps the prompt
+  cache / session. A session is a normal task keyed `cli-<name>` (default
+  `cli-default` — the in-process TUI session, not a model; chrome omits it),
+  separate from Telegram `tg<chat>`. Serve is not required and never
+  auto-dispatches `cli-*` keys — serve owns daemon work; the TUI / `ask`
+  process owns those sessions. Provider: session pin → `--provider` →
+  optional `[tui] providers` → global `[[provider]]` order.   `/provider`
+  and `/model` are atr-local (list/pick). `/repo` is the mid-session git
+  workspace picker (config `[[repo]]` roots; `/repo .`; `/repo none`).
+  `/model` sets a per-session,
+  per-provider `--model` override from that provider's session / config /
+  detect / last-run / a cached CLI `models` catalog
+  (Grok / OpenCode / Cursor `id - Label`; Claude documented full ids
+  only, no bare aliases; Codex reads
+  `~/.codex/models_cache.json` slugs — never spawn its TUI). Host
+  `/provider` `/model` `/effort` `/context` `/repo` do not append to the transcript.
+  `/effort` / `/context` are per-provider session knobs applied on the next
+  spawn (grok `--effort`, claude `--effort`/`--autocompact`, cursor
+  parameterized `--model`, codex `-c model_reasoning_effort`). Empty
+  `/effort` opens the list only when that kind has a real effort flag.
+  Bare `/context` always opens the shared size catalog; apply is claude
+  `--autocompact` / cursor brackets only — grok/codex get an honesty
+  note (no invented argv). Refresh is off the UI thread — never
+  forwarded as a headless chat prompt. The TUI overlay does not dump the
+  catalog into the transcript. The under-input strip shows the same
+  session `provider / model` as `/status` (plus tok/cache and honest
+  workspace kind: `answer-only` / `dir …` / `git …`). Transcript user rows are `>` plus a right-aligned local clock;
+  assistant text has no `You` / `atr` chip. `/` opens an atr-local command menu; ↑/↓
+  in the composer walk input history. PgUp/PgDn page the transcript by the
+  viewport (mouse capture stays off). Enter while a turn is busy parks
+  composer lines locally (FIFO); host slashes still run. After idle, the
+  oldest parked line sends like idle Enter — not to the live CLI stdin.
+  Ctrl+C quits atr (same as `/quit`);
+  Esc dismisses overlays only. Other `/…` lines may be proxied. `/cli`
+  opens the provider's own interactive TUI. A full PTY host of the vendor
+  TUI is out of scope: atr still spawns print-mode / `exec` / `run` per
+  turn.
 - **MCP:** `atr mcp` is stdio (local agents or SSH). Streamable HTTP is
   `POST /mcp` on the existing listener (localhost by default; Tailscale bind
   is optional). HTTP requires a bearer token from `mcp.token_env` (default

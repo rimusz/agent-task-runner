@@ -15,7 +15,7 @@ broken. Each non-ok line prints a `fix:` hint.
 
 | Check | warn means | FAIL means | Fix |
 |---|---|---|---|
-| `config` | — | config could not load | `atr init`, or fix the TOML error it prints |
+| `config` | — | config could not load | On a TTY, `atr` / `atr tui` / `atr ask` offer `atr init`. Otherwise run `atr init` (or `atr init --yes`), or fix the TOML error it prints |
 | `config keys` | the file has keys this atr does not know (they are ignored); the line names each one and the nearest valid key | — | Fix the typo, delete the key, or upgrade atr if the key belongs to a newer version (normal after a rollback) |
 | `lessons` | lessons are on but the reflect provider (`[lessons] provider`, else the driver) is missing or disabled: only manual lessons get added | — | Set `[lessons] provider` to an enabled provider, or enable the driver |
 | `compare` | `[verify]` is on but some repos have no verify commands: compare can't judge there and `atr add --compare` refuses | — | Set `[verify] commands` or a `[[verify.repo]]` entry with commands |
@@ -94,6 +94,7 @@ with it.
 | macOS | `~/Library/Logs/atr/atr.log` (`[log] path`), startup errors in `~/Library/Logs/atr.boot.err` |
 | Linux | `journalctl --user -u atr -f`, plus `[log] path` (default `~/.local/share/atr/atr.log`) |
 | Both | `atr logs -f` follows `[log] path` |
+| TUI | Tracing never writes to the TUI (composer / transcript). Follow `[log] path`. |
 
 Search for `ERROR`, `GitHub auth failure`, `github poll failed`, `telegram`.
 
@@ -149,6 +150,16 @@ owner's env var, ok/warn/fail and days left without printing values.
 - Commands missing from the `/` menu: atr registers them with setMyCommands at
   start; restart atr (`atr service restart`) and reopen the chat.
 - Very long replies arrive as `reply.md` (more than 4 message parts).
+
+## 6b. Terminal TUI
+
+- A bare `atr` / `atr tui` is the interactive chat TUI. `atr ask "prompt"` is one-shot / CI (no alternate screen). Both run the engine in-process and do **not** need `atr serve`. Without a TTY, `atr tui` uses line mode.
+- Timestamped `INFO queued follow-up` lines must not appear on the composer. Those go to `[log] path`. User turns are prefixed `>` with a local clock; replies have no role chip. Plain English is a provider turn. A dead CLI whose run `ended`/`outcome` is still NULL is reclaimed so the next message can run; the assistant bubble is the **latest** run only (never an older `tasks.result_text`). Mouse is not captured — use the terminal’s selection to copy.
+- Slash: `/provider` `/model` `/effort` `/context` `/repo` `/new` `/quit` `/status` `/help` `/cli` are atr-local. `/model` changes atr's session model for the **current** provider only (never sent as Claude/Cursor chat; the TUI picker is an overlay, not a transcript dump). `/effort` and `/context` set per-provider spawn knobs (next argv only). Empty `/effort` opens the list when that kind has real effort flags; otherwise the note. Bare `/context` always opens the shared size catalog; apply is claude `--autocompact` / cursor model brackets only — grok/codex get an honesty note, not a skipped picker. Switching `/provider` restores that provider's last session model. The under-input strip shows that provider/model (same source as `/status`) plus the honest workspace kind (`answer-only` / `dir …` / `git …`). `/repo` picks a config git root (`[[repo]]`; serve optional), `/repo .` the cwd git root, `/repo none` answer-only. `/model` lists real ids (`cursor-agent models` `id - Label`, grok bullets, OpenCode `provider/model`); Claude seeds documented full ids (`claude-sonnet-5-5`, …; no bare aliases); Codex reads `~/.codex/models_cache.json` slugs (does not spawn its TUI). `/provider` `/model` `/effort` `/context` `/repo` do not append to the transcript. Other `/…` go to the provider CLI. Never an "unknown command" for a known slash. Ctrl+C quits atr; Esc only dismisses menus.
+- No config yet: on a TTY, atr offers the normal `atr init` (including whether to install the user service) then continues (`Starting atr tui…` / `atr ask`). Without a TTY it exits with a pointer to `atr init` / `atr init --yes` (no auto `--yes`).
+- Session keys are `cli-<name>` (default `cli-default` — internal TUI session, not a model). Serve never starts those tasks. Chrome omits the default key.
+- No enabled provider: atr prints which CLIs it saw and how to sign in / `atr providers detect` / enable. `atr ask` exits non-zero; the TUI asks whether to continue anyway.
+- `atr serve` is still an explicit subcommand; a bare `atr` is the TUI.
 
 ## 7. Notify hook
 

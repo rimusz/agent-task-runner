@@ -17,7 +17,7 @@ use std::time::Duration;
 fn notify_run(cfg: &crate::config::TelegramConfig, body: &str, shadow: bool) {
     if body
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-        .any(crate::telegram::is_assistant_key)
+        .any(|k| crate::telegram::is_assistant_key(k) || crate::tui::is_tui_key(k))
     {
         return;
     }
@@ -51,8 +51,38 @@ pub async fn scheduler_loop(shared: Arc<Shared>) {
 }
 
 pub async fn dispatch_available(shared: &Arc<Shared>) -> Result<()> {
+    dispatch_matching(shared, None).await
+}
+
+/// Dispatch at most the runnable work for one task key. Used by `atr tui`
+/// / `atr ask` so an in-process turn does not start leftover queued tasks,
+/// including `cli-*` sessions that serve never auto-dispatches.
+pub async fn dispatch_key(shared: &Arc<Shared>, key: &str) -> Result<()> {
+    // TUI / ask never run `reconcile_loop`. A dead CLI with `outcome` NULL
+    // would block forever (`open_run_for_task` → skip) while messages sit
+    // unconsumed. Reclaim first so this tick can start a real turn.
+    let _ = reclaim_dead_open_run(shared, key);
+    let _ = requeue_if_pending(shared, key);
+    dispatch_matching(shared, Some(key)).await
+}
+
+/// Serve owns daemon work. TUI sessions (`cli-*`) are started only by
+/// [`dispatch_key`] in the TUI process.
+pub fn serve_dispatches(key: &str) -> bool {
+    !crate::tui::is_tui_key(key)
+}
+
+async fn dispatch_matching(shared: &Arc<Shared>, only: Option<&str>) -> Result<()> {
     let keys = order_runnable(shared)?;
     for key in keys {
+        if only.is_some_and(|want| want != key) {
+            continue;
+        }
+        // Full-scheduler ticks (serve) skip TUI sessions so Telegram/GitHub
+        // keep running without racing an in-process `atr tui` on `cli-*`.
+        if only.is_none() && !serve_dispatches(&key) {
+            continue;
+        }
         if shared.inflight.lock().unwrap().contains_key(&key) {
             continue;
         }
@@ -361,10 +391,17 @@ pub fn pick_provider(
     // only busy/cooling; fall through when none of them can ever run.
     if crate::telegram::is_assistant_key(&task.key) && !cfg.telegram.assistant.providers.is_empty()
     {
-        match assistant_pick(cfg, db, inflight, &tried, clock)? {
-            AssistantPick::Use(p) => return Ok(Some(*p)),
-            AssistantPick::Wait => return Ok(None),
-            AssistantPick::NoneUsable => {}
+        match list_pick(
+            cfg,
+            db,
+            inflight,
+            &tried,
+            clock,
+            &cfg.telegram.assistant.providers,
+        )? {
+            ListPick::Use(p) => return Ok(Some(*p)),
+            ListPick::Wait => return Ok(None),
+            ListPick::NoneUsable => {}
         }
     }
 
@@ -404,6 +441,10 @@ pub fn pick_provider(
         prefers.push(task.provider_hint.clone());
     }
 
+    // TUI session list is a fallback after the session pin / hint, before
+    // the global `[[provider]]` order.
+    let tui_list = crate::tui::is_tui_key(&task.key) && !cfg.tui.providers.is_empty();
+
     for pref in &prefers {
         if tried.contains(&pref.as_str()) {
             continue;
@@ -422,6 +463,14 @@ pub fn pick_provider(
         }
     }
 
+    if tui_list {
+        match list_pick(cfg, db, inflight, &tried, clock, &cfg.tui.providers)? {
+            ListPick::Use(p) => return Ok(Some(*p)),
+            ListPick::Wait => return Ok(None),
+            ListPick::NoneUsable => {}
+        }
+    }
+
     for p in &cfg.providers {
         if tried.contains(&p.name.as_str()) || !capable(p) {
             continue;
@@ -434,22 +483,23 @@ pub fn pick_provider(
     Ok(None)
 }
 
-enum AssistantPick {
+enum ListPick {
     Use(Box<Provider>),
     Wait,
     NoneUsable,
 }
 
-/// Walk `[telegram.assistant] providers` in order, skipping `tried` ones.
-fn assistant_pick(
+/// Walk an ordered provider list, skipping `tried` ones.
+fn list_pick(
     cfg: &Config,
     db: &Db,
     inflight: &HashMap<String, InFlight>,
     tried: &[&str],
     clock: &Clock,
-) -> Result<AssistantPick> {
+    names: &[String],
+) -> Result<ListPick> {
     let mut can_wait = false;
-    for name in &cfg.telegram.assistant.providers {
+    for name in names {
         if tried.contains(&name.as_str()) {
             continue;
         }
@@ -457,19 +507,46 @@ fn assistant_pick(
             continue;
         };
         match unavailable(cfg, p, db, inflight, false, clock)? {
-            None => return Ok(AssistantPick::Use(Box::new(p.clone()))),
+            None => return Ok(ListPick::Use(Box::new(p.clone()))),
             Some("disabled") | Some("missing-cli") => {}
             Some(reason) => {
-                tracing::debug!(provider = %p.name, reason, "assistant provider skipped");
+                tracing::debug!(provider = %p.name, reason, "listed provider skipped");
                 can_wait = true;
             }
         }
     }
     Ok(if can_wait {
-        AssistantPick::Wait
+        ListPick::Wait
     } else {
-        AssistantPick::NoneUsable
+        ListPick::NoneUsable
     })
+}
+
+/// First name in `names` that is usable now, or the first still-enabled one
+/// when every listed provider is only busy/cooling.
+pub fn listed_provider_now(shared: &Shared, names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let cfg = shared.config.read().unwrap().clone();
+    let inflight = shared.inflight.lock().unwrap().clone();
+    match list_pick(&cfg, &shared.db, &inflight, &[], &Clock::system(), names) {
+        Ok(ListPick::Use(p)) => Some(p.name),
+        Ok(ListPick::Wait) => names
+            .iter()
+            .find(|n| {
+                cfg.provider(n).is_some_and(|p| {
+                    shared
+                        .db
+                        .enabled_override(&p.name)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(p.enabled)
+                })
+            })
+            .cloned(),
+        _ => None,
+    }
 }
 
 /// The provider a new Telegram assistant turn would use right now (for the
@@ -479,26 +556,7 @@ pub fn assistant_provider_now(shared: &Shared) -> Option<String> {
     let cfg = shared.config.read().unwrap().clone();
     let ast = &cfg.telegram.assistant;
     if !ast.providers.is_empty() {
-        let inflight = shared.inflight.lock().unwrap().clone();
-        return match assistant_pick(&cfg, &shared.db, &inflight, &[], &Clock::system()) {
-            Ok(AssistantPick::Use(p)) => Some(p.name),
-            // All listed ones busy/cooling: it waits for the first of them.
-            Ok(AssistantPick::Wait) => ast
-                .providers
-                .iter()
-                .find(|n| {
-                    cfg.provider(n).is_some_and(|p| {
-                        shared
-                            .db
-                            .enabled_override(&p.name)
-                            .ok()
-                            .flatten()
-                            .unwrap_or(p.enabled)
-                    })
-                })
-                .cloned(),
-            _ => None,
-        };
+        return listed_provider_now(shared, &ast.providers);
     }
     let pin = ast.provider.trim();
     (!pin.is_empty()).then(|| pin.to_string())
@@ -614,6 +672,13 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         provider =
             crate::telegram::apply_assistant_timeout(&provider, cfg.telegram.assistant.timeout);
     }
+    if crate::tui::is_tui_key(&key) {
+        crate::tui::apply_session_model(&mut provider, &shared.db, &key);
+    }
+    crate::tui::sanitize_spawn_model(&mut provider);
+    if crate::tui::is_tui_key(&key) {
+        crate::tui::apply_session_knobs(&mut provider, &shared.db, &key);
+    }
     let task = shared
         .db
         .get_task(&key)?
@@ -692,10 +757,12 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             }
             // Compare arms get their own worktree (never a pool slot), and a
             // promoted compare parent keeps the winner's tree.
-            let own_tree = task
-                .worktree
-                .as_deref()
-                .filter(|w| !task.compare_decision.is_empty() && std::path::Path::new(w).exists());
+            // Never reuse an answer-only `_none` scratch path as a git tree.
+            let own_tree = task.worktree.as_deref().filter(|w| {
+                !task.compare_decision.is_empty()
+                    && std::path::Path::new(w).exists()
+                    && !worktree::is_none_workspace(std::path::Path::new(w))
+            });
             if let Some(w) = own_tree {
                 std::path::PathBuf::from(w)
             } else if task.role == crate::compare::ARM_ROLE {
@@ -707,12 +774,16 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                     &base_branch,
                 )?
             } else if cfg.cache.worktree_pool {
+                let existing_wt = task
+                    .worktree
+                    .as_deref()
+                    .filter(|w| !worktree::is_none_workspace(std::path::Path::new(w)));
                 let slot = pick_pool_slot(
                     &shared,
                     &repo,
                     &provider.name,
                     &key,
-                    task.worktree.as_deref(),
+                    existing_wt,
                     provider.max_parallel.max(1),
                 );
                 let dest =
@@ -750,6 +821,11 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         worktree::ensure_worktree_no_push(&wt)?;
     }
     shared.db.set_worktree(&key, &wt.display().to_string())?;
+    if spawn_workspace_changed(task.worktree.as_deref(), &wt) {
+        let _ = shared
+            .db
+            .set_provider_session(&key, Some(&provider.name), None);
+    }
     crate::intake::materialize_attachments(&cfg.state_db, &key, &wt)?;
 
     if task.role == "plan" {
@@ -1675,7 +1751,7 @@ pub(crate) fn pick_driver_fallback(cfg: &Config, db: &Db) -> Option<Provider> {
 }
 
 fn git_diff(wt: &std::path::Path) -> String {
-    let out = std::process::Command::new("git")
+    let out = crate::util::git_capture()
         .args(["diff", "HEAD"])
         .current_dir(wt)
         .output();
@@ -1718,6 +1794,13 @@ fn grok_fork_from(
         Ok(session.filter(|s| !s.is_empty()).map(|s| s.to_string()))
     } else {
         Ok(None)
+    }
+}
+
+fn spawn_workspace_changed(previous: Option<&str>, next: &std::path::Path) -> bool {
+    match previous.map(str::trim).filter(|s| !s.is_empty()) {
+        None => false,
+        Some(prev) => !crate::config::paths_eq(std::path::Path::new(prev), next),
     }
 }
 
@@ -1920,34 +2003,67 @@ pub async fn reconcile_loop(shared: std::sync::Arc<Shared>) {
     }
 }
 
+/// Fail an open run (`outcome` NULL) whose CLI is dead or never started.
+/// In-flight runs owned by this process are left alone. Does not overwrite
+/// a non-empty `tasks.result_text` (that may be an older success).
+pub fn reclaim_dead_open_run(shared: &Shared, key: &str) -> Result<bool> {
+    if shared.inflight.lock().unwrap().contains_key(key) {
+        return Ok(false);
+    }
+    let Some(run_id) = shared.db.open_run_for_task(key)? else {
+        return Ok(false);
+    };
+    let runs = shared.db.list_runs(Some(key))?;
+    let Some(r) = runs.into_iter().rev().find(|row| row.id == run_id) else {
+        return Ok(false);
+    };
+    let alive = r.pid.filter(|p| *p > 0).is_some_and(pid_alive);
+    if alive {
+        return Ok(false);
+    }
+    tracing::warn!(
+        run = r.id,
+        task = %key,
+        pid = ?r.pid,
+        "reclaiming dead or never-started run"
+    );
+    shared.db.finish_run(run_id, "failed", Some(-1))?;
+    if let Ok(Some(t)) = shared.db.get_task(key) {
+        if t.status == "running" {
+            shared.db.set_status(key, "failed")?;
+        }
+        if t.result_text.is_empty() {
+            let _ = shared
+                .db
+                .set_task_result(key, "orphaned run (process gone)", "", None);
+        }
+    }
+    Ok(true)
+}
+
+/// After a zombie is closed, pending messages must become `queued` or
+/// `runnable_keys` (status IN queued/waiting) will never see them.
+pub fn requeue_if_pending(shared: &Shared, key: &str) -> Result<bool> {
+    if shared.inflight.lock().unwrap().contains_key(key) {
+        return Ok(false);
+    }
+    if shared.db.open_run_for_task(key)?.is_some() {
+        return Ok(false);
+    }
+    if shared.db.pending_messages(key)?.is_empty() {
+        return Ok(false);
+    }
+    shared.db.queue_unless_running(key)
+}
+
 pub fn reconcile(shared: &Shared) -> Result<usize> {
     let runs = shared.db.open_runs()?;
     let mut n = 0;
+    let mut touched: Vec<String> = Vec::new();
     for r in runs {
-        if shared.inflight.lock().unwrap().contains_key(&r.task_key) {
-            continue;
-        }
-        let alive = r.pid.map(pid_alive).unwrap_or(false);
-        if !alive {
-            tracing::warn!(
-                run = r.id,
-                task = %r.task_key,
-                pid = ?r.pid,
-                "reconciling run whose PID is gone"
-            );
-            shared.db.finish_run(r.id, "failed", Some(-1))?;
-            if let Ok(Some(t)) = shared.db.get_task(&r.task_key) {
-                if t.result_text.is_empty() {
-                    let _ = shared.db.set_task_result(
-                        &r.task_key,
-                        "orphaned run (process gone)",
-                        "",
-                        None,
-                    );
-                }
-            }
-            shared.db.set_status(&r.task_key, "failed")?;
+        if reclaim_dead_open_run(shared, &r.task_key)? {
             n += 1;
+            touched.push(r.task_key);
         }
     }
     for t in shared.db.list_tasks()? {
@@ -1986,6 +2102,10 @@ pub fn reconcile(shared: &Shared) -> Result<usize> {
         }
         shared.db.set_status(&t.key, "failed")?;
         n += 1;
+        touched.push(t.key);
+    }
+    for key in touched {
+        let _ = requeue_if_pending(shared, &key);
     }
     Ok(n)
 }
@@ -1994,6 +2114,16 @@ pub fn reconcile(shared: &Shared) -> Result<usize> {
 mod tests {
     use super::*;
     use crate::db::Db;
+
+    #[test]
+    fn serve_skips_tui_session_keys() {
+        assert!(serve_dispatches("demo-1"));
+        assert!(serve_dispatches("tg42"));
+        assert!(!serve_dispatches("cli-default"));
+        assert!(!serve_dispatches("cli-work"));
+        assert!(serve_dispatches("cli-"));
+        assert!(serve_dispatches("acme-1"));
+    }
 
     #[test]
     fn record_run_usage_last_event_wins_and_is_idempotent() {
@@ -2735,6 +2865,56 @@ cli = "{cli}"
             t.result_text
         );
     }
+
+    #[test]
+    fn reclaim_dead_open_run_requeues_pending_without_clobbering_result_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_for_reconcile(dir.path());
+        shared.db.upsert_task("cli-default", "", None).unwrap();
+        shared.db.set_status("cli-default", "failed").unwrap();
+        shared
+            .db
+            .set_task_result(
+                "cli-default",
+                "That looks like a stray keystroke — nothing for me to act on. What did you want to do?",
+                "",
+                None,
+            )
+            .unwrap();
+        let run = shared
+            .db
+            .start_run("cli-default", "grok", "Available")
+            .unwrap();
+        shared.db.set_run_pid(run, 1_999_999_999).unwrap();
+        shared
+            .db
+            .enqueue_message("cli-default", "what can you do for me?", "cli")
+            .unwrap();
+        assert!(shared
+            .db
+            .open_run_for_task("cli-default")
+            .unwrap()
+            .is_some());
+        assert!(reclaim_dead_open_run(&shared, "cli-default").unwrap());
+        assert!(shared
+            .db
+            .open_run_for_task("cli-default")
+            .unwrap()
+            .is_none());
+        let t = shared.db.get_task("cli-default").unwrap().unwrap();
+        assert!(
+            t.result_text.contains("stray keystroke"),
+            "do not clobber older success: {}",
+            t.result_text
+        );
+        assert!(requeue_if_pending(&shared, "cli-default").unwrap());
+        assert_eq!(
+            shared.db.get_task("cli-default").unwrap().unwrap().status,
+            "queued"
+        );
+        assert_eq!(shared.db.pending_messages("cli-default").unwrap().len(), 1);
+    }
+
     #[test]
     fn provider_hint_wins_over_config_order() {
         // Regression: `atr add --provider grok` must go to grok even though

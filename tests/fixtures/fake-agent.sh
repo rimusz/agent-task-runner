@@ -17,6 +17,56 @@ if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "models" ]]; then
+  # Live Rs-MBP shapes. Parser must take real ids and drop headers.
+  if [[ "$KIND" == "grok" ]]; then
+    cat <<'EOF'
+You are logged in with grok.com.
+
+Default model: grok-4.7
+
+Available models:
+  * grok-4.7 (default)
+  - grok-4.7-build-fast
+  - grok-4.6
+  - grok-4.5
+  - cline-pass-glm-5.2
+  - cline-pass-deepseek-v4-pro
+  - cline-pass-mimo-v2.5-pro
+  - cline-pass-kimi-k3
+  - cline-pass-qwen3.8-max
+  - cline-pass-minimax-m3
+  - cursor-composer-2.5
+  - deepseek-v4-flash
+  - cursor-claude-opus-5-5
+  - cursor-gpt-5.6-sol
+  - cursor-grok-4.7
+EOF
+    exit 0
+  fi
+  if [[ "$KIND" == "cursor-agent" || "$KIND" == "agent" ]]; then
+    cat <<'EOF'
+Available models
+
+auto - Auto (default)
+composer-2.5 - Composer 2.5
+composer-2.5-fast - Composer 2.5 Fast
+gpt-5.6-sol-high - GPT-5.6 Sol 1M High
+EOF
+    exit 0
+  fi
+  if [[ "$KIND" == "opencode" ]]; then
+    echo "cursorapi/composer-2.5"
+    echo "openai/gpt-5.6"
+    echo "test-model"
+    echo "test-model-2"
+    exit 0
+  fi
+  echo "test-model"
+  echo "test-model-2"
+  exit 0
+fi
+
 if [[ "$KIND" == "opencode" && "${1:-}" == "auth" ]]; then
   echo "moonshotai"
   exit 0

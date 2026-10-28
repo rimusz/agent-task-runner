@@ -356,7 +356,7 @@ fn wildcard(pat: &[u8], text: &[u8]) -> bool {
 }
 
 pub fn changed_protected_tests(worktree: &Path, base: &str, globs: &[String]) -> Vec<String> {
-    let out = match std::process::Command::new("git")
+    let out = match crate::util::git_capture()
         .current_dir(worktree)
         .args(["diff", "--name-status", "--no-renames", base, "--"])
         .output()
@@ -395,7 +395,7 @@ impl TestRestore {
             let p = worktree.join(rel);
             let bytes = std::fs::read(&p).ok();
             saved.push((rel.clone(), bytes));
-            let _ = std::process::Command::new("git")
+            let _ = crate::util::git_command()
                 .current_dir(worktree)
                 .args(["checkout", base, "--", rel])
                 .status();

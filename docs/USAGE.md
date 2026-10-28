@@ -19,13 +19,50 @@ atr add "what is 2+2?"
 atr add "fix the typo in notes.txt" --dir ~/notes
 atr add "open a PR for the README typo" --repo ~/src/my-repo --output pr
 atr submit my-task --body "also fix the footer"
+atr ask "what is 2+2?"
 ```
 
 `--dir` edits in place. atr asks the CLI to stay inside that folder where the CLI supports it (Claude `--add-dir`, Codex sandbox `workspace-write`, Grok `--cwd`, OpenCode `--dir`). That is best-effort: some CLIs can still write outside, and atr does not snapshot-detect outside writes. Prompt files for dir tasks live in the state directory, not a `.atr/` folder in your notes. `--repo` uses a git worktree. Neither flag means answer-only. `--output` is `reply` (default: answer the source), `pr`, `issue-comment`, `branch`, `patch`, `text`, or `webhook`. Prompts (and inbox files) are capped at 256 KiB by default (`max_prompt_bytes`).
 
 Other agents and scripts can also hand it work through MCP, the HTTP API, Telegram, or an inbox folder. See [Hand work to atr](#hand-work-to-atr).
 
-`atr serve` (or the user service) must be running for queued work to start.
+`atr serve` (or the user service) must be running for queued work to start. A bare `atr` / `atr tui` / `atr ask` is the exception: it runs the engine in-process and does not need serve. Serve never auto-dispatches TUI sessions (`cli-*`); those turns run only in the TUI / `ask` process.
+
+### Terminal TUI (`atr tui`)
+
+An interactive chat TUI (ratatui): scrollable transcript, composer, and an under-input status strip (`provider / model` plus tokens / cache when known, and the honest workspace kind: `answer-only`, `dir <path>`, or `git <name|path> [@ branch]`). The TUI is the provider CLI with atr as the proxy (session reuse + prompt-cache). Plain text is a provider turn; atr does not invent chat replies. Mouse is left to the terminal so you can select and copy. The title is `atr tui` (a named `--session` shows once; the default `cli-default` task key is internal, not a model). It does **not** clone the dashboard and does **not** share history with Telegram. A bare `atr` (no subcommand) is the same as `atr tui`. `atr ask "prompt"` is the documented one-shot / CI entrypoint: one turn, print the answer, no alternate screen. Without a TTY, `atr` / `atr tui` stay in line mode. `atr serve` stays an explicit subcommand — optional for the TUI. The `/repo` list is config (`[[repo]]` / `atr repos`); serve does not have to be running.
+
+```bash
+atr ask "what is 2+2?"                 # one-shot / CI
+atr ask "status" --session ci --provider grok
+atr                          # interactive TUI; Ctrl+C or /quit to leave
+atr --repo .                 # same TUI; `.` is the current directory's git root
+atr --repo demo              # config name or path; full path not required
+atr tui                      # same (answer-only unless --repo / --dir / last /repo)
+atr tui --repo demo                    # git workspace from config / path
+atr tui --dir ~/notes                  # local directory workspace
+atr tui "what is 2+2?"       # also one-shot (convenience)
+atr tui --session work --provider grok
+```
+
+Sessions are normal atr tasks keyed `cli-<name>` (default `cli-default` — the in-process TUI session, not a model). Same idea as Telegram's `tg<chat>` keys but a separate history. Resume, the stable prompt prefix, and provider-switch handoff are the existing task machinery. Serve owns daemon work (Telegram, GitHub, `atr add`); the TUI / `ask` process owns `cli-*`.
+
+Provider for a TUI / `ask` session: session pin (`/provider` or `--provider`) → optional `[tui] providers` list → global `[[provider]]` order. Mid-session `/provider` and `/model` stick for that session; switching provider triggers the existing handoff brief. A bare `atr` takes the same `--provider`, `--session`, `--dir` / `--repo`, and `--new` as `atr tui` / `atr ask`.
+
+| Flag | Effect |
+|---|---|
+| `--provider` | Preferred provider at launch |
+| `--session <name>` | Task key `cli-<name>` (default `default`) |
+| `--dir` / `--repo` | Workspace; omit starts answer-only unless this `cli-*` session already has a `/repo` |
+| `--new` | Drop the previous `cli-<name>` task |
+
+`/repo` is the mid-session host picker (quiet overlay, like `/provider`). `/repo` lists config git roots (`effective_repos()` that are real git repositories). A shorthand `repo_path=~/src` is not one mega-repo: if that path is a folder and not itself a git root, the picker lists **one-level** git children (name + path; type-to-find). `/repo .` binds the current directory's git root. `/repo none` is answer-only. `/repo <name|path>` uses the same resolve as `--repo` (typed absolute / `~/` / relative git paths stay pickable). A successful pick binds the **next turn's spawn cwd** to that git workspace (or its atr worktree) — chrome is not a label on an answer-only `_none` tree. Switching away from a bound `cli-*` session clears worktree and provider session like `/new` (or refuses while a turn is running).
+
+atr is a session host. `/provider` and `/model` are atr-local pickers (never sent as chat). `/model` is per-provider: it sets the current provider's session model only, and switching `/provider` restores that provider's last session model (else config / detect). `/model` opens immediately from that provider's session / config / detect / last-run (and any cached CLI catalog). `grok models` / `opencode models` / `cursor-agent models` refresh in the background and never block the TUI. Claude has no safe non-interactive catalog (`claude models` hangs; `/model` help is short aliases only) — `/model` seeds documented full ids (`claude-sonnet-5-5`, …) and omits bare aliases (`opus`, `sonnet`, …). Codex `/model` reads `models[].slug` from `~/.codex/models_cache.json` (then `model-catalogs/codex_picker_catalog.json`; `$CODEX_HOME` if set) plus `config.toml` `model =` — it never starts the Codex TUI. Host `/provider`, `/model`, `/effort`, `/context`, and `/repo` stay in the overlay / under-input strip — they are not appended to the chat transcript. The ratatui overlay is for selection only — the full table is not added to the transcript. Type `/` for the atr command menu; ↑/↓ in the prompt walks input history (PgUp/PgDn page the transcript by the viewport; the divider shows `↑ scrolled` when you leave the live tail; mouse capture stays off so the terminal can select/copy — wheel is keyboard-only). `/model <id>` sets the session override immediately (under-input strip and `/status` footer update from the same session source; next spawn uses that CLI's `--model` flag). `/effort` and `/context` are host pickers (an arg sets the session knob for the next spawn). Empty `/effort` opens the list only when that kind has a real effort flag: grok `--effort`, claude `--effort`, cursor parameterized `--model` (`name[effort=…]`), codex `-c model_reasoning_effort="…"`; other kinds get a short “not supported” note — no invented flags. Bare `/context` always opens the shared size catalog; apply is claude `--autocompact` / cursor `name[context=…]` only. grok and codex get an honesty note (no invented argv). The strip shows `effort …` / `ctx …` when set. If the list is empty: `/model <id>` if you know the id, or `atr providers model <name> <id>`. `/cli` opens the provider's own TUI (full native `/model` picker). `/new` `/quit` `/status` `/help` `/repo` stay atr-local. Other `/…` (`/compact`, `/plan`, skills) still go to the provider on the next turn. `/atr …` namespaces host commands if a provider slash collides. While a turn is running, Enter parks the next composer line locally (FIFO, like Grok / Claude / Codex) and does not feed it into the live CLI; when the turn finishes the host sends the oldest parked line the same way as idle Enter. Host slashes (`/repo`, `/model`, `/quit`, …) still run. Tracing INFO goes to `[log] path`, never the composer. User turns are prefixed `>` with a right-aligned local clock; replies have no `You` / `atr` chip. Ctrl+C quits atr (same as `/quit`; Esc only dismisses menus).
+
+### First run
+
+On a TTY, a bare `atr` with no config offers `atr init`, asks whether to install the user service, then starts the TUI (`Starting atr tui…`). `atr ask` is the one-shot / CI command after init — scripts should run `atr init --yes` first (no TTY never hangs or auto-inits). If init left no enabled provider, atr prints what it saw and how to sign in / `atr providers detect` instead of dying on the first turn.
 
 ### Hand work to atr
 
@@ -373,7 +410,7 @@ While atr is running, open `http://127.0.0.1:7420/`. It is read-only and refresh
 |---|---|
 | `atr doctor` says a CLI is missing | Install that vendor CLI, then `atr providers detect`. |
 | `atr doctor` says you are not signed in | Sign in to that CLI, then restart atr. |
-| `atr submit` / `atr add` does nothing | atr is not running. Try `atr status`, then `atr service restart`. |
+| `atr submit` / `atr add` does nothing | atr is not running. Try `atr status`, then `atr service restart`. (`atr ask` / `atr tui` do not need serve.) |
 | GitHub issues ignored | Watching is off, or the label is not `for:atr`. See [GITHUB.md](GITHUB.md). |
 | `atr doctor` — `gh auth` FAIL | Run `gh auth login`, or put `GH_TOKEN` in `shadow.env`. |
 | Cursor / Claude fail over SSH | Run atr on the desktop, not over SSH. |

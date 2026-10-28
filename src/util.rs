@@ -2,7 +2,30 @@ use crate::config::Config;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
+
+/// Git child that never inherits the TTY (TUI composer stays clean).
+pub fn git_command() -> Command {
+    let mut c = Command::new("git");
+    c.stdin(Stdio::null());
+    c.stdout(Stdio::null());
+    c.stderr(Stdio::null());
+    c.env("GIT_TERMINAL_PROMPT", "0");
+    c.env("GIT_PAGER", "");
+    c
+}
+
+/// Git child with captured stdio (never inherit).
+pub fn git_capture() -> Command {
+    let mut c = Command::new("git");
+    c.stdin(Stdio::null());
+    c.stdout(Stdio::piped());
+    c.stderr(Stdio::piped());
+    c.env("GIT_TERMINAL_PROMPT", "0");
+    c.env("GIT_PAGER", "");
+    c
+}
 
 /// Bounded HTTP client for outbound calls (Telegram, webhooks, notify).
 /// ureq has no default timeout; without one a hung peer blocks the thread forever.

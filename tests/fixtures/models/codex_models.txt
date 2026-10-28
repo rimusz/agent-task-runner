@@ -1,0 +1,6 @@
+=== codex models ===
+AI Stack aliases loaded. Use: ssh-mini, ssh-stack, ssh-spark, ssh-poly, ai-status, ai-upgrade, etc.
+/Users/rimas/.bash_profile: line 36: /Users/rimas/google-cloud-sdk/path.bash.inc: No such file or directory
+/Users/rimas/.bash_profile: line 39: /Users/rimas/google-cloud-sdk/completion.bash.inc: No such file or directory
+ERROR: TERM is set to "dumb". Refusing to start the interactive TUI because no terminal is available for a confirmation prompt (stdin/stderr is not a TTY). Run in a supported terminal or unset TERM.
+(exit 1)

@@ -15,7 +15,9 @@ axum = { version = "0.7", default-features = false, features = ["json", "tokio",
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
 libc = "0.2"
+ratatui = "0.29"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }

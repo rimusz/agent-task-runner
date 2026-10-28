@@ -1,0 +1,15 @@
+{
+  "models": [
+    {"slug": "gpt-5.5", "display_name": "GPT-5.5"},
+    {"slug": "gpt-5.4", "display_name": "GPT-5.4"},
+    {"slug": "gpt-5.4-mini", "display_name": "GPT-5.4-Mini"},
+    {"slug": "gpt-5.3-codex-spark", "display_name": "GPT-5.3-Codex-Spark"},
+    {"slug": "codex-auto-review", "display_name": "Codex Auto Review"},
+    {"slug": "clinepass/cline-pass-glm-5.2", "display_name": "Cline GLM-5.2"},
+    {"slug": "clinepass/cline-pass-kimi-k2.7-code", "display_name": "Cline Kimi K2.7 Code"},
+    {"slug": "clinepass/cline-pass-deepseek-v4-pro", "display_name": "Cline DeepSeek V4 Pro"},
+    {"slug": "clinepass/cline-pass-mimo-v2.5-pro", "display_name": "Cline MiMo-V2.5-Pro"},
+    {"slug": "clinepass/cline-pass-qwen3.7-max", "display_name": "Cline Qwen3.7 Max"},
+    {"slug": "clinepass/cline-pass-minimax-m3", "display_name": "Cline MiniMax M3"}
+  ]
+}

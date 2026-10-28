@@ -14,6 +14,7 @@ atr is a single Rust binary (`atr`, edition 2021, MSRV 1.85) that runs as a long
 | Path | What |
 |------|------|
 | `src/main.rs` | CLI entry, clap subcommands, dispatch |
+| `src/tui/` | `atr tui` / `atr ask` in-process session (`cli-<name>` keys); ratatui host + provider slash proxy |
 | `src/lib.rs` | module list |
 | `src/config.rs`, `src/config_edit.rs` | `~/.config/atr/config.toml` schema + defaults; in-place edits (`atr config set`, `atr driver set`, …) |
 | `src/providers.rs`, `providers_edit.rs`, `presets.rs`, `opencode_cfg.rs`, `detect.rs` | provider kinds, presets, CLI detection/versions |
@@ -76,6 +77,7 @@ CI (`.github/workflows/ci.yml`): docs-only diffs (`docs/`, `*.md`, LICENSE) skip
 - **Docs to update with behaviour changes:** `docs/CONFIG.md`, `docs/HOW-IT-WORKS.md`, `docs/TROUBLESHOOTING.md` (plus USAGE/README as relevant).
 - **Operator skill:** edit `skills/atr/SKILL.md` and copy it to `plugins/atr-operator/skills/atr/SKILL.md` — the two must be identical (`tests/skills-sync.sh` enforces this).
 - No hardcoded policy: provider order, models, driver, repos all come from config.
+- **TUI surface (host only):** `/provider` `/model` `/effort` `/context` `/repo` never become chat. Bare `/context` always opens the shared size catalog; apply is claude `--autocompact` / cursor model brackets only (grok/codex honesty note — no invented argv). Empty `/effort` opens the list only when that kind has real effort flags. Busy Enter is FIFO (park locally; host slashes still run; oldest parked line sends after idle). `/repo` binds spawn cwd or answer-only. Keep USAGE / HOW-IT-WORKS / TROUBLESHOOTING / operator skill honest on picker vs apply.
 
 ## PR flow
 

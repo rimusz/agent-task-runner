@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use atr::{app, config::default_config_path, load_config, Shared, SubmitOutcome, EX_TEMPFAIL};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,13 +14,17 @@ use std::process::ExitCode;
 struct Cli {
     #[arg(long, global = true, env = "ATR_CONFIG")]
     config: Option<PathBuf>,
+    /// Session flags for a bare `atr` (same as `atr tui`). Ignored when a
+    /// subcommand is present — `atr tui` / `atr ask` have their own copy.
+    #[command(flatten)]
+    sess: CliSessionArgs,
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Write config, prompt, launcher, and install the user service.
+    /// Write config, prompt, launcher. TTY asks about the user service.
     Init {
         /// Accept defaults (non-interactive).
         #[arg(long)]
@@ -97,6 +101,22 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["provider", "dir", "needs"])]
         compare: Option<String>,
     },
+    /// One-shot in-process turn for CI and scripts (`atr serve` is not required).
+    /// Never opens the interactive TUI.
+    Ask {
+        /// Prompt to run. Required — missing or empty is an error, not a REPL.
+        prompt: String,
+        #[command(flatten)]
+        sess: CliSessionArgs,
+    },
+    /// Interactive terminal session (in-process; `atr serve` is not required).
+    /// With a prompt argument, run one turn, print the answer, and exit.
+    Tui {
+        /// One-shot prompt. Omit for the interactive transcript + status footer.
+        prompt: Option<String>,
+        #[command(flatten)]
+        sess: CliSessionArgs,
+    },
     /// Show providers (with order numbers), inflight tasks, and usage.
     Status {
         /// Print the machine-readable JSON snapshot.
@@ -161,7 +181,7 @@ enum Cmd {
         #[arg(long)]
         repo: Option<String>,
     },
-    /// One ok/warn/FAIL line per check. Missing config: run atr init.
+    /// One ok/warn/FAIL line per check. Missing config: offers `atr init` on a TTY.
     Doctor {
         /// Render two prompts per provider and assert the cache prefix is stable.
         #[arg(long)]
@@ -276,6 +296,45 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CompareCmd,
     },
+}
+
+#[derive(Args, Debug)]
+struct CliSessionArgs {
+    /// Preferred provider for this session.
+    #[arg(long)]
+    provider: Option<String>,
+    /// Session name (task key `cli-<name>`, default `default`).
+    #[arg(long)]
+    session: Option<String>,
+    /// Local directory workspace (edit in place).
+    #[arg(long, conflicts_with = "repo")]
+    dir: Option<PathBuf>,
+    /// Git repository workspace (worktree / branch).
+    #[arg(long)]
+    repo: Option<String>,
+    /// Drop the previous `cli-<name>` task and start a fresh session.
+    #[arg(long)]
+    new: bool,
+}
+
+impl CliSessionArgs {
+    fn into_tui_opts(self, prompt: Option<String>, require_prompt: bool) -> atr::tui::TuiOpts {
+        atr::tui::TuiOpts {
+            prompt,
+            provider: self.provider,
+            session: self.session,
+            dir: self.dir,
+            repo: self.repo,
+            new: self.new,
+            require_prompt,
+        }
+    }
+}
+
+/// Bare `atr` is `atr tui` with the top-level session flags (`--repo`, `--dir`,
+/// `--provider`, `--session`, `--new`). A present subcommand keeps its own args.
+fn command_or_tui(cmd: Option<Cmd>, sess: CliSessionArgs) -> Cmd {
+    cmd.unwrap_or(Cmd::Tui { prompt: None, sess })
 }
 
 #[derive(Subcommand, Debug)]
@@ -507,12 +566,26 @@ async fn main() -> ExitCode {
     }
 }
 
+/// User-facing commands (TUI, ask, add, …): offer `atr init` on a TTY
+/// when config is missing. `atr serve` / service stay strict.
+async fn open_after_init(path: PathBuf, starting: &str) -> Result<std::sync::Arc<Shared>> {
+    let outcome = atr::init::ensure_config(&path).await?;
+    if outcome.ran_init {
+        if let Some(c) = &outcome.doctor_callout {
+            eprint!("{c}");
+        }
+        eprintln!("Starting {starting}…");
+    }
+    Shared::open(path)
+}
+
 async fn run(cli: Cli) -> Result<ExitCode> {
     let path = cli.config.unwrap_or_else(default_config_path);
-    if !matches!(cli.cmd, Cmd::Serve) {
+    let cmd = command_or_tui(cli.cmd, cli.sess);
+    if !matches!(cmd, Cmd::Serve | Cmd::Tui { .. } | Cmd::Ask { .. }) {
         atr::logrotate::init_tracing(None);
     }
-    match cli.cmd {
+    match cmd {
         Cmd::Init {
             yes,
             force,
@@ -612,7 +685,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 read_body(body, body_file)?
             };
-            let shared = Shared::open(path)?;
+            let shared = open_after_init(path, "atr add").await?;
             let cfg = shared.config.read().unwrap().clone();
             atr::task::check_prompt_bytes(&text, cfg.max_prompt_bytes)?;
             let title = title
@@ -728,8 +801,24 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 SubmitOutcome::Queued => Ok(ExitCode::from(EX_TEMPFAIL as u8)),
             }
         }
+        Cmd::Ask { prompt, sess } => {
+            let shared = open_after_init(path, "atr ask").await?;
+            {
+                let log = shared.config.read().unwrap().log.clone();
+                atr::logrotate::init_session_tracing(&log);
+            }
+            atr::tui::run_oneshot(shared, sess.into_tui_opts(Some(prompt), true)).await
+        }
+        Cmd::Tui { prompt, sess } => {
+            let shared = open_after_init(path, "atr tui").await?;
+            {
+                let log = shared.config.read().unwrap().log.clone();
+                atr::logrotate::init_session_tracing(&log);
+            }
+            atr::tui::run(shared, sess.into_tui_opts(prompt, false)).await
+        }
         Cmd::Status { json, repo } => {
-            let shared = Shared::open(path)?;
+            let shared = open_after_init(path, "atr status").await?;
             app::print_status(&shared, json, repo.as_deref());
             Ok(ExitCode::SUCCESS)
         }
@@ -878,6 +967,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Doctor { cache, json } => {
+            let outcome = atr::init::ensure_config(&path).await?;
+            if outcome.ran_init {
+                if let Some(c) = &outcome.doctor_callout {
+                    eprint!("{c}");
+                }
+                eprintln!("Starting atr doctor…");
+            }
             let cfg = load_config(&path)?;
             let report = atr::doctor::run(&cfg, &path, cache).await;
             if json {
@@ -1333,4 +1429,71 @@ fn http_cancel(listen: &str, auth: Option<&str>, key: &str, force: bool) -> Resu
         bail!("{msg}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn bare_session_flags_parse_as_tui() {
+        let cli = Cli::try_parse_from(["atr", "--repo", "demo"]).expect("atr --repo demo");
+        assert!(cli.cmd.is_none(), "bare atr is not a subcommand");
+        assert_eq!(cli.sess.repo.as_deref(), Some("demo"));
+        match command_or_tui(cli.cmd, cli.sess) {
+            Cmd::Tui { prompt, sess } => {
+                assert!(prompt.is_none());
+                assert_eq!(sess.repo.as_deref(), Some("demo"));
+                assert!(sess.dir.is_none());
+                assert!(!sess.new);
+            }
+            other => panic!("expected Tui, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "atr",
+            "--dir",
+            "/tmp/notes",
+            "--provider",
+            "grok",
+            "--session",
+            "work",
+            "--new",
+        ])
+        .expect("bare session flags");
+        assert_eq!(cli.sess.provider.as_deref(), Some("grok"));
+        assert_eq!(cli.sess.session.as_deref(), Some("work"));
+        assert_eq!(
+            cli.sess.dir.as_deref(),
+            Some(std::path::Path::new("/tmp/notes"))
+        );
+        assert!(cli.sess.new);
+        assert!(cli.sess.repo.is_none());
+
+        let cli = Cli::try_parse_from(["atr", "--repo", "."]).expect("atr --repo .");
+        assert_eq!(cli.sess.repo.as_deref(), Some("."));
+
+        let cli = Cli::try_parse_from(["atr", "tui", "--repo", "other"]).expect("atr tui --repo");
+        match cli.cmd {
+            Some(Cmd::Tui { sess, .. }) => {
+                assert_eq!(sess.repo.as_deref(), Some("other"));
+            }
+            other => panic!("expected Tui subcommand, got {other:?}"),
+        }
+        assert!(
+            cli.sess.repo.is_none(),
+            "subcommand --repo stays on tui, not the unused top-level flatten"
+        );
+    }
+
+    #[test]
+    fn bare_unknown_flag_still_rejected() {
+        let err = Cli::try_parse_from(["atr", "--nope"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unexpected argument") || msg.contains("--nope"),
+            "{msg}"
+        );
+    }
 }

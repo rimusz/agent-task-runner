@@ -1,0 +1,6 @@
+=== claude /model ===
+AI Stack aliases loaded. Use: ssh-mini, ssh-stack, ssh-spark, ssh-poly, ai-status, ai-upgrade, etc.
+/Users/rimas/.bash_profile: line 36: /Users/rimas/google-cloud-sdk/path.bash.inc: No such file or directory
+/Users/rimas/.bash_profile: line 39: /Users/rimas/google-cloud-sdk/completion.bash.inc: No such file or directory
+Current model: `Opus 5.5`
+Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.

@@ -29,6 +29,12 @@ with SIGHUP (`atr providers` edits do that) or `atr service restart`.
 atr --config ~/.config/atr/config.toml status
 ```
 
+Environment (not secrets):
+
+| Variable | Effect |
+|---|---|
+| `ATR_CONFIG` | Config path (same as `--config`) |
+
 `atr config get github.label` and `atr config set github.label for:atr` (or
 Telegram `/config get` / `/config set`, which Confirm first) edit the same file
 with the same validation: secret keys are refused, the new file must parse,
@@ -40,7 +46,7 @@ reloaded with SIGHUP. `atr config migrate` converts shorthand
 
 `driver`, `[planner]`, `[review]`, `[plugin]`, `[github] enabled / repo / label`
 (default `for:atr`), `[dashboard] enabled / bind`, `[telegram]` and
-`[telegram.assistant]`, `[[provider]]` order and `enabled`, `[mcp]`, `[cache]`,
+`[telegram.assistant]`, `[tui] providers`, `[[provider]]` order and `enabled`, `[mcp]`, `[cache]`,
 `[[source]]`, `max_prompt_bytes` (default `256k`; CLI/HTTP/MCP prompts and
 inbox files).
 
@@ -319,6 +325,7 @@ atr picks providers in three separate places:
 | **Driver** (planning + review) | top-level `driver = "<provider name>"` | `grok` if that provider is enabled, else the first enabled `[[provider]]` |
 | **Workers** (normal tasks) | `[[provider]]` order + `enabled` | first available provider in order |
 | **Telegram assistant** (free-text chat) | `[telegram.assistant] providers` (ordered list), else `provider` | first available provider in order (it does **not** use `driver`) |
+| **TUI / ask** (bare `atr` / `atr tui` / `atr ask`) | session pin, then `--provider`, then `[tui] providers` | first available provider in order (it does **not** use `driver`) |
 
 The model is always per provider: `[[provider]] model` (empty = the CLI's own
 default). There is no per-task model override; to run a task on another model,
@@ -340,6 +347,11 @@ kind = "grok"
 enabled = true
 provider = "grok"            # optional; empty = first available in order
 # providers = ["grok", "codex", "claude"]  # optional ordered list; wins over provider
+
+# Optional TUI / ask order (bare `atr` / `atr tui` / `atr ask`). Empty = global [[provider]]
+# order after the session pin and --provider.
+# [tui]
+# providers = ["grok", "claude"]
 ```
 
 `providers` is an ordered preference for the assistant. Each turn uses the

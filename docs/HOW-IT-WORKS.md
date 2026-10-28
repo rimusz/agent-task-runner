@@ -11,7 +11,52 @@ GitHub tokens and `gh`: [GITHUB.md](GITHUB.md).
 
 A `[[provider]]` block can be just `name` + `kind`. CLI path, flags, and
 `reported_usage` are filled from the kind. Order in the file is the failover
-order.
+order. A bare `atr` / `atr tui` / `atr ask` follows the session pin, then
+`--provider`, then optional `[tui] providers`, then this list. Serve
+never auto-dispatches `cli-*` TUI sessions. The TUI is the provider CLI
+with atr as the proxy (token cache / session reuse). Host chrome is
+slashes, pickers, and the transcript layout — atr does not invent chat
+replies. A dead or never-started run (`outcome` NULL, PID gone) is
+reclaimed so pending messages can run; the assistant bubble is the latest
+run only (never an older `tasks.result_text`). Catalog junk such as
+`Available` is rejected on spawn, not only the picker. Default task key
+`cli-default` is the in-process session (not a
+model) and is omitted from the title. Mouse capture is off so the
+terminal can select/copy. PgUp/PgDn page by the viewport; a dim
+divider under the transcript shows `↑ scrolled` when follow is off. The TUI is a session host:
+`/provider` and `/model` are atr-local pickers (`/model` sets that
+provider's session `--model` override; switching `/provider` restores
+the other provider's last session model; never a chat turn; the TUI
+overlay does not dump the catalog into the transcript). The under-input
+strip stays in sync with the session provider/model (`/provider` and
+`/model` are the switchers; `/model` lists real CLI ids — never
+`Available` / help prose; Claude seeds documented full ids only
+(`claude-sonnet-5-5`, … — never `opus` / `sonnet` / `[1m]` crumbs);
+Grok strip/picker use a real catalog id, never `Available`;
+Codex reads `~/.codex/models_cache.json` slugs (chat ids only —
+not `codex-auto-review`);
+host `/provider` `/model` `/effort` `/context` `/repo` stay off the transcript).
+`/effort` and `/context` are per-provider session knobs (next spawn argv
+only). Empty `/effort` opens the list when that kind has a real effort
+flag; other kinds get a “not supported” note. Bare `/context` always
+opens the shared size catalog; apply is claude `--autocompact` / cursor
+model brackets only — grok/codex get an honesty note (no invented argv).
+The under-input strip and `/status` show the real workspace kind
+(`answer-only`, `dir <path>`, or `git <name|path> [@ branch]`), never
+process cwd when the session is answer-only. `/repo` picks a config git
+root (serve optional; `[[repo]]` plus one-level git children of a
+shorthand `repo_path` mega-folder), `/repo .` the cwd git root,
+`/repo none` answer-only. The next provider turn's cwd is that workspace
+(not leftover `_none/<session>`).
+User turns are prefixed `>` with a right-aligned local clock; replies have no role chip. Tracing INFO never paints
+on the TUI composer — it goes to `[log] path` (or
+`~/Library/Logs/atr/atr.log` / `~/.local/share/atr/atr.log`).
+Enter while a turn is busy parks composer lines locally (FIFO); host
+slashes still run. After the turn finishes, the oldest parked line
+sends like idle Enter (not a second spawn mid-turn). Ctrl+C quits atr; Esc dismisses menus only.
+`/new` `/quit` `/status` `/help`
+`/cli` `/repo` stay in atr; other `/…` lines may be proxied. `/cli` opens the
+vendor TUI.
 
 `atr init` and `atr providers detect` look on `PATH` and common install dirs
 (`~/.local/bin`, `~/.claude/local`, `~/.cursor/bin`, `~/.opencode/bin`,

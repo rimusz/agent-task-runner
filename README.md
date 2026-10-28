@@ -80,6 +80,8 @@ atr init               # asks a few questions; or: atr init --yes
 atr service install    # runs atr in the background (init usually does this)
 ```
 
+Or run `atr` / `atr tui` / `atr ask` on a TTY: if there is no config yet, atr offers this same `atr init` (including whether to install the user service) and then continues. Scripts should call `atr init --yes` first.
+
 **4. Check it.**
 
 ```bash
@@ -112,6 +114,7 @@ gh issue edit 12 --add-label for:atr
 - **Grok Bot operator**: import the [atr Operator](https://x.ai/bot/oDG33vy41WVZKy-HFKVk0) bot template to queue work and watch atr from Grok Bot.
 - **Inbox folder**: scripts drop a task file and atr runs it. [More](docs/USAGE.md#hand-work-to-atr)
 - **Telegram**: add tasks and check progress from your phone. [More](docs/USE-CASES.md#7-control-from-your-phone)
+- **Terminal TUI**: a bare `atr` (or `atr tui`) is an interactive chat UI (transcript, under-input status strip, slash proxy to the provider CLI). `atr --repo .` / `/repo .` bind the current directory's git root; a config name or path is also fine (full path not required). `atr ask "prompt"` is the one-shot / CI entrypoint (no `atr serve`). [More](docs/USAGE.md#terminal-tui-atr-tui)
 
 ## Providers
 
