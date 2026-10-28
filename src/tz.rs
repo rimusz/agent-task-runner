@@ -117,6 +117,26 @@ impl DisplayTz {
             .map(|t| t.with_timezone(&Utc))
     }
 
+    /// Wall-clock hour/minute in this zone.
+    pub fn hm(&self, utc: DateTime<Utc>) -> (u32, u32) {
+        match self.named {
+            Some(tz) => {
+                let t = utc.with_timezone(&tz);
+                (t.hour(), t.minute())
+            }
+            None => {
+                let t = utc.with_timezone(&Local);
+                (t.hour(), t.minute())
+            }
+        }
+    }
+
+    /// Grok-style `11:04 AM` in this zone (no leading zero on the hour).
+    pub fn format_ampm(&self, utc: DateTime<Utc>) -> String {
+        let (h, m) = self.hm(utc);
+        ampm_label(h, m)
+    }
+
     pub fn now_local_hm(&self) -> (u32, u32) {
         match self.named {
             Some(tz) => {
@@ -133,6 +153,16 @@ impl DisplayTz {
     pub fn today(&self) -> String {
         self.day(Utc::now())
     }
+}
+
+pub(crate) fn ampm_label(hour24: u32, minute: u32) -> String {
+    let (h12, suffix) = match hour24 {
+        0 => (12, "AM"),
+        1..=11 => (hour24, "AM"),
+        12 => (12, "PM"),
+        h => (h - 12, "PM"),
+    };
+    format!("{h12}:{minute:02} {suffix}")
 }
 
 /// IANA name from `/etc/localtime` (macOS: `…/zoneinfo/America/Los_Angeles`).
@@ -191,5 +221,17 @@ mod tests {
             !s.contains("17:10"),
             "must not print the UTC clock, got {s}"
         );
+        assert_eq!(tz.format_ampm(t), "1:10 PM");
+    }
+
+    #[test]
+    fn ampm_label_matches_grok_clock() {
+        assert_eq!(ampm_label(0, 4), "12:04 AM");
+        assert_eq!(ampm_label(11, 4), "11:04 AM");
+        assert_eq!(ampm_label(12, 0), "12:00 PM");
+        assert_eq!(ampm_label(23, 4), "11:04 PM");
+        let utc = DisplayTz::parse("UTC").unwrap();
+        let t = Utc.with_ymd_and_hms(2026, 10, 28, 11, 4, 0).unwrap();
+        assert_eq!(utc.format_ampm(t), "11:04 AM");
     }
 }

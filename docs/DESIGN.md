@@ -75,7 +75,8 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   forwarded as a headless chat prompt. The TUI overlay does not dump the
   catalog into the transcript. The under-input strip shows the same
   session `provider / model` as `/status` (plus tok/cache and workspace
-  path). `/` opens an atr-local command menu; ↑/↓
+  path). Transcript user rows are `>` plus a right-aligned local clock;
+  assistant text has no `You` / `atr` chip. `/` opens an atr-local command menu; ↑/↓
   in the composer walk input history. Ctrl+C quits atr (same as `/quit`);
   Esc dismisses overlays only. Other `/…` lines may be proxied. `/cli`
   opens the provider's own interactive TUI. A full PTY host of the vendor

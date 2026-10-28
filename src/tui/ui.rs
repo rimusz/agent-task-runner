@@ -12,7 +12,9 @@ use super::{
 };
 use crate::app::Shared;
 use crate::scheduler;
+use crate::tz::DisplayTz;
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers, MouseEventKind,
@@ -131,6 +133,7 @@ enum Role {
 struct Msg {
     role: Role,
     text: String,
+    at: DateTime<Utc>,
 }
 
 impl App {
@@ -143,6 +146,7 @@ impl App {
             messages: vec![Msg {
                 role: Role::System,
                 text: welcome,
+                at: Utc::now(),
             }],
             input: String::new(),
             cursor: 0,
@@ -160,7 +164,11 @@ impl App {
         if text.is_empty() {
             return;
         }
-        self.messages.push(Msg { role, text });
+        self.messages.push(Msg {
+            role,
+            text,
+            at: Utc::now(),
+        });
         self.follow = true;
         self.scroll = 0;
     }
@@ -170,6 +178,7 @@ impl App {
             self.messages.push(Msg {
                 role: Role::Assistant,
                 text: String::new(),
+                at: Utc::now(),
             });
         }
         &mut self.messages.last_mut().unwrap().text
@@ -756,12 +765,13 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str, ws: &Workspace) {
         chunks[0],
     );
 
-    let body = transcript_lines(app);
     let width = chunks[1].width.max(1);
     let height = chunks[1].height.max(1);
+    let tz = shared.config.read().unwrap().display_timezone.clone();
+    let body = transcript_lines(app, width, &tz);
     let para = Paragraph::new(body)
         .wrap(Wrap { trim: false })
-        .scroll(scroll_pair(app, height, width));
+        .scroll(scroll_pair(app, height, width, &tz));
     f.render_widget(para, chunks[1]);
 
     let hint = composer_hint(app);
@@ -868,35 +878,108 @@ fn draw_slash_menu(f: &mut Frame, body: Rect, input: Rect, menu: &SlashMenu) {
     f.render_stateful_widget(list, pop, &mut state);
 }
 
-fn role_chrome(role: Role) -> (&'static str, Color) {
-    match role {
-        Role::You => ("You", Color::Cyan),
-        Role::Assistant => ("atr", Color::Green),
-        Role::System => ("atr", Color::Yellow),
-        Role::Error => ("err", Color::Red),
-    }
-}
-
-fn transcript_lines(app: &App) -> Vec<Line<'static>> {
+fn transcript_lines(app: &App, width: u16, tz: &DisplayTz) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for (i, m) in app.messages.iter().enumerate() {
-        if i > 0 {
-            lines.push(Line::from(""));
+    let mut prev: Option<Role> = None;
+    for m in &app.messages {
+        if m.text.is_empty() {
+            continue;
         }
-        let (label, color) = role_chrome(m.role);
-        lines.push(Line::from(Span::styled(
-            label,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )));
-        for row in m.text.split('\n') {
-            lines.push(Line::from(row.to_string()));
+        match m.role {
+            Role::You => {
+                if prev.is_some() {
+                    lines.push(Line::from(""));
+                }
+                lines.extend(user_turn_lines(&m.text, width, &tz.format_ampm(m.at)));
+            }
+            Role::Assistant => {
+                for row in m.text.split('\n') {
+                    lines.push(Line::from(row.to_string()));
+                }
+            }
+            Role::System => {
+                if prev.is_some() {
+                    lines.push(Line::from(""));
+                }
+                for row in m.text.split('\n') {
+                    lines.push(Line::from(Span::styled(
+                        row.to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+            Role::Error => {
+                if prev.is_some() {
+                    lines.push(Line::from(""));
+                }
+                for row in m.text.split('\n') {
+                    lines.push(Line::from(Span::styled(
+                        row.to_string(),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
+            }
         }
+        prev = Some(m.role);
     }
     lines
 }
 
-fn scroll_pair(app: &App, height: u16, width: u16) -> (u16, u16) {
-    let n = wrapped_count(app, width);
+fn user_turn_lines(text: &str, width: u16, clock: &str) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+    let mut rows = text.split('\n');
+    let first = rows.next().unwrap_or("");
+    let (head, rest) = split_user_head(first, width, clock);
+    let mut out = vec![user_first_line(&head, width, clock)];
+    if !rest.is_empty() {
+        out.push(Line::from(format!("  {rest}")));
+    }
+    for row in rows {
+        out.push(Line::from(format!("  {row}")));
+    }
+    out
+}
+
+fn split_user_head(first: &str, width: usize, clock: &str) -> (String, String) {
+    let prefix_w = 2;
+    let clock_w = clock.chars().count();
+    let budget = width.saturating_sub(prefix_w.saturating_add(clock_w).saturating_add(1));
+    if budget == 0 || first.chars().count() <= budget {
+        return (first.to_string(), String::new());
+    }
+    let head: String = first.chars().take(budget).collect();
+    let rest: String = first.chars().skip(budget).collect();
+    (head, rest)
+}
+
+fn user_first_line(text: &str, width: usize, clock: &str) -> Line<'static> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let bar = Style::default().bg(Color::Rgb(28, 28, 32));
+    if width < 8 {
+        return Line::from(vec![
+            Span::styled("> ".to_string(), dim),
+            Span::raw(text.to_string()),
+        ])
+        .style(bar);
+    }
+    let clock_w = clock.chars().count();
+    let used = 2 + text.chars().count();
+    let pad = width.saturating_sub(used.saturating_add(clock_w));
+    Line::from(vec![
+        Span::styled("> ".to_string(), dim),
+        Span::raw(text.to_string()),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(clock.to_string(), dim),
+    ])
+    .style(bar)
+}
+
+fn line_plain(line: &Line<'_>) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+fn scroll_pair(app: &App, height: u16, width: u16, tz: &DisplayTz) -> (u16, u16) {
+    let n = wrapped_count(app, width, tz);
     let max = n.saturating_sub(height as usize) as u16;
     if app.follow {
         (max, 0)
@@ -905,20 +988,12 @@ fn scroll_pair(app: &App, height: u16, width: u16) -> (u16, u16) {
     }
 }
 
-fn wrapped_count(app: &App, width: u16) -> usize {
+fn wrapped_count(app: &App, width: u16, tz: &DisplayTz) -> usize {
     let w = width.max(1) as usize;
-    let mut n = 0usize;
-    for (i, m) in app.messages.iter().enumerate() {
-        if i > 0 {
-            n += 1;
-        }
-        n += 1;
-        for row in m.text.split('\n') {
-            let cols = row.chars().count().max(1);
-            n += cols.div_ceil(w);
-        }
-    }
-    n
+    transcript_lines(app, width, tz)
+        .iter()
+        .map(|line| line_plain(line).chars().count().max(1).div_ceil(w))
+        .sum()
 }
 
 fn visible_width(s: &str) -> u16 {
@@ -941,12 +1016,50 @@ fn centered(area: Rect, height: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
+    fn test_app() -> App {
+        App {
+            messages: Vec::new(),
+            input: String::new(),
+            cursor: 0,
+            scroll: 0,
+            follow: true,
+            busy: false,
+            picker: None,
+            slash_menu: None,
+            history: InputHistory::default(),
+        }
+    }
 
     #[test]
-    fn user_transcript_label_is_grok_style_you() {
-        assert_eq!(role_chrome(Role::You).0, "You");
-        assert_ne!(role_chrome(Role::You).0, "you");
-        assert_eq!(role_chrome(Role::Assistant).0, "atr");
-        assert_eq!(role_chrome(Role::System).0, "atr");
+    fn transcript_has_no_you_or_atr_chips() {
+        let mut app = test_app();
+        app.messages.push(Msg {
+            role: Role::You,
+            text: "what about Helium?".into(),
+            at: Utc.with_ymd_and_hms(2026, 10, 28, 11, 4, 0).unwrap(),
+        });
+        app.push(Role::Assistant, "Brave: no.");
+        let tz = DisplayTz::parse("UTC").unwrap();
+        let lines = transcript_lines(&app, 48, &tz);
+        let texts: Vec<String> = lines.iter().map(line_plain).collect();
+        let joined = texts.join("\n");
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("> what about Helium?") && t.contains("11:04 AM")),
+            "user row must be `>` + local clock: {joined:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "Brave: no."),
+            "assistant text starts with no role chip: {joined:?}"
+        );
+        for chip in ["You", "you", "atr", "Grok", "err"] {
+            assert!(
+                !texts.iter().any(|t| t.trim() == chip),
+                "role chip {chip:?} leaked into {joined:?}"
+            );
+        }
     }
 }
