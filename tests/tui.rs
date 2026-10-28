@@ -159,23 +159,23 @@ async fn model_slash_is_atr_local_for_claude() {
         shared.db.list_runs(Some("cli-default")).unwrap().is_empty(),
         "bare /model must not enqueue a turn"
     );
-    let out = tui::preview_line(&shared, "cli-default", "/model sonnet").unwrap();
+    let out = tui::preview_line(&shared, "cli-default", "/model claude-sonnet-5-5").unwrap();
     assert!(out.starts_with("note"), "{out}");
-    assert!(out.contains("sonnet"), "{out}");
+    assert!(out.contains("claude-sonnet-5-5"), "{out}");
     assert!(
         shared.db.list_runs(Some("cli-default")).unwrap().is_empty(),
         "/model <id> must not enqueue a turn"
     );
-    tui::set_session_model(&shared, "cli-default", "sonnet").unwrap();
+    tui::set_session_model(&shared, "cli-default", "claude-sonnet-5-5").unwrap();
     assert_eq!(
         tui::session_model(&shared, "cli-default").as_deref(),
-        Some("sonnet")
+        Some("claude-sonnet-5-5")
     );
     let footer = tui::footer_line(&shared, "cli-default");
     let strip = tui::composer_status_line(&shared, "cli-default");
-    assert!(footer.contains("sonnet"), "{footer}");
+    assert!(footer.contains("claude-sonnet-5-5"), "{footer}");
     assert!(
-        strip.contains("sonnet"),
+        strip.contains("claude-sonnet-5-5"),
         "under-input strip must stay in sync with footer model: strip={strip} footer={footer}"
     );
     assert_eq!(
@@ -331,7 +331,11 @@ async fn model_slash_claude_lists_full_ids_not_only_aliases() {
         ("codex", false, "success"),
     ])
     .await;
-    tui::set_session_model(&shared, "cli-default", "opus").unwrap();
+    let reject = tui::preview_line(&shared, "cli-default", "/model opus").unwrap();
+    assert!(
+        reject.contains("no model matching") || !reject.contains("model opus (this session"),
+        "bare alias must not become the session model: {reject}"
+    );
     let list = tui::preview_line(&shared, "cli-default", "/model").unwrap();
     assert!(list.starts_with("model-picker"), "{list}");
     for want in [
@@ -355,30 +359,15 @@ async fn model_slash_claude_lists_full_ids_not_only_aliases() {
         "Claude /model must list real ids, not only short aliases: {list}"
     );
     assert!(
-        numbered.contains(&"sonnet"),
-        "short aliases stay secondary: {list}"
+        numbered.iter().all(|id| id.starts_with("claude-")),
+        "Claude /model must list only full claude- ids: {numbered:?}"
     );
-    assert!(
-        numbered.contains(&"opus"),
-        "session alias stays in the list: {list}"
-    );
-    let last_full = numbered
-        .iter()
-        .rposition(|id| id.starts_with("claude-"))
-        .expect("full Claude ids");
-    let first_alias = numbered
-        .iter()
-        .position(|id| {
-            matches!(
-                *id,
-                "sonnet" | "opus" | "haiku" | "fable" | "best" | "opusplan"
-            )
-        })
-        .expect("short aliases");
-    assert!(
-        last_full < first_alias,
-        "full ids must precede aliases (session opus must not lead): {numbered:?}"
-    );
+    for alias in ["opus", "sonnet", "haiku", "fable", "best", "opusplan"] {
+        assert!(
+            !numbered.iter().any(|id| id.eq_ignore_ascii_case(alias)),
+            "short alias {alias:?} must not be a picker row: {numbered:?}"
+        );
+    }
     assert!(
         !numbered.iter().any(|id| id.contains("[1m]")),
         "SGR crumbs must not be picker rows: {numbered:?}"
