@@ -22,7 +22,8 @@ run only (never an older `tasks.result_text`). Catalog junk such as
 `Available` is rejected on spawn, not only the picker. Default task key
 `cli-default` is the in-process session (not a
 model) and is omitted from the title. Mouse capture is off so the
-terminal can select/copy. The TUI is a session host:
+terminal can select/copy. PgUp/PgDn page by the viewport; a dim
+divider under the transcript shows `↑ scrolled` when follow is off. The TUI is a session host:
 `/provider` and `/model` are atr-local pickers (`/model` sets that
 provider's session `--model` override; switching `/provider` restores
 the other provider's last session model; never a chat turn; the TUI

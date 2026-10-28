@@ -317,17 +317,13 @@ fn handle_key(
             Ok(None)
         }
         KeyCode::PageUp => {
-            app.follow = false;
-            app.scroll = app.scroll.saturating_add(3);
+            let page = page_rows(term_rows());
+            apply_page_up(app, page);
             Ok(None)
         }
         KeyCode::PageDown => {
-            if app.scroll <= 3 {
-                app.scroll = 0;
-                app.follow = true;
-            } else {
-                app.scroll = app.scroll.saturating_sub(3);
-            }
+            let page = page_rows(term_rows());
+            apply_page_down(app, page);
             Ok(None)
         }
         KeyCode::Char('u') if ev.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -771,6 +767,7 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str, ws: &Workspace) {
         .constraints([
             Constraint::Length(1),
             Constraint::Min(3),
+            Constraint::Length(1),
             Constraint::Length(2),
             Constraint::Length(2),
         ])
@@ -778,7 +775,11 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str, ws: &Workspace) {
 
     let title = super::session_title(key);
     f.render_widget(
-        Paragraph::new(title).style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(title).style(
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
         chunks[0],
     );
 
@@ -786,22 +787,30 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str, ws: &Workspace) {
     let height = chunks[1].height.max(1);
     let tz = shared.config.read().unwrap().display_timezone.clone();
     let body = transcript_lines(app, width, &tz);
+    // Lines are already wrapped to `width`; wrap stays on as a safety net.
     let para = Paragraph::new(body)
         .wrap(Wrap { trim: false })
         .scroll(scroll_pair(app, height, width, &tz));
     f.render_widget(para, chunks[1]);
 
+    f.render_widget(Paragraph::new(divider_line(app, width)), chunks[2]);
+
     let hint = composer_hint(app);
+    let well = Style::default().bg(Color::Rgb(18, 18, 22));
     let input = Paragraph::new(vec![
         Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))),
-        Line::from(format!("› {}", app.input)),
-    ]);
-    f.render_widget(input, chunks[2]);
+        Line::from(vec![
+            Span::styled("› ".to_string(), Style::default().fg(Color::Cyan)),
+            Span::raw(app.input.clone()),
+        ]),
+    ])
+    .style(well);
+    f.render_widget(input, chunks[3]);
 
     let status = composer_status_line(shared, key);
     let workspace = truncate_middle_end(
         &workspace_chrome_line(shared, ws),
-        chunks[3].width.max(1) as usize,
+        chunks[4].width.max(1) as usize,
     );
     let strip = vec![
         Line::from(Span::styled(status, Style::default().fg(Color::Gray))),
@@ -810,10 +819,10 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str, ws: &Workspace) {
             Style::default().fg(Color::DarkGray),
         )),
     ];
-    f.render_widget(Paragraph::new(strip), chunks[3]);
+    f.render_widget(Paragraph::new(strip), chunks[4]);
 
     if let Some(menu) = &app.slash_menu {
-        draw_slash_menu(f, chunks[1], chunks[2], menu);
+        draw_slash_menu(f, chunks[1], chunks[3], menu);
     }
 
     if let Some(picker) = &app.picker {
@@ -838,9 +847,9 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str, ws: &Workspace) {
         f.render_stateful_widget(list, pop, &mut state);
     }
 
-    let cur_x = (chunks[2].x + 2 + visible_width(&app.input[..app.cursor.min(app.input.len())]))
-        .min(chunks[2].right().saturating_sub(1));
-    let cur_y = chunks[2].y + 1;
+    let cur_x = (chunks[3].x + 2 + visible_width(&app.input[..app.cursor.min(app.input.len())]))
+        .min(chunks[3].right().saturating_sub(1));
+    let cur_y = chunks[3].y + 1;
     f.set_cursor_position((cur_x, cur_y));
 }
 
@@ -859,7 +868,7 @@ fn composer_hint(app: &App) -> String {
         };
     }
     if !app.follow {
-        return "↑↓ history  PgDn latest  / commands".into();
+        return "↑ scrolled  PgUp/PgDn  PgDn latest  / commands".into();
     }
     "↵ send  ↑↓ history  / commands  PgUp scroll  ^C quit".into()
 }
@@ -913,31 +922,23 @@ fn transcript_lines(app: &App, width: u16, tz: &DisplayTz) -> Vec<Line<'static>>
                 lines.extend(user_turn_lines(&m.text, width, &tz.format_ampm(m.at)));
             }
             Role::Assistant => {
-                for row in m.text.split('\n') {
-                    lines.push(Line::from(row.to_string()));
-                }
+                lines.extend(assistant_lines(&m.text, width));
             }
             Role::System => {
                 if prev.is_some() {
                     lines.push(Line::from(""));
                 }
-                for row in m.text.split('\n') {
-                    lines.push(Line::from(Span::styled(
-                        row.to_string(),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
+                lines.extend(styled_wrap(
+                    &m.text,
+                    width,
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
             Role::Error => {
                 if prev.is_some() {
                     lines.push(Line::from(""));
                 }
-                for row in m.text.split('\n') {
-                    lines.push(Line::from(Span::styled(
-                        row.to_string(),
-                        Style::default().fg(Color::Red),
-                    )));
-                }
+                lines.extend(styled_wrap(&m.text, width, Style::default().fg(Color::Red)));
             }
         }
         prev = Some(m.role);
@@ -952,12 +953,22 @@ fn user_turn_lines(text: &str, width: u16, clock: &str) -> Vec<Line<'static>> {
     let (head, rest) = split_user_head(first, width, clock);
     let mut out = vec![user_first_line(&head, width, clock)];
     if !rest.is_empty() {
-        out.push(Line::from(format!("  {rest}")));
+        out.extend(wrap_prefixed("  ", &rest, width));
     }
     for row in rows {
-        out.push(Line::from(format!("  {row}")));
+        out.extend(wrap_prefixed("  ", row, width));
     }
     out
+}
+
+fn wrap_prefixed(prefix: &str, text: &str, width: usize) -> Vec<Line<'static>> {
+    let w = width.max(1);
+    let indent = prefix.chars().count();
+    let inner = w.saturating_sub(indent).max(1);
+    wrap_cols(text, inner)
+        .into_iter()
+        .map(|piece| Line::from(format!("{prefix}{piece}")))
+        .collect()
 }
 
 fn split_user_head(first: &str, width: usize, clock: &str) -> (String, String) {
@@ -994,8 +1005,115 @@ fn user_first_line(text: &str, width: usize, clock: &str) -> Line<'static> {
     .style(bar)
 }
 
+#[cfg(test)]
 fn line_plain(line: &Line<'_>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+fn styled_wrap(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+    let w = width.max(1) as usize;
+    let mut out = Vec::new();
+    for row in text.split('\n') {
+        for piece in wrap_cols(row, w) {
+            out.push(Line::from(Span::styled(piece, style)));
+        }
+    }
+    out
+}
+
+fn assistant_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+    let w = width.max(1) as usize;
+    let mut out = Vec::new();
+    for row in text.split('\n') {
+        let style = md_row_style(row);
+        for (i, piece) in wrap_cols(row, w).into_iter().enumerate() {
+            let st = if i == 0 { style } else { Style::default() };
+            out.push(Line::from(Span::styled(piece, st)));
+        }
+    }
+    out
+}
+
+fn md_row_style(row: &str) -> Style {
+    let t = row.trim_start();
+    if t.starts_with("### ") {
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD)
+    } else if t.starts_with("## ") || t.starts_with("# ") {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else if t.starts_with("- ") || t.starts_with("* ") {
+        Style::default().fg(Color::Gray)
+    } else {
+        Style::default()
+    }
+}
+
+fn wrap_cols(s: &str, width: usize) -> Vec<String> {
+    let w = width.max(1);
+    if s.is_empty() {
+        return vec![String::new()];
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut n = 0;
+    for ch in s.chars() {
+        if n == w {
+            out.push(std::mem::take(&mut cur));
+            n = 0;
+        }
+        cur.push(ch);
+        n += 1;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn divider_line(app: &App, width: u16) -> Line<'static> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let w = width.max(1) as usize;
+    if app.follow {
+        return Line::from(Span::styled("─".repeat(w), dim));
+    }
+    let tag = " ↑ scrolled · PgDn latest ";
+    let tag_w = tag.chars().count();
+    if w <= tag_w {
+        return Line::from(Span::styled(tag.chars().take(w).collect::<String>(), dim));
+    }
+    let left = (w.saturating_sub(tag_w)) / 2;
+    let right = w.saturating_sub(left + tag_w);
+    Line::from(vec![
+        Span::styled("─".repeat(left), dim),
+        Span::styled(tag.to_string(), Style::default().fg(Color::Gray)),
+        Span::styled("─".repeat(right), dim),
+    ])
+}
+
+fn term_rows() -> u16 {
+    crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24)
+}
+
+fn page_rows(term_h: u16) -> u16 {
+    // title + divider + composer + strip ≈ 6 rows
+    term_h.saturating_sub(7).max(3)
+}
+
+fn apply_page_up(app: &mut App, page: u16) {
+    app.follow = false;
+    app.scroll = app.scroll.saturating_add(page);
+}
+
+fn apply_page_down(app: &mut App, page: u16) {
+    if app.scroll <= page {
+        app.scroll = 0;
+        app.follow = true;
+    } else {
+        app.scroll = app.scroll.saturating_sub(page);
+    }
 }
 
 fn scroll_pair(app: &App, height: u16, width: u16, tz: &DisplayTz) -> (u16, u16) {
@@ -1004,16 +1122,12 @@ fn scroll_pair(app: &App, height: u16, width: u16, tz: &DisplayTz) -> (u16, u16)
     if app.follow {
         (max, 0)
     } else {
-        (max.saturating_sub(app.scroll), 0)
+        (max.saturating_sub(app.scroll.min(max)), 0)
     }
 }
 
 fn wrapped_count(app: &App, width: u16, tz: &DisplayTz) -> usize {
-    let w = width.max(1) as usize;
-    transcript_lines(app, width, tz)
-        .iter()
-        .map(|line| line_plain(line).chars().count().max(1).div_ceil(w))
-        .sum()
+    transcript_lines(app, width, tz).len()
 }
 
 fn visible_width(s: &str) -> u16 {
@@ -1082,5 +1196,69 @@ mod tests {
                 "role chip {chip:?} leaked into {joined:?}"
             );
         }
+    }
+
+    #[test]
+    fn wrap_cols_splits_long_row() {
+        let pieces = wrap_cols(&"x".repeat(200), 40);
+        assert_eq!(pieces.len(), 5);
+        assert!(pieces.iter().all(|p| p.chars().count() <= 40));
+    }
+
+    #[test]
+    fn huge_assistant_wrap_count_matches_display_rows() {
+        let mut app = test_app();
+        app.push(Role::Assistant, "word ".repeat(400));
+        let tz = DisplayTz::parse("UTC").unwrap();
+        let width = 40;
+        let n = wrapped_count(&app, width, &tz);
+        assert!(
+            n >= 50,
+            "long assistant blob must wrap into many rows, got {n}"
+        );
+        assert_eq!(n, transcript_lines(&app, width, &tz).len());
+    }
+
+    #[test]
+    fn page_up_moves_by_viewport_not_three_lines() {
+        let mut app = test_app();
+        app.push(Role::Assistant, "line\n".repeat(200));
+        let page = page_rows(24);
+        assert!(page >= 10, "page size {page} should be viewport-sized");
+        apply_page_up(&mut app, page);
+        assert!(!app.follow);
+        assert_eq!(app.scroll, page);
+        apply_page_up(&mut app, page);
+        assert_eq!(app.scroll, page * 2);
+        let (y, _) = scroll_pair(&app, 17, 40, &DisplayTz::parse("UTC").unwrap());
+        assert!(y < 200, "scrolled-up pair must leave the bottom: {y}");
+        apply_page_down(&mut app, page);
+        apply_page_down(&mut app, page);
+        assert!(app.follow);
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn follow_scroll_pair_pins_bottom() {
+        let mut app = test_app();
+        app.push(Role::Assistant, "line\n".repeat(80));
+        let tz = DisplayTz::parse("UTC").unwrap();
+        let n = wrapped_count(&app, 40, &tz);
+        let (y, _) = scroll_pair(&app, 10, 40, &tz);
+        assert_eq!(y, n.saturating_sub(10) as u16);
+        app.follow = false;
+        app.scroll = 12;
+        let (y2, _) = scroll_pair(&app, 10, 40, &tz);
+        assert_eq!(y2, (n.saturating_sub(10) as u16).saturating_sub(12));
+    }
+
+    #[test]
+    fn divider_marks_scrolled() {
+        let mut app = test_app();
+        let follow = line_plain(&divider_line(&app, 40));
+        assert!(!follow.contains("scrolled"));
+        app.follow = false;
+        let up = line_plain(&divider_line(&app, 40));
+        assert!(up.contains("scrolled"), "{up}");
     }
 }
