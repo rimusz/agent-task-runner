@@ -423,7 +423,9 @@ pub(crate) fn accept_model_name(kind: &str, name: &str) -> bool {
     if kind == "codex" && is_codex_non_chat_id(name) {
         return false;
     }
-    if kind == "claude" && !is_claude_full_id(name) {
+    if kind == "claude"
+        && (CLAUDE_ALIASES.iter().any(|a| a.eq_ignore_ascii_case(name)) || !is_claude_full_id(name))
+    {
         return false;
     }
     if is_placeholder_model(name) || is_junk_model_label(name) {
