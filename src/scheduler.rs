@@ -1748,7 +1748,7 @@ pub(crate) fn pick_driver_fallback(cfg: &Config, db: &Db) -> Option<Provider> {
 }
 
 fn git_diff(wt: &std::path::Path) -> String {
-    let out = std::process::Command::new("git")
+    let out = crate::util::git_capture()
         .args(["diff", "HEAD"])
         .current_dir(wt)
         .output();

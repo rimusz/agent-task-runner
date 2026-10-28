@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 pub fn is_git_repo(path: &Path) -> bool {
     let git = path.join(".git");
@@ -12,23 +12,12 @@ pub fn is_none_workspace(path: &Path) -> bool {
     path.iter().any(|c| c == "_none")
 }
 
-/// Git child that never inherits the TTY. `git checkout` / `worktree add`
-/// otherwise paint `HEAD is now at …` under the ratatui composer.
 fn quiet_git() -> Command {
-    let mut c = Command::new("git");
-    c.stdin(Stdio::null());
-    c.stdout(Stdio::null());
-    c.stderr(Stdio::null());
-    c
+    crate::util::git_command()
 }
 
-/// Git child with captured stdio (never inherit).
 fn capture_git() -> Command {
-    let mut c = Command::new("git");
-    c.stdin(Stdio::null());
-    c.stdout(Stdio::piped());
-    c.stderr(Stdio::piped());
-    c
+    crate::util::git_capture()
 }
 
 /// Work in place in a local directory. Does not create a git worktree.
