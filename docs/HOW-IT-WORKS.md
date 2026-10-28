@@ -45,7 +45,8 @@ shorthand `repo_path` mega-folder), `/repo .` the cwd git root,
 User turns are prefixed `>` with a right-aligned local clock; replies have no role chip. Tracing INFO never paints
 on the TUI composer — it goes to `[log] path` (or
 `~/Library/Logs/atr/atr.log` / `~/.local/share/atr/atr.log`).
-Ctrl+C quits atr; Esc dismisses menus only.
+Enter while a turn is busy parks the next line locally until the turn
+finishes (not a second spawn mid-turn). Ctrl+C quits atr; Esc dismisses menus only.
 `/new` `/quit` `/status` `/help`
 `/cli` `/repo` stay in atr; other `/…` lines may be proxied. `/cli` opens the
 vendor TUI.

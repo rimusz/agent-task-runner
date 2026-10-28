@@ -9,8 +9,9 @@ use super::history::InputHistory;
 use super::proxy;
 use super::slash;
 use super::{
-    collect_result, composer_status_line, enqueue_turn, step_line, truncate_middle_end,
-    turn_is_idle, workspace_chrome_line, Step, Workspace,
+    busy_enter_action, collect_result, composer_status_line, enqueue_turn, park_busy_line,
+    step_line, truncate_middle_end, turn_is_idle, workspace_chrome_line, BusyEnter, PendingTurns,
+    Step, Workspace,
 };
 use crate::app::Shared;
 use crate::scheduler;
@@ -89,6 +90,7 @@ struct App {
     scroll: u16,
     follow: bool,
     busy: bool,
+    pending: PendingTurns,
     picker: Option<Picker>,
     slash_menu: Option<SlashMenu>,
     history: InputHistory,
@@ -148,6 +150,7 @@ impl App {
             scroll: 0,
             follow: true,
             busy: false,
+            pending: PendingTurns::default(),
             picker: None,
             slash_menu: None,
             history: InputHistory::default(),
@@ -199,13 +202,21 @@ async fn event_loop(
             *app.last_assistant_mut() = snap.text.clone();
             if turn_is_idle(shared, key)? {
                 app.busy = false;
+                ticks = 0;
                 if !snap.ok {
                     app.push(Role::Error, "turn failed");
+                }
+                if let Some(end) = flush_parked(app, shared, key, ws, pin)? {
+                    return Ok(end);
                 }
             } else if ticks >= 3 {
                 if let Err(e) = super::check_provider_available(shared, key) {
                     app.busy = false;
+                    ticks = 0;
                     app.push(Role::Error, format!("{e:#}"));
+                    if let Some(end) = flush_parked(app, shared, key, ws, pin)? {
+                        return Ok(end);
+                    }
                 }
             }
         }
@@ -344,6 +355,19 @@ fn ctrl_c(app: &mut App, shared: &Shared, key: &str) -> Result<Option<LoopEnd>> 
     Ok(Some(LoopEnd::Quit(ExitCode::SUCCESS)))
 }
 
+fn flush_parked(
+    app: &mut App,
+    shared: &Shared,
+    key: &str,
+    ws: &mut Workspace,
+    pin: Option<&str>,
+) -> Result<Option<LoopEnd>> {
+    let Some(next) = app.pending.pop() else {
+        return Ok(None);
+    };
+    submit_line(app, shared, key, ws, pin, &next)
+}
+
 fn submit_or_queue(
     app: &mut App,
     shared: &Shared,
@@ -365,23 +389,13 @@ fn submit_or_queue(
     }
     app.history.push(trimmed);
     if app.busy {
-        match slash::parse_slash(trimmed) {
-            Some(slash::Slash::Help)
-            | Some(slash::Slash::Quit)
-            | Some(slash::Slash::Status)
-            | Some(slash::Slash::New)
-            | Some(slash::Slash::Provider(_))
-            | Some(slash::Slash::Model(_))
-            | Some(slash::Slash::Repo(_))
-            | Some(slash::Slash::Cli) => {
-                return submit_line(app, shared, key, ws, pin, trimmed);
-            }
-            _ => {
-                enqueue_turn(shared, key, ws, trimmed, pin)?;
-                app.push(Role::You, trimmed);
-                app.push(Role::System, "queued · runs after this turn");
+        match busy_enter_action(trimmed) {
+            BusyEnter::Host => return submit_line(app, shared, key, ws, pin, trimmed),
+            BusyEnter::Queue => {
+                park_busy_line(&mut app.pending, trimmed);
                 return Ok(None);
             }
+            BusyEnter::Ignore => return Ok(None),
         }
     }
     submit_line(app, shared, key, ws, pin, trimmed)
@@ -838,7 +852,11 @@ fn composer_hint(app: &App) -> String {
         return "↵ apply  Tab complete  ↑↓  Esc".into();
     }
     if app.busy {
-        return "↵ queue  ^C quit  PgUp scroll".into();
+        return if app.pending.is_empty() {
+            "↵ queue  ^C quit  PgUp scroll".into()
+        } else {
+            format!("↵ queue · {} waiting  ^C quit", app.pending.len())
+        };
     }
     if !app.follow {
         return "↑↓ history  PgDn latest  / commands".into();
@@ -1028,6 +1046,7 @@ mod tests {
             scroll: 0,
             follow: true,
             busy: false,
+            pending: PendingTurns::default(),
             picker: None,
             slash_menu: None,
             history: InputHistory::default(),

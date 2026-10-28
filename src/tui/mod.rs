@@ -39,6 +39,7 @@ use crate::providers::{cache_hit_ratio, UsageNumbers};
 use crate::scheduler;
 use crate::task::{self, OutputKind, WorkspaceKind};
 use anyhow::{bail, Result};
+use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -591,6 +592,90 @@ fn model_picker_text(shared: &Shared, key: &str, ws: &Workspace) -> String {
 /// turn and stay in the TUI". Esc still dismisses overlays only.
 pub fn classify_interrupt() -> &'static str {
     "quit"
+}
+
+/// Local FIFO for composer lines parked while a turn is busy.
+/// Never written to the live provider stdin or the task message table
+/// until the current turn is idle and the line is submitted again.
+#[derive(Debug, Default, Clone)]
+pub struct PendingTurns {
+    lines: VecDeque<String>,
+}
+
+impl PendingTurns {
+    pub fn park(&mut self, line: &str) -> bool {
+        let t = line.trim();
+        if t.is_empty() {
+            return false;
+        }
+        self.lines.push_back(t.to_string());
+        true
+    }
+
+    pub fn pop(&mut self) -> Option<String> {
+        self.lines.pop_front()
+    }
+
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+}
+
+/// Enter while a provider turn is live: host slashes stay live; chat
+/// and proxied `/…` park in [`PendingTurns`] (Grok / Claude / Codex style).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusyEnter {
+    Ignore,
+    Host,
+    Queue,
+}
+
+pub fn busy_enter_action(line: &str) -> BusyEnter {
+    let line = line.trim();
+    if slash::is_bare_slash(line) || (!is_turn_text(line) && slash::parse_slash(line).is_none()) {
+        return BusyEnter::Ignore;
+    }
+    match slash::parse_slash(line) {
+        Some(slash::Slash::Help)
+        | Some(slash::Slash::Quit)
+        | Some(slash::Slash::Status)
+        | Some(slash::Slash::New)
+        | Some(slash::Slash::Provider(_))
+        | Some(slash::Slash::Model(_))
+        | Some(slash::Slash::Repo(_))
+        | Some(slash::Slash::Cli) => BusyEnter::Host,
+        None | Some(slash::Slash::Proxy(_)) => BusyEnter::Queue,
+    }
+}
+
+/// Park a busy-Enter chat line. Host slashes are not parked.
+pub fn park_busy_line(pending: &mut PendingTurns, line: &str) -> BusyEnter {
+    let action = busy_enter_action(line);
+    if action == BusyEnter::Queue {
+        pending.park(line);
+    }
+    action
+}
+
+/// Submit the oldest parked line the same way idle Enter does (`run_turn`).
+pub async fn submit_parked_turn(
+    shared: Arc<Shared>,
+    session: &str,
+    pending: &mut PendingTurns,
+) -> Result<Option<TurnResult>> {
+    let Some(line) = pending.pop() else {
+        return Ok(None);
+    };
+    let key = tui_task_key(session)?;
+    let ws = load_workspace(&shared, &key).unwrap_or(Workspace {
+        kind: WorkspaceKind::None,
+        repo: None,
+    });
+    Ok(Some(run_turn(&shared, &key, &ws, &line, None).await?))
 }
 
 /// What a TUI line would do. Tests lock `/model` out of the turn path.
@@ -1465,6 +1550,24 @@ mod tests {
         assert!(!is_turn_text(""));
         assert!(!is_turn_text(" \n"));
         assert!(!is_turn_text("\u{0001}"));
+    }
+
+    #[test]
+    fn busy_enter_queues_chat_keeps_host_slashes() {
+        assert_eq!(busy_enter_action("hello"), BusyEnter::Queue);
+        assert_eq!(busy_enter_action("/compact"), BusyEnter::Queue);
+        assert_eq!(busy_enter_action("/repo"), BusyEnter::Host);
+        assert_eq!(busy_enter_action("/model"), BusyEnter::Host);
+        assert_eq!(busy_enter_action("/quit"), BusyEnter::Host);
+        assert_eq!(busy_enter_action(""), BusyEnter::Ignore);
+        let mut q = PendingTurns::default();
+        assert_eq!(park_busy_line(&mut q, "first"), BusyEnter::Queue);
+        assert_eq!(park_busy_line(&mut q, "second"), BusyEnter::Queue);
+        assert_eq!(park_busy_line(&mut q, "/repo"), BusyEnter::Host);
+        assert_eq!(q.len(), 2);
+        assert_eq!(q.pop().as_deref(), Some("first"));
+        assert_eq!(q.pop().as_deref(), Some("second"));
+        assert!(q.pop().is_none());
     }
 
     #[test]

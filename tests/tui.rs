@@ -1359,6 +1359,49 @@ async fn repo_slash_resolves_and_clears_bound_session() {
 }
 
 #[tokio::test]
+async fn busy_enter_parks_then_sends_once_when_idle() {
+    let (_dir, shared, _) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    assert_eq!(tui::classify_line("hello"), "chat");
+    assert_eq!(
+        tui::preview_line(&shared, "cli-default", "hello").unwrap(),
+        "turn"
+    );
+
+    let mut q = tui::PendingTurns::default();
+    assert_eq!(tui::park_busy_line(&mut q, "second"), tui::BusyEnter::Queue);
+    assert_eq!(tui::park_busy_line(&mut q, "/repo"), tui::BusyEnter::Host);
+    assert_eq!(q.len(), 1);
+    assert!(
+        shared.db.get_task("cli-default").unwrap().is_none(),
+        "park must not enqueue a live task"
+    );
+
+    let sent = tui::submit_parked_turn(shared.clone(), "default", &mut q)
+        .await
+        .unwrap();
+    assert!(sent.is_some(), "idle flush sends the parked line");
+    assert!(q.is_empty());
+    let again = tui::submit_parked_turn(shared.clone(), "default", &mut q)
+        .await
+        .unwrap();
+    assert!(again.is_none(), "each parked line is sent once");
+
+    tui::park_busy_line(&mut q, "alpha");
+    tui::park_busy_line(&mut q, "beta");
+    tui::submit_parked_turn(shared.clone(), "default", &mut q)
+        .await
+        .unwrap();
+    assert_eq!(q.pop().as_deref(), Some("beta"));
+    assert!(q.is_empty());
+}
+
+#[tokio::test]
 async fn repo_pick_binds_next_turn_spawn_cwd() {
     let (_dir, shared, _) = no_serve(&[
         ("claude", true, "success"),
