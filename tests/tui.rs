@@ -1339,6 +1339,19 @@ async fn repo_slash_resolves_and_clears_bound_session() {
         refused.contains("not a git") || refused.contains("mega-repo") || refused.contains("usage"),
         "{refused}"
     );
+
+    atr::worktree::init_sample_repo(&nest.join("atr-pr65")).unwrap();
+    let kids = tui::preview_line(&shared, "cli-work", "/repo").unwrap();
+    assert!(
+        kids.contains("atr-pr65"),
+        "one-level git child of shorthand repo_path must be listed: {kids}"
+    );
+    let bound = tui::preview_line(&shared, "cli-work", "/repo atr-pr65").unwrap();
+    assert!(bound.contains("git "), "{bound}");
+    assert!(
+        bound.contains("atr-pr65") || bound.contains("watched"),
+        "{bound}"
+    );
 }
 
 fn setup_bin_cfg() -> (TempDir, std::path::PathBuf) {

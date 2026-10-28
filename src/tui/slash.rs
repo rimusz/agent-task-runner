@@ -128,6 +128,44 @@ pub(crate) fn filter_names(names: &[String], q: &str) -> Vec<String> {
         .collect()
 }
 
+/// Repo picker type-to-find. A lone `/` or `~` is a path prefix, not a
+/// token query — keep catalog rows. A filter miss still keeps the typed
+/// text so Enter can bind an absolute / `~/` / relative git path.
+pub(crate) fn filter_repo_items(all: &[String], q: &str) -> Vec<String> {
+    let q = q.trim();
+    if q.is_empty() {
+        return all.to_vec();
+    }
+    let prefix_only = q == "/" || q == "~" || q == "~/";
+    let mut items = if prefix_only {
+        all.to_vec()
+    } else {
+        filter_names(all, q)
+    };
+    let pathish = prefix_only
+        || q.starts_with('/')
+        || q.starts_with('~')
+        || q.contains('/')
+        || q.contains('\\');
+    if (pathish || items.is_empty()) && !items.iter().any(|s| s == q) {
+        items.push(q.to_string());
+    }
+    items
+}
+
+/// Overlay title suffix: do not paint `//` when the filter already starts
+/// with `/` (that looked like a dead search).
+pub(crate) fn picker_filter_title(title: &str, filter: &str) -> String {
+    if filter.is_empty() {
+        return title.to_string();
+    }
+    if filter.starts_with('/') || filter.starts_with('~') {
+        format!("{title}  {filter}")
+    } else {
+        format!("{title}  /{filter}")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Slash {
     Help,
@@ -334,8 +372,13 @@ pub(crate) enum RepoSection {
     None,
     Cwd,
     Config,
+    Folder,
     Recent,
 }
+
+/// One-level scan of a shorthand `repo_path` mega-folder. Keep this small:
+/// `~/src` can be wide, and the overlay is a picker not a file browser.
+pub(crate) const MEGA_CHILD_CAP: usize = 48;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RepoChoice {
@@ -346,8 +389,8 @@ pub(crate) struct RepoChoice {
 }
 
 /// Config `[[repo]]` / `effective_repos()` that are real git roots, plus
-/// cwd git root (`.`) and recent typed paths. Shorthand `repo_path=~/src`
-/// is omitted unless that path itself is a git root (not a mega-repo).
+/// cwd git root (`.`), one-level git children of a shorthand mega-folder
+/// `repo_path` (not the folder itself), and recent typed paths.
 pub(crate) fn list_repos(
     cfg: &Config,
     current: Option<&Path>,
@@ -361,10 +404,14 @@ pub(crate) fn list_repos(
     }];
     let cwd_root = cwd_git_root();
     let config_roots = config_git_repos(cfg);
+    let folder_kids = mega_folder_git_children(cfg);
     if let Some(root) = cwd_root.as_ref() {
         let already = config_roots
             .iter()
-            .any(|(p, _)| crate::config::paths_eq(p, root));
+            .any(|(p, _)| crate::config::paths_eq(p, root))
+            || folder_kids
+                .iter()
+                .any(|(p, _)| crate::config::paths_eq(p, root));
         if !already {
             out.push(RepoChoice {
                 token: ".".into(),
@@ -388,6 +435,28 @@ pub(crate) fn list_repos(
             current: current.is_some_and(|c| crate::config::paths_eq(c, path)),
         });
     }
+    let mut used: std::collections::HashSet<String> = out.iter().map(|c| c.token.clone()).collect();
+    for (path, name) in &folder_kids {
+        if config_roots
+            .iter()
+            .any(|(c, _)| crate::config::paths_eq(c, path))
+        {
+            continue;
+        }
+        if cwd_root
+            .as_ref()
+            .is_some_and(|c| crate::config::paths_eq(c, path))
+        {
+            continue;
+        }
+        let token = unique_repo_token(&mut used, name, path);
+        out.push(RepoChoice {
+            token,
+            label: shorten_choice(path),
+            section: RepoSection::Folder,
+            current: current.is_some_and(|c| crate::config::paths_eq(c, path)),
+        });
+    }
     for raw in recent {
         let p = crate::config::expand_path(raw);
         if !worktree::is_git_repo(&p) {
@@ -402,6 +471,12 @@ pub(crate) fn list_repos(
         if cwd_root
             .as_ref()
             .is_some_and(|c| crate::config::paths_eq(c, &p))
+        {
+            continue;
+        }
+        if folder_kids
+            .iter()
+            .any(|(c, _)| crate::config::paths_eq(c, &p))
         {
             continue;
         }
@@ -427,6 +502,77 @@ pub(crate) fn config_git_repos(cfg: &Config) -> Vec<(PathBuf, String)> {
         .filter(|r| worktree::is_git_repo(&r.path))
         .map(|r| (r.path, r.name))
         .collect()
+}
+
+/// One-level git children of shorthand `repo_path` when that path is a
+/// directory but not itself a git root (`~/src` is not one mega-repo).
+pub(crate) fn mega_folder_git_children(cfg: &Config) -> Vec<(PathBuf, String)> {
+    let root = &cfg.repo_path;
+    if root.as_os_str().is_empty() || worktree::is_git_repo(root) || !root.is_dir() {
+        return Vec::new();
+    }
+    one_level_git_children(root, MEGA_CHILD_CAP)
+}
+
+pub(crate) fn mega_folder_child(cfg: &Config, spec: &str) -> Option<PathBuf> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    let want = crate::config::expand_path(spec);
+    mega_folder_git_children(cfg)
+        .into_iter()
+        .find_map(|(p, name)| {
+            if name == spec
+                || crate::config::paths_eq(&p, &want)
+                || p.file_name().and_then(|n| n.to_str()) == Some(spec)
+            {
+                Some(p)
+            } else {
+                None
+            }
+        })
+}
+
+fn one_level_git_children(dir: &Path, cap: usize) -> Vec<(PathBuf, String)> {
+    let mut kids = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return kids;
+    };
+    let mut ents: Vec<_> = rd.filter_map(|e| e.ok()).collect();
+    ents.sort_by_key(|a| a.file_name());
+    for ent in ents {
+        if kids.len() >= cap {
+            break;
+        }
+        let name = ent.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = ent.path();
+        if !path.is_dir() || !worktree::is_git_repo(&path) {
+            continue;
+        }
+        kids.push((path, name.to_string()));
+    }
+    kids
+}
+
+fn unique_repo_token(
+    used: &mut std::collections::HashSet<String>,
+    name: &str,
+    path: &Path,
+) -> String {
+    if !name.is_empty() && !used.contains(name) && name != "none" && name != "." {
+        used.insert(name.to_string());
+        return name.to_string();
+    }
+    let t = path.display().to_string();
+    used.insert(t.clone());
+    t
 }
 
 pub(crate) fn cwd_git_root() -> Option<PathBuf> {
@@ -462,6 +608,7 @@ pub(crate) fn format_repo_list(list: &[RepoChoice]) -> String {
                 RepoSection::None => None,
                 RepoSection::Cwd => Some("cwd"),
                 RepoSection::Config => Some("config"),
+                RepoSection::Folder => Some("folder"),
                 RepoSection::Recent => Some("recent"),
             };
             if let Some(h) = header {
@@ -634,5 +781,99 @@ mod tests {
         assert_eq!(pick_choice(&names, "cl").as_deref(), Some("claude"));
         assert_eq!(pick_choice(&names, "9"), None);
         assert_eq!(pick_choice(&names, ""), None);
+    }
+
+    #[test]
+    fn repo_filter_slash_keeps_rows_and_typed_path() {
+        let all = vec!["none".into(), ".".into(), "atr-pr65".into()];
+        let slash = filter_repo_items(&all, "/");
+        assert!(slash.iter().any(|s| s == "none"), "{slash:?}");
+        assert!(slash.iter().any(|s| s == "atr-pr65"), "{slash:?}");
+        assert!(
+            slash.iter().any(|s| s == "/"),
+            "typed / stays pickable: {slash:?}"
+        );
+        assert!(!slash.is_empty());
+
+        let tilde = filter_repo_items(&all, "~");
+        assert!(tilde.iter().any(|s| s == "none"), "{tilde:?}");
+        assert!(tilde.iter().any(|s| s == "~"), "{tilde:?}");
+
+        let miss = filter_repo_items(&all, "zzz");
+        assert!(
+            miss.iter().any(|s| s == "zzz"),
+            "filter miss keeps typed text: {miss:?}"
+        );
+        assert!(!miss.is_empty());
+
+        let hit = filter_repo_items(&all, "atr");
+        assert_eq!(hit.as_slice(), ["atr-pr65"]);
+
+        let path = filter_repo_items(&all, "~/src/atr-pr65");
+        assert!(path.iter().any(|s| s == "~/src/atr-pr65"), "{path:?}");
+
+        assert_eq!(
+            picker_filter_title("Repo  (Enter / type to find · Esc)", "/"),
+            "Repo  (Enter / type to find · Esc)  /"
+        );
+        assert!(
+            !picker_filter_title("Repo", "/").contains("//"),
+            "lone / must not paint //"
+        );
+        assert_eq!(picker_filter_title("Repo", "atr"), "Repo  /atr");
+    }
+
+    #[test]
+    fn list_repos_includes_mega_folder_git_children() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("notes")).unwrap();
+        crate::worktree::init_sample_repo(&src.join("atr-pr65")).unwrap();
+        crate::worktree::init_sample_repo(&src.join("other")).unwrap();
+        let cfg = crate::config::parse_config_toml(&format!(
+            r#"
+repo_path = "{src}"
+task_key_prefix = "demo"
+[planner]
+mode = "off"
+[github]
+enabled = false
+[[provider]]
+name = "claude"
+kind = "claude"
+enabled = true
+"#,
+            src = src.display()
+        ))
+        .unwrap();
+        let list = list_repos(&cfg, None, &[]);
+        assert!(list.iter().any(|c| c.token == "none"), "{list:?}");
+        assert!(
+            list.iter()
+                .any(|c| c.token == "atr-pr65" && c.section == RepoSection::Folder),
+            "git child name must be pickable: {list:?}"
+        );
+        assert!(
+            list.iter().any(|c| c.token == "other"),
+            "second git child: {list:?}"
+        );
+        assert!(
+            !list
+                .iter()
+                .any(|c| c.token == "notes" || c.label.contains("notes")),
+            "non-git dir must be skipped: {list:?}"
+        );
+        assert!(
+            !list
+                .iter()
+                .any(|c| crate::config::paths_eq(Path::new(&c.token), &src)
+                    || c.label == shorten_choice(&src)),
+            "mega-folder itself is not one repo: {list:?}"
+        );
+        assert!(
+            mega_folder_child(&cfg, "atr-pr65").is_some_and(|p| p.ends_with("atr-pr65")),
+            "child name resolves"
+        );
+        assert!(mega_folder_child(&cfg, "notes").is_none());
     }
 }

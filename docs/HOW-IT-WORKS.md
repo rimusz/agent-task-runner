@@ -38,8 +38,9 @@ host `/provider` `/model` `/repo` stay off the transcript).
 The under-input strip and `/status` show the real workspace kind
 (`answer-only`, `dir <path>`, or `git <name|path> [@ branch]`), never
 process cwd when the session is answer-only. `/repo` picks a config git
-root (serve optional; the list is `[[repo]]`), `/repo .` the cwd git
-root, `/repo none` answer-only.
+root (serve optional; `[[repo]]` plus one-level git children of a
+shorthand `repo_path` mega-folder), `/repo .` the cwd git root,
+`/repo none` answer-only.
 User turns are prefixed `>` with a right-aligned local clock; replies have no role chip. Tracing INFO never paints
 on the TUI composer — it goes to `[log] path` (or
 `~/Library/Logs/atr/atr.log` / `~/.local/share/atr/atr.log`).

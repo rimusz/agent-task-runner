@@ -807,15 +807,19 @@ fn resolve_repo_spec(shared: &Shared, spec: &str) -> Result<Workspace> {
     }
     let cfg = shared.config.read().unwrap().clone();
     if let Some(entry) = cfg.resolve_repo_filter(spec) {
-        if !crate::worktree::is_git_repo(&entry.path) {
-            bail!(
-                "{} is not a git repository (shorthand repo_path is not one mega-repo)",
-                entry.path.display()
-            );
+        if crate::worktree::is_git_repo(&entry.path) {
+            return Ok(Workspace {
+                kind: WorkspaceKind::Git,
+                repo: Some(entry.path.display().to_string()),
+            });
         }
+        // Shorthand mega-folder (`repo_path=~/src`) is not one repo. Fall
+        // through to a one-level child name or a typed git path.
+    }
+    if let Some(p) = slash::mega_folder_child(&cfg, spec) {
         return Ok(Workspace {
             kind: WorkspaceKind::Git,
-            repo: Some(entry.path.display().to_string()),
+            repo: Some(p.display().to_string()),
         });
     }
     let p = task::resolve_git_repo(spec)?;

@@ -517,7 +517,12 @@ fn handle_picker(
 }
 
 fn apply_picker_filter(picker: &mut Picker) {
-    picker.items = slash::filter_names(&picker.all, &picker.filter);
+    picker.items = match picker.kind {
+        PickerKind::Repo => slash::filter_repo_items(&picker.all, &picker.filter),
+        PickerKind::Provider | PickerKind::Model => {
+            slash::filter_names(&picker.all, &picker.filter)
+        }
+    };
     if picker.items.is_empty() {
         picker.state.select(None);
     } else {
@@ -806,11 +811,7 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str, ws: &Workspace) {
             .enumerate()
             .map(|(i, n)| ListItem::new(format!(" {:>2}  {n}", i + 1)))
             .collect();
-        let title = if picker.filter.is_empty() {
-            picker.title.clone()
-        } else {
-            format!("{}  /{}", picker.title, picker.filter)
-        };
+        let title = slash::picker_filter_title(&picker.title, &picker.filter);
         let list = List::new(items)
             .block(Block::default().title(title).borders(Borders::ALL))
             .highlight_style(
