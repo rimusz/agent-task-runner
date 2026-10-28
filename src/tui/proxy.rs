@@ -98,18 +98,16 @@ pub(crate) const CLAUDE_MODELS: &[&str] = &[
 ];
 
 /// Claude `/model` help aliases (Rs-MBP `claude /model`). Secondary
-/// rows — the picker leads with [`CLAUDE_MODELS`].
-pub(crate) const CLAUDE_ALIASES: &[&str] = &[
-    "sonnet",
-    "opus",
-    "haiku",
-    "fable",
-    "best",
-    "sonnet[1m]",
-    "opus[1m]",
-    "fable[1m]",
-    "opusplan",
-];
+/// rows — the picker leads with [`CLAUDE_MODELS`]. Never `sonnet[1m]`
+/// / `opus[1m]` / `fable[1m]` — those are SGR crumbs (`ESC[1m`).
+pub(crate) const CLAUDE_ALIASES: &[&str] =
+    &["sonnet", "opus", "haiku", "fable", "best", "opusplan"];
+
+/// Last-resort Grok ids when `grok models` has not been cached yet.
+/// The strip and picker use a real id from this list — never prose
+/// headers (`Available`, `You`, `Default`, `Models`).
+pub(crate) const GROK_MODELS: &[&str] =
+    &["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"];
 
 /// Last-resort Codex ids when `~/.codex/models_cache.json` (and the
 /// picker catalog) are missing. `codex models` is a TUI — never spawn it.
@@ -192,7 +190,8 @@ pub(crate) fn collect_models(
         return Vec::new();
     };
     let cfg = shared.config.read().unwrap().clone();
-    let current = session_model_for(&shared.db, key, &pname);
+    let current =
+        session_model_for(&shared.db, key, &pname).filter(|n| accept_model_name(&kind, n));
     let mut out: Vec<ModelChoice> = Vec::new();
     let mut push = |name: String, tag: &str| {
         let name = name.trim().to_string();
@@ -237,6 +236,11 @@ pub(crate) fn collect_models(
             push(b.model.to_string(), "preset");
         }
     }
+    if kind == "grok" {
+        for id in GROK_MODELS {
+            push((*id).to_string(), "catalog");
+        }
+    }
     if kind == "claude" {
         for id in CLAUDE_MODELS {
             push((*id).to_string(), "catalog");
@@ -270,7 +274,65 @@ pub(crate) fn collect_models(
     } else if let Some(e) = out.iter_mut().find(|m| m.tag.contains("config")) {
         e.current = true;
     }
+    if kind == "claude" {
+        out = primary_then_aliases(out);
+    }
     out
+}
+
+/// Full Claude ids stay ahead of short aliases, even when the session
+/// / config current is `opus` / `sonnet` / …
+fn primary_then_aliases(list: Vec<ModelChoice>) -> Vec<ModelChoice> {
+    let (primary, secondary): (Vec<_>, Vec<_>) = list.into_iter().partition(|m| {
+        !CLAUDE_ALIASES
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(&m.name))
+    });
+    let mut out = primary;
+    out.extend(secondary);
+    out
+}
+
+/// Strip / footer model: first real id among session, last-run, config,
+/// detect, then this kind's catalog seed. Never prose headers.
+pub(crate) fn resolve_display_model(
+    kind: &str,
+    cli: Option<&Path>,
+    candidates: &[Option<String>],
+) -> String {
+    for c in candidates {
+        let Some(raw) = c.as_deref() else {
+            continue;
+        };
+        let name = crate::detect::strip_ansi(raw);
+        let name = name.trim();
+        if accept_model_name(kind, name) {
+            return name.to_string();
+        }
+    }
+    if let Some(cli) = cli {
+        if let Some(id) = cached_cli_model_ids(kind, cli)
+            .into_iter()
+            .find(|n| accept_model_name(kind, n))
+        {
+            return id;
+        }
+    }
+    for id in kind_seed_models(kind) {
+        if accept_model_name(kind, id) {
+            return (*id).to_string();
+        }
+    }
+    "—".into()
+}
+
+fn kind_seed_models(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "grok" => GROK_MODELS,
+        "claude" => CLAUDE_MODELS,
+        "codex" => CODEX_ALIASES,
+        _ => &[],
+    }
 }
 
 /// Model ids from a provider `models` CLI (or help text we must not trust).
@@ -301,6 +363,9 @@ pub(crate) fn parse_cli_model_ids(text: &str) -> Vec<String> {
             .trim();
         for raw in line.split_whitespace() {
             let tok = normalize_model_token(raw);
+            if crate::detect::has_csi_leftover(tok) {
+                continue;
+            }
             if accept_model_name("", tok) {
                 push_id(&mut out, tok);
             }
@@ -360,16 +425,35 @@ fn is_help_or_noise_line(line: &str) -> bool {
 
 fn normalize_model_token(s: &str) -> &str {
     s.trim_matches(|c: char| {
-        !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_' | '.' | '/' | ':' | '[' | ']')
+        !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_' | '.' | '/' | ':')
     })
 }
 
-fn accept_model_name(kind: &str, name: &str) -> bool {
-    let name = name.trim();
+pub(crate) fn accept_model_name(kind: &str, name: &str) -> bool {
+    let stripped = crate::detect::strip_ansi(name);
+    let name = stripped.trim();
+    if name.is_empty() || crate::detect::has_csi_leftover(name) {
+        return false;
+    }
+    if kind == "codex" && is_codex_non_chat_id(name) {
+        return false;
+    }
     if is_placeholder_model(name) || is_junk_model_label(name) {
         return is_kind_alias(kind, name);
     }
     is_kind_alias(kind, name) || looks_like_cli_model_id(name)
+}
+
+/// Codex slugs that are not interactive chat models (auto-review,
+/// tool-only, non-interactive). Keep `gpt-*` / chat ids.
+fn is_codex_non_chat_id(name: &str) -> bool {
+    let t = name.trim().to_ascii_lowercase();
+    t.contains("auto-review")
+        || t.contains("auto_review")
+        || t.contains("tool-only")
+        || t.contains("tool_only")
+        || t.contains("non-interactive")
+        || t.contains("noninteractive")
 }
 
 fn is_placeholder_model(name: &str) -> bool {
@@ -411,12 +495,12 @@ fn is_kind_alias(kind: &str, name: &str) -> bool {
 }
 
 fn looks_like_cli_model_id(s: &str) -> bool {
-    if s.len() < 2 || s.starts_with('/') {
+    if s.len() < 2 || s.starts_with('/') || crate::detect::has_csi_leftover(s) {
         return false;
     }
     if !s
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '[' | ']'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':'))
     {
         return false;
     }
@@ -424,12 +508,10 @@ fn looks_like_cli_model_id(s: &str) -> bool {
         return false;
     }
     // Lone versions (`5.5` from `Opus 5.5`) are not ids.
-    if s.chars()
-        .all(|c| c.is_ascii_digit() || c == '.' || c == '[' || c == ']')
-    {
+    if s.chars().all(|c| c.is_ascii_digit() || c == '.') {
         return false;
     }
-    s.contains('-') || s.contains('/') || s.contains('[') || s.chars().any(|c| c.is_ascii_digit())
+    s.contains('-') || s.contains('/') || s.chars().any(|c| c.is_ascii_digit())
 }
 
 fn fresh_cached_ids(kind: &str, cli: &Path) -> Option<Vec<String>> {
@@ -912,10 +994,13 @@ Available models:
             "gpt-5.6-terra",
             "gpt-5.6-luna",
             "gpt-5.5",
-            "codex-auto-review",
         ] {
             assert!(ids.iter().any(|s| s == want), "missing {want} in {ids:?}");
         }
+        assert!(
+            !ids.iter().any(|s| s == "codex-auto-review"),
+            "auto-review is not a chat model: {ids:?}"
+        );
         for bad in [
             "GPT-6.1-Sol",
             "GPT-6.1 Terra",
@@ -944,6 +1029,10 @@ Available models:
         assert!(
             ids.iter().any(|s| s == "clinepass/cline-pass-glm-5.2"),
             "{ids:?}"
+        );
+        assert!(
+            !ids.iter().any(|s| s == "codex-auto-review"),
+            "auto-review is not a chat model: {ids:?}"
         );
         assert_no_junk(&ids);
     }
@@ -995,13 +1084,118 @@ Available models:
         assert!(!accept_model_name("claude", ""));
         assert!(!accept_model_name("grok", "Available"));
         assert!(!accept_model_name("grok", "Available models"));
+        assert!(!accept_model_name("grok", "You"));
+        assert!(!accept_model_name("grok", "Default"));
+        assert!(!accept_model_name("grok", "Models"));
+        assert!(!accept_model_name("codex", "codex-auto-review"));
+        assert!(!accept_model_name("codex", "gpt-5.5-auto-review"));
+        assert!(accept_model_name("codex", "gpt-6.1-sol"));
         assert!(accept_model_name("cursor", "auto"));
         assert!(accept_model_name("cursor", "composer-2.5"));
         assert!(accept_model_name("claude", "sonnet"));
-        assert!(accept_model_name("claude", "sonnet[1m]"));
+        assert!(
+            !accept_model_name("claude", "sonnet[1m]"),
+            "SGR crumb must never be a picker row"
+        );
+        assert!(!accept_model_name("claude", "opus[1m]"));
+        assert!(!accept_model_name("claude", "fable[1m]"));
         assert!(accept_model_name("claude", "claude-sonnet-5-5"));
         assert!(accept_model_name("claude", "claude-opus-5-5"));
         assert!(accept_model_name("opencode", "moonshotai/kimi-k2.6"));
+    }
+
+    #[test]
+    fn parse_cli_model_ids_strips_ansi_and_rejects_sgr_crumbs() {
+        let ids = parse_cli_model_ids(
+            "\u{1b}[1mAvailable models:\u{1b}[0m\n  * \u{1b}[1mgrok-4.7\u{1b}[0m (default)\n  - sonnet[1m]\n  - opus[1m]\n  - fable[1m]\n  - grok-4.6\n",
+        );
+        assert!(ids.iter().any(|s| s == "grok-4.7"), "{ids:?}");
+        assert!(ids.iter().any(|s| s == "grok-4.6"), "{ids:?}");
+        for bad in ["Available", "sonnet[1m]", "opus[1m]", "fable[1m]", "You"] {
+            assert!(
+                !ids.iter().any(|s| s.eq_ignore_ascii_case(bad)),
+                "junk {bad:?} leaked into {ids:?}"
+            );
+        }
+        assert!(
+            !ids.iter()
+                .any(|s| s.contains("[1m]") || s.contains('\u{1b}')),
+            "{ids:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_display_model_never_uses_prose_headers() {
+        let grok = resolve_display_model(
+            "grok",
+            None,
+            &[
+                Some("Available".into()),
+                Some("You".into()),
+                Some("Default".into()),
+                Some("Models".into()),
+                Some("".into()),
+            ],
+        );
+        assert_eq!(grok, "grok-4.7");
+        assert_ne!(grok.to_ascii_lowercase(), "available");
+        let from_session = resolve_display_model(
+            "grok",
+            None,
+            &[Some("grok-4.7-build-fast".into()), Some("Available".into())],
+        );
+        assert_eq!(from_session, "grok-4.7-build-fast");
+        let claude = resolve_display_model("claude", None, &[Some("Available".into())]);
+        assert!(claude.starts_with("claude-"), "{claude}");
+    }
+
+    #[test]
+    fn claude_aliases_are_secondary_and_exclude_sgr_crumbs() {
+        for crumb in ["sonnet[1m]", "opus[1m]", "fable[1m]"] {
+            assert!(
+                !CLAUDE_ALIASES.iter().any(|a| a.eq_ignore_ascii_case(crumb)),
+                "{crumb} must not be a Claude alias"
+            );
+        }
+        let mixed = vec![
+            ModelChoice {
+                name: "opus".into(),
+                tag: "session".into(),
+                current: true,
+            },
+            ModelChoice {
+                name: "claude-sonnet-5-5".into(),
+                tag: "catalog".into(),
+                current: false,
+            },
+            ModelChoice {
+                name: "sonnet".into(),
+                tag: "alias".into(),
+                current: false,
+            },
+            ModelChoice {
+                name: "claude-opus-5-5".into(),
+                tag: "catalog".into(),
+                current: false,
+            },
+        ];
+        let ordered = primary_then_aliases(mixed);
+        let names: Vec<&str> = ordered.iter().map(|m| m.name.as_str()).collect();
+        let first_alias = names
+            .iter()
+            .position(|n| CLAUDE_ALIASES.iter().any(|a| a.eq_ignore_ascii_case(n)))
+            .unwrap();
+        let last_full = names
+            .iter()
+            .rposition(|n| n.starts_with("claude-"))
+            .unwrap();
+        assert!(
+            last_full < first_alias,
+            "full ids must precede aliases: {names:?}"
+        );
+        assert_eq!(names[0], "claude-sonnet-5-5");
+        assert!(names.contains(&"opus"));
+        assert!(ordered.iter().any(|m| m.name == "opus" && m.current));
     }
 
     fn write_models_cli(dir: &Path, name: &str, log: &Path, body: &str) -> PathBuf {

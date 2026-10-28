@@ -331,6 +331,7 @@ async fn model_slash_claude_lists_full_ids_not_only_aliases() {
         ("codex", false, "success"),
     ])
     .await;
+    tui::set_session_model(&shared, "cli-default", "opus").unwrap();
     let list = tui::preview_line(&shared, "cli-default", "/model").unwrap();
     assert!(list.starts_with("model-picker"), "{list}");
     for want in [
@@ -356,6 +357,31 @@ async fn model_slash_claude_lists_full_ids_not_only_aliases() {
     assert!(
         numbered.contains(&"sonnet"),
         "short aliases stay secondary: {list}"
+    );
+    assert!(
+        numbered.contains(&"opus"),
+        "session alias stays in the list: {list}"
+    );
+    let last_full = numbered
+        .iter()
+        .rposition(|id| id.starts_with("claude-"))
+        .expect("full Claude ids");
+    let first_alias = numbered
+        .iter()
+        .position(|id| {
+            matches!(
+                *id,
+                "sonnet" | "opus" | "haiku" | "fable" | "best" | "opusplan"
+            )
+        })
+        .expect("short aliases");
+    assert!(
+        last_full < first_alias,
+        "full ids must precede aliases (session opus must not lead): {numbered:?}"
+    );
+    assert!(
+        !numbered.iter().any(|id| id.contains("[1m]")),
+        "SGR crumbs must not be picker rows: {numbered:?}"
     );
     assert!(
         !list.contains("Available models") && !list.contains("Usage:"),
@@ -503,6 +529,66 @@ async fn model_slash_codex_lists_more_than_config_row() {
         "codex /model must not be a single config row: {list}"
     );
     assert!(!list.contains("Available models"), "{list}");
+    assert!(
+        !list.contains("codex-auto-review"),
+        "auto-review is not a chat model: {list}"
+    );
+}
+
+#[tokio::test]
+async fn grok_strip_never_shows_available() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", false, "success"),
+        ("grok", true, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    let switch = tui::preview_line(&shared, "cli-default", "/provider grok").unwrap();
+    assert!(switch.starts_with("note"), "{switch}");
+    {
+        let mut cfg = shared.config.write().unwrap();
+        for p in &mut cfg.providers {
+            if p.name == "grok" {
+                p.model = "Available".into();
+            }
+        }
+    }
+    shared
+        .db
+        .meta_set(&tui::model_meta_key("cli-default", "grok"), "Available")
+        .unwrap();
+    let strip = tui::composer_status_line(&shared, "cli-default");
+    let footer = tui::footer_line(&shared, "cli-default");
+    assert!(
+        strip.starts_with("grok / grok-"),
+        "strip must show a real Grok id, not prose: {strip}"
+    );
+    assert!(strip.contains("grok-4.7"), "strip={strip}");
+    for bad in ["Available", "You", "Default", "Models"] {
+        let model = strip
+            .split(" / ")
+            .nth(1)
+            .unwrap_or("")
+            .split(" · ")
+            .next()
+            .unwrap_or("")
+            .trim();
+        assert!(
+            !model.eq_ignore_ascii_case(bad),
+            "prose {bad:?} leaked into strip={strip} footer={footer}"
+        );
+    }
+    let list = tui::preview_line(&shared, "cli-default", "/model").unwrap();
+    assert!(list.starts_with("model-picker"), "{list}");
+    assert!(list.contains("grok-4.7"), "{list}");
+    for bad in ["Available", "You", "Default"] {
+        let leaked = list.lines().any(|line| {
+            line.split_whitespace()
+                .any(|tok| tok.eq_ignore_ascii_case(bad))
+        });
+        assert!(!leaked, "prose token {bad:?} leaked into {list}");
+    }
 }
 
 #[test]

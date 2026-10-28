@@ -20,8 +20,11 @@ the other provider's last session model; never a chat turn; the TUI
 overlay does not dump the catalog into the transcript). The under-input
 strip stays in sync with the session provider/model (`/provider` and
 `/model` are the switchers; `/model` lists real CLI ids — never
-`Available` / help prose; Claude seeds documented full ids;
-Codex reads `~/.codex/models_cache.json` slugs;
+`Available` / help prose; Claude seeds documented full ids
+(short aliases secondary; never `sonnet[1m]` SGR crumbs);
+Grok strip/picker use a real catalog id, never `Available`;
+Codex reads `~/.codex/models_cache.json` slugs (chat ids only —
+not `codex-auto-review`);
 host `/provider` `/model` stay off the transcript).
 Ctrl+C quits atr; Esc dismisses menus only.
 `/new` `/quit` `/status` `/help`

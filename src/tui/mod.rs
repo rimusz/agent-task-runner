@@ -217,7 +217,9 @@ pub(crate) fn last_run_model_for(shared: &Shared, key: &str, provider: &str) -> 
 /// Apply a stored `/model <id>` override onto the provider used for this turn.
 pub fn apply_session_model(provider: &mut crate::config::Provider, db: &Db, key: &str) {
     if let Some(m) = session_model_for(db, key, &provider.name) {
-        provider.model = m;
+        if proxy::accept_model_name(&provider.kind, &m) {
+            provider.model = m;
+        }
     }
 }
 
@@ -412,6 +414,14 @@ pub(crate) fn apply_model_pick(
     if name.is_empty() {
         return Ok(Step::OpenModelPicker);
     }
+    if let Some((kind, _, pname)) = proxy::current_kind_cli(shared, key) {
+        if !proxy::accept_model_name(&kind, name) {
+            return Ok(Step::Note(format!(
+                "no model matching {name:?}.\n{}",
+                slash::model_pick_usage(&pname, &kind, &list)
+            )));
+        }
+    }
     set_model_note(shared, key, name)
 }
 
@@ -459,9 +469,19 @@ fn store_session_model(shared: &Shared, key: &str, model: &str) -> Result<()> {
     let Some(provider) = session_provider_now(shared, key) else {
         bail!("no provider for session {key}");
     };
-    shared
-        .db
-        .meta_set(&model_meta_key(key, &provider), model.trim())?;
+    let model = model.trim();
+    let kind = shared
+        .config
+        .read()
+        .unwrap()
+        .provider(&provider)
+        .map(|p| p.kind.clone());
+    if let Some(kind) = kind {
+        if !proxy::accept_model_name(&kind, model) {
+            bail!("not a usable model id: {model}");
+        }
+    }
+    shared.db.meta_set(&model_meta_key(key, &provider), model)?;
     Ok(())
 }
 
@@ -859,18 +879,23 @@ fn session_chrome(shared: &Shared, key: &str) -> SessionChrome {
     let runs = shared.db.list_runs(Some(key)).unwrap_or_default();
     let last = runs.last();
     let provider = session_provider_now(shared, key).unwrap_or_else(|| "—".into());
-    let model = session_model_for(&shared.db, key, &provider)
-        .or_else(|| last_run_model_for(shared, key, &provider))
-        .or_else(|| {
+    let (kind, cli) = cfg
+        .provider(&provider)
+        .map(|p| (p.kind.clone(), p.cli.clone()))
+        .unwrap_or_default();
+    let model = proxy::resolve_display_model(
+        &kind,
+        (!cli.as_os_str().is_empty()).then_some(cli.as_path()),
+        &[
+            session_model_for(&shared.db, key, &provider),
+            last_run_model_for(shared, key, &provider),
             cfg.provider(&provider)
                 .map(|p| p.model.clone())
-                .filter(|s| !s.is_empty())
-        })
-        .or_else(|| {
+                .filter(|s| !s.is_empty()),
             cfg.provider(&provider)
-                .and_then(|p| crate::detect::cli_default_model(&p.kind))
-        })
-        .unwrap_or_else(|| "default".into());
+                .and_then(|p| crate::detect::cli_default_model(&p.kind)),
+        ],
+    );
     let mut extras = Vec::new();
     if let Some(r) = last {
         if let Ok(rows) = shared.db.list_usage_for_run(r.id) {

@@ -444,18 +444,67 @@ pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+        if c == '\u{9b}' {
+            // C1 CSI (single-byte equivalent of ESC [).
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        } else if c == '\u{1b}' && chars.peek() == Some(&'[') {
             chars.next();
             for c in chars.by_ref() {
                 if ('@'..='~').contains(&c) {
                     break;
                 }
             }
+        } else if c == '\u{1b}' {
+            // Other ESC sequences (OSC, charset, …): drop through the terminator.
+            match chars.next() {
+                Some(']') => {
+                    for c in chars.by_ref() {
+                        if c == '\u{7}' || c == '\u{9c}' {
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {
+                    if let Some(&c) = chars.peek() {
+                        if ('@'..='~').contains(&c) {
+                            chars.next();
+                        }
+                    }
+                }
+                None => {}
+            }
         } else {
             out.push(c);
         }
     }
     out
+}
+
+/// True when a token still carries CSI/SGR crumbs after [`strip_ansi`].
+/// Matches `*[\d*m` leftovers (`sonnet[1m]`) and raw ESC / C1 CSI.
+pub fn has_csi_leftover(s: &str) -> bool {
+    if s.contains('\u{1b}') || s.contains('\u{9b}') {
+        return true;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'm' {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 pub fn parse_auth_output(text: &str, success: bool) -> Auth {
@@ -637,6 +686,7 @@ fn is_provider_id(s: &str) -> bool {
 }
 
 pub fn parse_models(text: &str) -> Vec<String> {
+    let text = strip_ansi(text);
     let mut out = Vec::new();
     for line in text.lines() {
         let t = line.trim();
@@ -644,6 +694,9 @@ pub fn parse_models(text: &str) -> Vec<String> {
             continue;
         }
         let tok = t.split_whitespace().next().unwrap_or("");
+        if has_csi_leftover(tok) {
+            continue;
+        }
         if tok.contains('/')
             && tok
                 .chars()
@@ -1075,6 +1128,25 @@ exit 0
             first_version_token("cursor-agent: keychain is locked.\x1b[0m"),
             None
         );
+    }
+
+    #[test]
+    fn strip_ansi_and_reject_sgr_crumbs() {
+        assert_eq!(strip_ansi("\u{1b}[1msonnet\u{1b}[0m"), "sonnet");
+        assert_eq!(
+            strip_ansi("\u{1b}[1mAvailable models:\u{1b}[0m"),
+            "Available models:"
+        );
+        assert!(has_csi_leftover("sonnet[1m]"));
+        assert!(has_csi_leftover("opus[1m]"));
+        assert!(has_csi_leftover("fable[1m]"));
+        assert!(has_csi_leftover("\u{1b}[1msonnet"));
+        assert!(!has_csi_leftover("sonnet"));
+        assert!(!has_csi_leftover("claude-sonnet-5-5"));
+        assert!(!has_csi_leftover("gpt-6.1-sol"));
+        let ids = parse_models("moonshotai/kimi-k2.6[1m]\nopenai/gpt-5.6\n");
+        assert!(!ids.iter().any(|s| s.contains("[1m]")), "{ids:?}");
+        assert!(ids.iter().any(|s| s == "openai/gpt-5.6"), "{ids:?}");
     }
 
     #[test]
