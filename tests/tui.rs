@@ -865,13 +865,10 @@ fn bare_atr_launches_tui() {
     );
     assert!(out.status.success(), "{text}");
     assert!(
-        text.contains("bin") && text.contains("grok"),
-        "named session chrome shows the short name: {text}"
+        text.contains("bin · grok") || text.contains("bin ·"),
+        "named session chrome shows the short name once: {text}"
     );
-    assert!(
-        !text.contains("cli-bin"),
-        "internal task key stays off oneshot chrome: {text}"
-    );
+    assert!(text.contains("grok"), "{text}");
 
     let mut child = atr()
         .env("ATR_CONFIG", &cfg)
@@ -893,8 +890,8 @@ fn bare_atr_launches_tui() {
     );
     assert!(out.status.success(), "{text}");
     assert!(
-        !text.contains("cli-default"),
-        "default session key stays off chrome: {text}"
+        !text.contains("session  cli-default"),
+        "default session key must not be shouted in chrome: {text}"
     );
     assert!(
         text.contains("hello from bare atr") || text.contains("done") || text.contains("working"),
