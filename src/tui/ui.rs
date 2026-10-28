@@ -1,5 +1,7 @@
 //! Ratatui chat host: transcript, composer, under-input status strip.
 //!
+//! The TUI is a provider proxy, not a second personality. Mouse capture
+//! stays off so the terminal can select/copy; scroll is PgUp/PgDn.
 //! Does not open the alternate screen for `atr ask`. Slash handling is
 //! [`super::step_line`] — atr-local host commands plus provider proxy.
 
@@ -15,10 +17,7 @@ use crate::scheduler;
 use crate::tz::DisplayTz;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEventKind,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -68,7 +67,9 @@ pub(crate) async fn run(
 fn setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode().context("enable raw mode")?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture).context("enter alt screen")?;
+    // No mouse capture: the terminal keeps native selection for copy/paste.
+    // Scroll is keyboard-only (PgUp/PgDn). Do not EnableMouseCapture.
+    execute!(out, EnterAlternateScreen).context("enter alt screen")?;
     let backend = CrosstermBackend::new(out);
     Terminal::new(backend).context("ratatui terminal")
 }
@@ -76,12 +77,7 @@ fn setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 fn restore() -> Result<()> {
     let _ = disable_raw_mode();
     let mut out = io::stdout();
-    let _ = execute!(
-        out,
-        DisableMouseCapture,
-        LeaveAlternateScreen,
-        crossterm::cursor::Show
-    );
+    let _ = execute!(out, LeaveAlternateScreen, crossterm::cursor::Show);
     Ok(())
 }
 
@@ -138,10 +134,7 @@ struct Msg {
 
 impl App {
     fn new(shared: &Shared, key: &str) -> Self {
-        let welcome = format!(
-            "{}\nType a message. / for atr commands · ↑↓ history · /cli for the provider TUI.",
-            super::banner_text(shared, key).trim_end()
-        );
+        let welcome = super::banner_text(shared, key).trim_end().to_string();
         Self {
             messages: vec![Msg {
                 role: Role::System,
@@ -223,20 +216,6 @@ async fn event_loop(
                 Some(LoopEnd::Quit(code)) => return Ok(LoopEnd::Quit(code)),
                 Some(LoopEnd::Native) => return Ok(LoopEnd::Native),
                 None => {}
-            },
-            Event::Mouse(m) => match m.kind {
-                MouseEventKind::ScrollUp => {
-                    app.follow = false;
-                    app.scroll = app.scroll.saturating_add(1);
-                }
-                MouseEventKind::ScrollDown => {
-                    if app.scroll == 0 {
-                        app.follow = true;
-                    } else {
-                        app.scroll = app.scroll.saturating_sub(1);
-                    }
-                }
-                _ => {}
             },
             Event::Resize(_, _) => {}
             _ => {}
@@ -379,7 +358,7 @@ fn submit_or_queue(
     set_input(app, "");
     app.slash_menu = None;
     let trimmed = line.trim();
-    if trimmed.is_empty() || slash::is_bare_slash(trimmed) {
+    if slash::is_bare_slash(trimmed) || !super::is_turn_text(trimmed) {
         return Ok(None);
     }
     app.history.push(trimmed);
@@ -759,7 +738,7 @@ fn draw(f: &mut Frame, app: &App, shared: &Shared, key: &str, ws: &Workspace) {
         ])
         .split(area);
 
-    let title = format!(" atr tui  {key} ");
+    let title = super::session_title(key);
     f.render_widget(
         Paragraph::new(title).style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[0],

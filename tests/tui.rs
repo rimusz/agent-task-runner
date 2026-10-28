@@ -127,8 +127,52 @@ async fn oneshot_runs_in_process_without_serve() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].outcome.as_deref(), Some("success"));
     let footer = tui::footer_line(&shared, "cli-default");
-    assert!(footer.contains("cli-default"), "{footer}");
+    assert!(
+        !footer.contains("cli-default"),
+        "default session key stays internal: {footer}"
+    );
     assert!(footer.contains("claude"), "{footer}");
+}
+
+#[tokio::test]
+async fn english_prompt_is_a_provider_turn_not_stray_keystroke() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", true, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+    ])
+    .await;
+    let prompt = "what can you do for me?";
+    assert_eq!(tui::classify_line(prompt), "chat");
+    assert_eq!(
+        tui::preview_line(&shared, "cli-default", prompt).unwrap(),
+        "turn"
+    );
+    let code = tui::run_oneshot(shared.clone(), opts(prompt, Some("claude"), None))
+        .await
+        .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    let msgs = shared.db.all_messages("cli-default").unwrap();
+    assert!(
+        msgs.iter().any(|m| m.body.contains(prompt)),
+        "prompt must be stored as a user message: {msgs:?}"
+    );
+    let runs = shared.db.list_runs(Some("cli-default")).unwrap();
+    assert_eq!(runs.len(), 1, "must spawn a provider run");
+    assert_eq!(runs[0].provider, "claude");
+    let out = tui::footer_line(&shared, "cli-default");
+    let result = shared
+        .db
+        .get_task("cli-default")
+        .unwrap()
+        .unwrap()
+        .result_text;
+    let joined = format!("{result}\n{out}");
+    assert!(
+        !joined.to_ascii_lowercase().contains("stray keystroke"),
+        "host must not invent a stray-keystroke reply: {joined}"
+    );
 }
 
 #[tokio::test]
@@ -820,8 +864,14 @@ fn bare_atr_launches_tui() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(out.status.success(), "{text}");
-    assert!(text.contains("cli-bin"), "{text}");
-    assert!(text.contains("grok"), "{text}");
+    assert!(
+        text.contains("bin") && text.contains("grok"),
+        "named session chrome shows the short name: {text}"
+    );
+    assert!(
+        !text.contains("cli-bin"),
+        "internal task key stays off oneshot chrome: {text}"
+    );
 
     let mut child = atr()
         .env("ATR_CONFIG", &cfg)
@@ -842,7 +892,14 @@ fn bare_atr_launches_tui() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(out.status.success(), "{text}");
-    assert!(text.contains("cli-default"), "{text}");
+    assert!(
+        !text.contains("cli-default"),
+        "default session key stays off chrome: {text}"
+    );
+    assert!(
+        text.contains("hello from bare atr") || text.contains("done") || text.contains("working"),
+        "plain text must reach the provider: {text}"
+    );
 }
 
 #[test]

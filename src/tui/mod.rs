@@ -1,8 +1,14 @@
 //! Interactive terminal session (`atr tui`, also a bare `atr`) and
 //! one-shot CI turns (`atr ask`).
 //!
+//! Product rule: the TUI is the provider CLI, with atr as the proxy
+//! (session reuse + prompt-cache). Host chrome is slashes, pickers, and
+//! the transcript layout. Plain composer text is always a provider turn
+//! — atr never invents chat replies.
+//!
 //! A session is a normal atr task keyed `cli-<name>` (default
-//! `cli-default`), separate from Telegram's `tg<chat>` keys. The engine
+//! `cli-default` — the in-process TUI session, **not** a model id),
+//! separate from Telegram's `tg<chat>` keys. The engine
 //! runs in-process: `atr serve` is not required. Resume, the stable
 //! prefix, worktree pool, and provider-switch handoff are the existing
 //! task machinery.
@@ -41,7 +47,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+/// Task-key prefix for in-process TUI / `atr ask` sessions (`cli-work`).
 pub const SESSION_PREFIX: &str = "cli-";
+/// Bare `atr` / `atr tui` session name. The stored task key is
+/// [`tui_task_key`] → `cli-default`. That is the default chat session,
+/// not a model. User-facing chrome omits it unless `/session` is set.
 pub const DEFAULT_SESSION: &str = "default";
 pub const ASK_PROMPT_REQUIRED: &str =
     "atr ask requires a prompt. Example: atr ask \"what is 2+2?\"  (use `atr tui` for the interactive session)";
@@ -92,7 +102,8 @@ pub fn is_tui_key(key: &str) -> bool {
         .is_some_and(|rest| !rest.is_empty())
 }
 
-/// `work` or `cli-work` → `cli-work`. Default name is `default`.
+/// `work` or `cli-work` → `cli-work`. Default name is [`DEFAULT_SESSION`].
+/// Keep this key stable: `/model` meta is `tui-model:<key>:<provider>`.
 pub fn tui_task_key(name: &str) -> Result<String> {
     let raw = name.trim();
     let raw = raw.strip_prefix(SESSION_PREFIX).unwrap_or(raw);
@@ -109,6 +120,33 @@ pub fn tui_task_key(name: &str) -> Result<String> {
         bail!("session name {raw:?} must be letters, digits, '-' or '_'");
     }
     Ok(format!("{SESSION_PREFIX}{raw}"))
+}
+
+/// User-facing session label. `None` for the default `cli-default` key
+/// so chrome does not shout the internal task id as if it were a model.
+pub fn session_chrome_label(key: &str) -> Option<&str> {
+    let name = key.strip_prefix(SESSION_PREFIX).unwrap_or(key);
+    if name == DEFAULT_SESSION {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// Bold title: `atr tui` for the default session, `atr tui  work` otherwise.
+pub fn session_title(key: &str) -> String {
+    match session_chrome_label(key) {
+        None => " atr tui ".into(),
+        Some(name) => format!(" atr tui  {name} "),
+    }
+}
+
+/// True when composer text is a provider turn: any non-slash line that
+/// is not empty, not whitespace, and not control-only garbage.
+/// Real English (including `what can you do for me?`) is always a turn.
+pub fn is_turn_text(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && t.chars().any(|c| !c.is_control())
 }
 
 pub fn model_meta_key(task_key: &str, provider: &str) -> String {
@@ -367,7 +405,10 @@ pub(crate) fn step_line(
     line: &str,
 ) -> Result<Step> {
     let line = line.trim();
-    if line.is_empty() || slash::is_bare_slash(line) {
+    if slash::is_bare_slash(line) {
+        return Ok(Step::Note(String::new()));
+    }
+    if slash::parse_slash(line).is_none() && !is_turn_text(line) {
         return Ok(Step::Note(String::new()));
     }
     match slash::parse_slash(line) {
@@ -451,6 +492,9 @@ pub fn classify_line(line: &str) -> &'static str {
     let line = line.trim();
     if slash::is_bare_slash(line) {
         return "slash-menu";
+    }
+    if !is_turn_text(line) && slash::parse_slash(line).is_none() {
+        return "ignore";
     }
     match slash::parse_slash(line) {
         None => "chat",
@@ -574,22 +618,12 @@ fn warn_if_no_provider(shared: &Shared, oneshot: bool) -> Result<()> {
 }
 
 pub fn banner_text(shared: &Shared, key: &str) -> String {
-    let cfg = shared.config.read().unwrap().clone();
-    let footer = footer_line(shared, key);
-    let provider = tui_provider_now(shared, key)
-        .or_else(|| {
-            cfg.providers
-                .iter()
-                .find(|p| p.enabled)
-                .map(|p| p.name.clone())
-        })
-        .unwrap_or_else(|| "none".into());
-    format!(
-        "atr tui  {footer}\nsession  {key}\nprovider {provider}\nlist     {}\n{}\n\
-         /help · other /slashes go to the provider · /quit\n",
-        provider_list_short(&cfg),
-        daemon_line(&shared.config_path),
-    )
+    let status = composer_status_line(shared, key);
+    let head = match session_chrome_label(key) {
+        None => format!("atr tui · {status}"),
+        Some(name) => format!("atr tui  {name} · {status}"),
+    };
+    format!("{head}\n/  host commands · /cli provider TUI · /quit\n")
 }
 
 pub fn provider_list_short(cfg: &crate::config::Config) -> String {
@@ -870,7 +904,10 @@ impl SessionChrome {
     }
 
     fn footer_line(&self, key: &str) -> String {
-        format!("{key} · {}", self.status_line())
+        match session_chrome_label(key) {
+            None => self.status_line(),
+            Some(name) => format!("{name} · {}", self.status_line()),
+        }
     }
 }
 
@@ -1019,10 +1056,32 @@ mod tests {
         assert_eq!(classify_line("/atr model opus"), "model");
         assert_eq!(classify_line("/compact"), "proxy");
         assert_eq!(classify_line("hello"), "chat");
+        assert_eq!(classify_line("what can you do for me?"), "chat");
         assert_eq!(classify_line("/provider"), "provider");
         assert_eq!(classify_line("/"), "slash-menu");
         assert_eq!(classify_line(" / "), "slash-menu");
+        assert_eq!(classify_line(""), "ignore");
+        assert_eq!(classify_line("   \t"), "ignore");
+        assert_eq!(classify_line("\u{0001}\u{0007}"), "ignore");
         assert_eq!(classify_interrupt(), "quit");
+    }
+
+    #[test]
+    fn english_prompt_is_a_provider_turn() {
+        assert!(is_turn_text("what can you do for me?"));
+        assert!(is_turn_text("w"));
+        assert!(is_turn_text("?"));
+        assert!(!is_turn_text(""));
+        assert!(!is_turn_text(" \n"));
+        assert!(!is_turn_text("\u{0001}"));
+    }
+
+    #[test]
+    fn default_session_chrome_omits_cli_default() {
+        assert_eq!(session_chrome_label("cli-default"), None);
+        assert_eq!(session_title("cli-default"), " atr tui ");
+        assert_eq!(session_chrome_label("cli-work"), Some("work"));
+        assert_eq!(session_title("cli-work"), " atr tui  work ");
     }
 
     #[test]
@@ -1056,6 +1115,7 @@ mod tests {
     fn banner_helpers_are_tight() {
         assert!(format_daemon_line(true).contains("atr status"));
         assert!(format_daemon_line(false).contains("atr service install"));
+        assert!(daemon_line(std::path::Path::new("/tmp")).contains("atr"));
         let cfg = crate::config::parse_config_toml(
             r#"
 [[provider]]

@@ -60,7 +60,9 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
 - **TUI / ask:** a bare `atr` (or `atr tui`) is an interactive in-process
   chat TUI (ratatui transcript + composer + under-input status strip). `atr ask "prompt"` is
   the one-shot / CI entrypoint on the same engine (no alternate screen).
-  A session is a normal task keyed `cli-<name>` (default `cli-default`),
+  The TUI is the provider CLI; atr proxies the turn and keeps the prompt
+  cache / session. A session is a normal task keyed `cli-<name>` (default
+  `cli-default` — the in-process TUI session, not a model; chrome omits it),
   separate from Telegram `tg<chat>`. Serve is not required and never
   auto-dispatches `cli-*` keys — serve owns daemon work; the TUI / `ask`
   process owns those sessions. Provider: session pin → `--provider` →

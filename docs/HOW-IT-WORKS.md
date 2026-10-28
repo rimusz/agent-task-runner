@@ -13,7 +13,12 @@ A `[[provider]]` block can be just `name` + `kind`. CLI path, flags, and
 `reported_usage` are filled from the kind. Order in the file is the failover
 order. A bare `atr` / `atr tui` / `atr ask` follows the session pin, then
 `--provider`, then optional `[tui] providers`, then this list. Serve
-never auto-dispatches `cli-*` TUI sessions. The TUI is a session host:
+never auto-dispatches `cli-*` TUI sessions. The TUI is the provider CLI
+with atr as the proxy (token cache / session reuse). Host chrome is
+slashes, pickers, and the transcript layout — atr does not invent chat
+replies. Default task key `cli-default` is the in-process session (not a
+model) and is omitted from the title. Mouse capture is off so the
+terminal can select/copy. The TUI is a session host:
 `/provider` and `/model` are atr-local pickers (`/model` sets that
 provider's session `--model` override; switching `/provider` restores
 the other provider's last session model; never a chat turn; the TUI
