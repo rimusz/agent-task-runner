@@ -65,7 +65,11 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   `cli-default` — the in-process TUI session, not a model; chrome omits it),
   separate from Telegram `tg<chat>`. Serve is not required and never
   auto-dispatches `cli-*` keys — serve owns daemon work; the TUI / `ask`
-  process owns those sessions. Provider: session pin → `--provider` →
+  process owns those sessions. Coexistence: `owners` (pid, start token,
+  kind `serve`/`tui`) plus `runs.owner_*` / `tasks.owner_*`. Serve must
+  not reap or reconcile a run whose owner is still alive. `max_parallel`
+  is enforced in `try_start_run` (`BEGIN IMMEDIATE`) across live owners;
+  TUI turns share the cap. Provider: session pin → `--provider` →
   optional `[tui] providers` → global `[[provider]]` order.   `/provider`
   and `/model` are atr-local (list/pick). `/repo` is the mid-session git
   workspace picker (config `[[repo]]` roots; `/repo .`; `/repo none`).

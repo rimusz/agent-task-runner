@@ -92,13 +92,31 @@ pub fn write_pid(cfg: &Config) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).ok();
     }
-    fs::write(&path, format!("{}", std::process::id()))
+    let owner = crate::owner::current();
+    fs::write(&path, format!("{} {}\n", owner.pid, owner.started))
         .with_context(|| format!("write {}", path.display()))
 }
 
 pub fn read_pid(cfg: &Config) -> Option<i32> {
     let text = fs::read_to_string(pid_path(cfg)).ok()?;
-    text.trim().parse().ok()
+    text.split_whitespace().next()?.parse().ok()
+}
+
+/// True when the serve pidfile names a still-live process (pid + start token).
+pub fn pidfile_owner_alive(cfg: &Config) -> bool {
+    let text = match fs::read_to_string(pid_path(cfg)) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let mut parts = text.split_whitespace();
+    let pid: i64 = match parts.next().and_then(|s| s.parse().ok()) {
+        Some(p) => p,
+        None => return false,
+    };
+    match parts.next() {
+        Some(started) => crate::owner::owner_alive(pid, started),
+        None => crate::db::pid_alive(pid),
+    }
 }
 
 pub fn sighup_daemon(cfg: &Config) -> Result<()> {

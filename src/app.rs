@@ -351,7 +351,20 @@ impl Shared {
                 let order = idx + 1;
                 let (cooling, degraded) =
                     self.db.provider_blocked(&p.name).unwrap_or((false, false));
-                let n = inflight.values().filter(|i| i.provider == p.name).count();
+                let n = {
+                    let mut keys = std::collections::HashSet::new();
+                    for (k, i) in &inflight {
+                        if i.provider == p.name {
+                            keys.insert(k.clone());
+                        }
+                    }
+                    if let Ok(runs) = self.db.live_open_runs(Some(&p.name)) {
+                        for r in runs {
+                            keys.insert(r.task_key);
+                        }
+                    }
+                    keys.len()
+                };
                 let usage = totals.iter().find(|u| u.provider == p.name);
                 let hit = usage.and_then(|u| {
                     hit_ratio_from_sums(&p.kind, u.input, u.cache_read, u.cache_write)
@@ -510,6 +523,7 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
     }
     crate::opencode_cfg::apply_ollama_keep_alive(&cfg);
     crate::util::write_pid(&cfg)?;
+    let _ = shared.db.register_owner(crate::owner::KIND_SERVE);
     if cfg.shadow.enabled {
         crate::shadow::validate_github_cli(&cfg.github.cli)?;
     }
@@ -586,6 +600,7 @@ pub async fn serve_background(shared: Arc<Shared>) -> Result<SocketAddr> {
     cfg.validate_for_serve()?;
     crate::opencode_cfg::apply_ollama_keep_alive(&cfg);
     crate::util::write_pid(&cfg)?;
+    let _ = shared.db.register_owner(crate::owner::KIND_SERVE);
     if cfg.shadow.enabled {
         crate::shadow::validate_github_cli(&cfg.github.cli)?;
     }

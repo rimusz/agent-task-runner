@@ -29,6 +29,7 @@ pub mod mcp;
 pub mod notify;
 pub mod opencode_cfg;
 pub mod output;
+pub mod owner;
 pub mod plan;
 pub mod plugin;
 pub mod presets;

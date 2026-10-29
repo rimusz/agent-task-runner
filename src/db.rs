@@ -113,6 +113,10 @@ const TASK_SELECT: &str = "key, repo, issue, status, provider, session_id, workt
                           result_text, result_diff, result_pr_url, needs,
                           pin_strict, compare_decision, clock_started";
 
+const RUN_SELECT: &str = "id, task_key, provider, model, pid, started, ended, outcome,
+                          last_event_at, exit_code, session_id, handoff, prefix_hash,
+                          owner_pid, owner_started";
+
 #[derive(Debug, Clone)]
 pub struct RunRow {
     pub id: i64,
@@ -128,6 +132,17 @@ pub struct RunRow {
     pub session_id: Option<String>,
     pub handoff: Option<String>,
     pub prefix_hash: Option<String>,
+    pub owner_pid: Option<i64>,
+    pub owner_started: Option<String>,
+}
+
+impl RunRow {
+    pub fn owner_alive(&self) -> bool {
+        crate::owner::owner_alive(
+            self.owner_pid.unwrap_or(0),
+            self.owner_started.as_deref().unwrap_or(""),
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -550,6 +565,22 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idempotency_task ON idempotency(task_key);
             "#,
         )?;
+        let _ = conn.execute("ALTER TABLE runs ADD COLUMN owner_pid INTEGER", []);
+        let _ = conn.execute("ALTER TABLE runs ADD COLUMN owner_started TEXT", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN owner_pid INTEGER", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN owner_started TEXT", []);
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS owners (
+                pid INTEGER NOT NULL,
+                started TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                heartbeat TEXT NOT NULL,
+                PRIMARY KEY (pid, started)
+            );
+            CREATE INDEX IF NOT EXISTS owners_kind ON owners(kind);
+            "#,
+        )?;
         drop(conn);
         self.normalize_legacy_usage()?;
         Ok(())
@@ -751,10 +782,20 @@ impl Db {
 
     pub fn set_status(&self, key: &str, status: &str) -> Result<()> {
         let conn = self.lock();
-        conn.execute(
-            "UPDATE tasks SET status = ?1, updated = ?2 WHERE key = ?3",
-            params![status, now_rfc3339(), key],
-        )?;
+        if status == "running" {
+            let owner = crate::owner::current();
+            conn.execute(
+                r#"UPDATE tasks SET status = ?1, updated = ?2,
+                       owner_pid = ?3, owner_started = ?4 WHERE key = ?5"#,
+                params![status, now_rfc3339(), owner.pid, owner.started, key],
+            )?;
+        } else {
+            conn.execute(
+                r#"UPDATE tasks SET status = ?1, updated = ?2,
+                       owner_pid = NULL, owner_started = NULL WHERE key = ?3"#,
+                params![status, now_rfc3339(), key],
+            )?;
+        }
         Ok(())
     }
 
@@ -1061,11 +1102,13 @@ impl Db {
     }
 
     pub fn claim_task(&self, key: &str) -> Result<bool> {
+        let owner = crate::owner::current();
         let conn = self.lock();
         let n = conn.execute(
-            r#"UPDATE tasks SET status = 'running', updated = ?1
-               WHERE key = ?2 AND status IN ('queued', 'waiting')"#,
-            params![now_rfc3339(), key],
+            r#"UPDATE tasks SET status = 'running', updated = ?1,
+                   owner_pid = ?2, owner_started = ?3
+               WHERE key = ?4 AND status IN ('queued', 'waiting')"#,
+            params![now_rfc3339(), owner.pid, owner.started, key],
         )?;
         Ok(n == 1)
     }
@@ -1304,14 +1347,189 @@ impl Db {
     }
 
     pub fn start_run(&self, task_key: &str, provider: &str, model: &str) -> Result<i64> {
+        let owner = crate::owner::current();
+        self.start_run_as(task_key, provider, model, Some(&owner))
+    }
+
+    /// Insert an open run, optionally stamped with `owner` (None = unowned /
+    /// leftover from a dead process or a pre-owner schema).
+    pub fn start_run_as(
+        &self,
+        task_key: &str,
+        provider: &str,
+        model: &str,
+        owner: Option<&crate::owner::OwnerId>,
+    ) -> Result<i64> {
         let now = now_rfc3339();
         let conn = self.lock();
         conn.execute(
-            r#"INSERT INTO runs (task_key, provider, model, started, last_event_at)
-               VALUES (?1, ?2, ?3, ?4, ?4)"#,
-            params![task_key, provider, model, now],
+            r#"INSERT INTO runs (task_key, provider, model, started, last_event_at,
+                                 owner_pid, owner_started)
+               VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)"#,
+            params![
+                task_key,
+                provider,
+                model,
+                now,
+                owner.map(|o| o.pid),
+                owner.map(|o| o.started.as_str()),
+            ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Claim a provider slot and start a run in one write-locked transaction
+    /// so two processes cannot both pass `max_parallel`. Counts only open
+    /// runs whose owner is still alive. Interactive TUI turns count.
+    pub fn try_start_run(
+        &self,
+        task_key: &str,
+        provider: &str,
+        model: &str,
+        max_parallel: u32,
+    ) -> Result<Option<i64>> {
+        let owner = crate::owner::current();
+        let now = now_rfc3339();
+        let cap = max_parallel.max(1);
+        let conn = self.lock();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let started = (|| -> Result<Option<i64>> {
+            let live = count_live_provider_runs_locked(&conn, provider)?;
+            if live >= cap {
+                return Ok(None);
+            }
+            conn.execute(
+                r#"INSERT INTO runs (task_key, provider, model, started, last_event_at,
+                                     owner_pid, owner_started)
+                   VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)"#,
+                params![
+                    task_key,
+                    provider,
+                    model,
+                    now,
+                    owner.pid,
+                    owner.started.as_str(),
+                ],
+            )?;
+            Ok(Some(conn.last_insert_rowid()))
+        })();
+        match started {
+            Ok(Some(id)) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(Some(id))
+            }
+            Ok(None) => {
+                conn.execute_batch("ROLLBACK")?;
+                Ok(None)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    pub fn set_run_owner(&self, run_id: i64, owner: Option<&crate::owner::OwnerId>) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE runs SET owner_pid = ?1, owner_started = ?2 WHERE id = ?3",
+            params![
+                owner.map(|o| o.pid),
+                owner.map(|o| o.started.as_str()),
+                run_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_task_owner(&self, key: &str, owner: Option<&crate::owner::OwnerId>) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET owner_pid = ?1, owner_started = ?2, updated = ?3 WHERE key = ?4",
+            params![
+                owner.map(|o| o.pid),
+                owner.map(|o| o.started.as_str()),
+                now_rfc3339(),
+                key
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn task_owner(&self, key: &str) -> Result<Option<crate::owner::OwnerId>> {
+        let conn = self.lock();
+        let row = conn
+            .query_row(
+                "SELECT owner_pid, owner_started FROM tasks WHERE key = ?1",
+                params![key],
+                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        Ok(row.and_then(|(pid, started)| match (pid, started) {
+            (Some(pid), Some(started)) if pid > 0 && !started.is_empty() => {
+                Some(crate::owner::OwnerId { pid, started })
+            }
+            _ => None,
+        }))
+    }
+
+    pub fn task_owner_alive(&self, key: &str) -> Result<bool> {
+        Ok(self.task_owner(key)?.is_some_and(|o| o.is_alive()))
+    }
+
+    /// Register or refresh this process as `kind` (`serve` or `tui`).
+    pub fn register_owner(&self, kind: &str) -> Result<crate::owner::OwnerId> {
+        let owner = crate::owner::current();
+        let now = now_rfc3339();
+        let conn = self.lock();
+        conn.execute(
+            r#"INSERT INTO owners (pid, started, kind, heartbeat)
+               VALUES (?1, ?2, ?3, ?4)
+               ON CONFLICT(pid, started) DO UPDATE SET
+                 kind = excluded.kind,
+                 heartbeat = excluded.heartbeat"#,
+            params![owner.pid, owner.started, kind, now],
+        )?;
+        Ok(owner)
+    }
+
+    pub fn touch_owner(&self) -> Result<()> {
+        let owner = crate::owner::current();
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE owners SET heartbeat = ?1 WHERE pid = ?2 AND started = ?3",
+            params![now_rfc3339(), owner.pid, owner.started],
+        )?;
+        Ok(())
+    }
+
+    /// True when any registered `kind` owner is still the same live process.
+    pub fn live_owner_kind(&self, kind: &str) -> Result<bool> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT pid, started FROM owners WHERE kind = ?1")?;
+        let rows = stmt.query_map(params![kind], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (pid, started) = row?;
+            if crate::owner::owner_alive(pid, &started) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Open runs whose owner process is still alive (any provider, or `provider`).
+    pub fn live_open_runs(&self, provider: Option<&str>) -> Result<Vec<RunRow>> {
+        Ok(self
+            .open_runs()?
+            .into_iter()
+            .filter(|r| r.owner_alive() && provider.is_none_or(|p| r.provider == p))
+            .collect())
+    }
+
+    pub fn live_provider_run_count(&self, provider: &str) -> Result<u32> {
+        Ok(self.live_open_runs(Some(provider))?.len() as u32)
     }
 
     pub fn set_run_pid(&self, run_id: i64, pid: u32) -> Result<()> {
@@ -1544,11 +1762,9 @@ impl Db {
 
     pub fn open_runs(&self) -> Result<Vec<RunRow>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            r#"SELECT id, task_key, provider, model, pid, started, ended, outcome,
-                      last_event_at, exit_code, session_id, handoff, prefix_hash
-               FROM runs WHERE ended IS NULL"#,
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {RUN_SELECT} FROM runs WHERE ended IS NULL"
+        ))?;
         let rows = stmt.query_map([], row_to_run)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -1556,19 +1772,15 @@ impl Db {
     pub fn list_runs(&self, key: Option<&str>) -> Result<Vec<RunRow>> {
         let conn = self.lock();
         if let Some(key) = key {
-            let mut stmt = conn.prepare(
-                r#"SELECT id, task_key, provider, model, pid, started, ended, outcome,
-                          last_event_at, exit_code, session_id, handoff, prefix_hash
-                   FROM runs WHERE task_key = ?1 ORDER BY id"#,
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {RUN_SELECT} FROM runs WHERE task_key = ?1 ORDER BY id"
+            ))?;
             let rows = stmt.query_map(params![key], row_to_run)?;
             return rows.collect::<Result<Vec<_>, _>>().map_err(Into::into);
         }
-        let mut stmt = conn.prepare(
-            r#"SELECT id, task_key, provider, model, pid, started, ended, outcome,
-                      last_event_at, exit_code, session_id, handoff, prefix_hash
-               FROM runs ORDER BY id DESC LIMIT 50"#,
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {RUN_SELECT} FROM runs ORDER BY id DESC LIMIT 50"
+        ))?;
         let rows = stmt.query_map([], row_to_run)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -2113,9 +2325,7 @@ impl Db {
         let conn = self.lock();
         let v = conn
             .query_row(
-                r#"SELECT id, task_key, provider, model, pid, started, ended, outcome,
-                          last_event_at, exit_code, session_id, handoff, prefix_hash
-                   FROM runs WHERE id = ?1"#,
+                &format!("SELECT {RUN_SELECT} FROM runs WHERE id = ?1"),
                 params![run_id],
                 row_to_run,
             )
@@ -2496,11 +2706,9 @@ impl Db {
 
     pub fn runs_on_day(&self, tz: &crate::tz::DisplayTz, day: &str) -> Result<Vec<RunRow>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            r#"SELECT id, task_key, provider, model, pid, started, ended, outcome,
-                      last_event_at, exit_code, session_id, handoff, prefix_hash
-               FROM runs WHERE ended IS NOT NULL"#,
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {RUN_SELECT} FROM runs WHERE ended IS NOT NULL"
+        ))?;
         let rows = stmt.query_map([], row_to_run)?;
         let mut out = Vec::new();
         for r in rows {
@@ -2718,7 +2926,26 @@ fn row_to_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
         session_id: r.get(10)?,
         handoff: r.get(11)?,
         prefix_hash: r.get::<_, Option<String>>(12)?,
+        owner_pid: r.get(13).ok().flatten(),
+        owner_started: r.get(14).ok().flatten(),
     })
+}
+
+fn count_live_provider_runs_locked(conn: &Connection, provider: &str) -> Result<u32> {
+    let mut stmt = conn.prepare(
+        "SELECT owner_pid, owner_started FROM runs WHERE ended IS NULL AND provider = ?1",
+    )?;
+    let rows = stmt.query_map(params![provider], |r| {
+        Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<String>>(1)?))
+    })?;
+    let mut n = 0u32;
+    for row in rows {
+        let (pid, started) = row?;
+        if crate::owner::owner_alive(pid.unwrap_or(0), started.as_deref().unwrap_or("")) {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 fn row_to_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
@@ -3914,5 +4141,56 @@ mod tests {
         let err = db.delete_task("open").unwrap_err().to_string();
         assert!(err.contains("open run"), "{err}");
         assert!(db.get_task("open").unwrap().is_some());
+    }
+
+    #[test]
+    fn try_start_run_enforces_max_parallel_in_a_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let a = Db::open(&path).unwrap();
+        let b = Db::open(&path).unwrap();
+        a.upsert_task("t1", "/r", None).unwrap();
+        b.upsert_task("t2", "/r", None).unwrap();
+        assert!(a.try_start_run("t1", "claude", "m", 1).unwrap().is_some());
+        assert!(
+            b.try_start_run("t2", "claude", "m", 1).unwrap().is_none(),
+            "second process must not exceed max_parallel"
+        );
+        assert_eq!(a.live_provider_run_count("claude").unwrap(), 1);
+        assert!(b.try_start_run("t2", "claude", "m", 2).unwrap().is_some());
+        assert_eq!(a.live_provider_run_count("claude").unwrap(), 2);
+    }
+
+    #[test]
+    fn try_start_run_ignores_dead_owner_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        db.upsert_task("dead", "/r", None).unwrap();
+        db.upsert_task("next", "/r", None).unwrap();
+        let run = db.start_run("dead", "claude", "m").unwrap();
+        db.set_run_owner(
+            run,
+            Some(&crate::owner::OwnerId {
+                pid: 1_999_999_999,
+                started: "1".into(),
+            }),
+        )
+        .unwrap();
+        assert!(
+            db.try_start_run("next", "claude", "m", 1)
+                .unwrap()
+                .is_some(),
+            "dead owner must not hold a slot"
+        );
+    }
+
+    #[test]
+    fn register_owner_detects_live_serve() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        assert!(!db.live_owner_kind(crate::owner::KIND_SERVE).unwrap());
+        db.register_owner(crate::owner::KIND_SERVE).unwrap();
+        assert!(db.live_owner_kind(crate::owner::KIND_SERVE).unwrap());
+        assert!(!db.live_owner_kind(crate::owner::KIND_TUI).unwrap());
     }
 }

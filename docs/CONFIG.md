@@ -383,7 +383,9 @@ Examples: `atr driver set grok` (recommended; enables Grok extras),
 
 Fallback: a preferred provider (driver, or a per-task `provider`) that is
 disabled or has no CLI is skipped and the next provider in order is used; if
-it's busy (`max_parallel`) the task waits. Quota or rate-limit failures during
+it's busy (`max_parallel`, counted across every live TUI and serve owner
+in `state.db`) the task waits. A TUI turn shows `provider at limit` rather
+than starting a second CLI. Quota or rate-limit failures during
 a run fail over to the next provider like any worker.
 
 Verify: `atr driver`, `atr providers` (order + models), the dashboard meta

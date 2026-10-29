@@ -13,7 +13,14 @@ A `[[provider]]` block can be just `name` + `kind`. CLI path, flags, and
 `reported_usage` are filled from the kind. Order in the file is the failover
 order. A bare `atr` / `atr tui` / `atr ask` follows the session pin, then
 `--provider`, then optional `[tui] providers`, then this list. Serve
-never auto-dispatches `cli-*` TUI sessions. The TUI is the provider CLI
+never auto-dispatches `cli-*` TUI sessions. TUI and serve share `state.db`:
+each process registers as an owner (pid + start token) and stamps the runs
+it starts. `reap_orphans_at_start` and `reconcile` skip a run whose owner
+is still alive; a dead owner is still reaped. `max_parallel` counts live
+owned open runs across processes in a `BEGIN IMMEDIATE` transaction
+(TUI turns share the cap and wait / show `provider at limit`). The TUI
+`· serve` marker reads a live `serve` owner or the serve pidfile, then
+the user-service check. The TUI is the provider CLI
 with atr as the proxy (token cache / session reuse). Host chrome is
 slashes, pickers, and the transcript layout — atr does not invent chat
 replies. A dead or never-started run (`outcome` NULL, PID gone) is

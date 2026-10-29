@@ -1242,6 +1242,64 @@ async fn workspace_chrome_is_honest() {
 }
 
 #[tokio::test]
+async fn chrome_shows_serve_from_state_db_or_pidfile() {
+    let (_dir, shared, _cfg) = no_serve(&[("claude", true, "success")]).await;
+    let none = tui::workspace_chrome_for(&shared, "none", None).unwrap();
+    assert!(
+        !none.contains("· serve"),
+        "no serve owner or pidfile: {none}"
+    );
+
+    shared.db.register_owner("serve").unwrap();
+    let with_owner = tui::workspace_chrome_for(&shared, "none", None).unwrap();
+    assert!(
+        with_owner.contains("· serve"),
+        "live serve owner in state.db: {with_owner}"
+    );
+}
+
+#[tokio::test]
+async fn chrome_shows_serve_from_pidfile_without_owner_row() {
+    let (_dir, shared, _cfg) = no_serve(&[("claude", true, "success")]).await;
+    let cfg = shared.config.read().unwrap().clone();
+    atr::util::write_pid(&cfg).unwrap();
+    let line = tui::workspace_chrome_for(&shared, "none", None).unwrap();
+    assert!(
+        line.contains("· serve"),
+        "pidfile of a live process: {line}"
+    );
+}
+
+#[tokio::test]
+async fn tui_shows_provider_at_limit_when_serve_holds_the_slot() {
+    let (_dir, shared, _cfg) = no_serve(&[("claude", true, "success")]).await;
+    shared.db.upsert_task("serve-1", "/repo", None).unwrap();
+    shared
+        .db
+        .start_run("serve-1", "claude", "test-model")
+        .unwrap();
+    shared.db.upsert_task("cli-default", "", None).unwrap();
+    shared.db.set_status("cli-default", "queued").unwrap();
+    shared
+        .db
+        .set_provider_hint("cli-default", "claude")
+        .unwrap();
+
+    assert!(
+        tui::provider_at_limit(&shared, "cli-default"),
+        "TUI turn must see serve's live run"
+    );
+    tui::check_provider_available(&shared, "cli-default").unwrap();
+    let footer = tui::footer_line(&shared, "cli-default");
+    let strip = tui::composer_status_line(&shared, "cli-default");
+    assert!(
+        footer.contains("provider at limit"),
+        "footer notice: {footer}"
+    );
+    assert!(strip.contains("provider at limit"), "strip notice: {strip}");
+}
+
+#[tokio::test]
 async fn repo_slash_resolves_and_clears_bound_session() {
     let (_dir, shared, cfg_path) = no_serve(&[
         ("claude", true, "success"),

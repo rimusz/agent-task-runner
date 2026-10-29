@@ -26,7 +26,7 @@ atr ask "what is 2+2?"
 
 Other agents and scripts can also hand it work through MCP, the HTTP API, Telegram, or an inbox folder. See [Hand work to atr](#hand-work-to-atr).
 
-`atr serve` (or the user service) must be running for queued work to start. A bare `atr` / `atr tui` / `atr ask` is the exception: it runs the engine in-process and does not need serve. Serve never auto-dispatches TUI sessions (`cli-*`); those turns run only in the TUI / `ask` process.
+`atr serve` (or the user service) must be running for queued work to start. A bare `atr` / `atr tui` / `atr ask` is the exception: it runs the engine in-process and does not need serve. Serve never auto-dispatches TUI sessions (`cli-*`); those turns run only in the TUI / `ask` process. TUI and serve may share one config and `state.db`. Serve stamps an owner (pid + process start time) on each run and in an `owners` row; a live TUI owner is not reaped on `atr service restart` / `atr upgrade`. Per-provider `max_parallel` is counted across every live owner (TUI turns use the same slots). A TUI turn waits and chrome shows `provider at limit` instead of going past the cap. The under-input `· serve` marker is a live serve owner or pidfile, with the user-service check as fallback.
 
 ### Terminal TUI (`atr tui`)
 

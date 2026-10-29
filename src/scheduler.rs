@@ -10,7 +10,7 @@ use crate::providers::{
 use crate::runner;
 use crate::worktree;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -183,6 +183,49 @@ async fn dispatch_matching(shared: &Arc<Shared>, only: Option<&str>) -> Result<(
         });
     }
     Ok(())
+}
+
+/// In-process inflight plus open runs from every owner that is still alive.
+/// TUI turns count toward the same `max_parallel` as serve.
+fn live_provider_count(db: &Db, inflight: &HashMap<String, InFlight>, name: &str) -> u32 {
+    let mut keys = HashSet::new();
+    for (k, i) in inflight {
+        if i.provider == name {
+            keys.insert(k.clone());
+        }
+    }
+    if let Ok(runs) = db.live_open_runs(Some(name)) {
+        for r in runs {
+            keys.insert(r.task_key);
+        }
+    }
+    keys.len() as u32
+}
+
+fn live_ollama_same_model(
+    cfg: &Config,
+    db: &Db,
+    inflight: &HashMap<String, InFlight>,
+    model: &str,
+) -> usize {
+    let mut keys = HashSet::new();
+    let same = |prov: &str| {
+        cfg.provider(prov)
+            .is_some_and(|o| o.is_ollama() && o.model == model)
+    };
+    for (k, i) in inflight {
+        if same(&i.provider) {
+            keys.insert(k.clone());
+        }
+    }
+    if let Ok(runs) = db.live_open_runs(None) {
+        for r in runs {
+            if same(&r.provider) {
+                keys.insert(r.task_key);
+            }
+        }
+    }
+    keys.len()
 }
 
 fn repo_inflight_count(
@@ -614,6 +657,18 @@ fn log_skips(
     }
 }
 
+/// Why `p` cannot take a new task right now (`full`, `disabled`, …).
+pub fn provider_skip_reason(
+    cfg: &Config,
+    p: &Provider,
+    db: &Db,
+    inflight: &HashMap<String, InFlight>,
+    existing: bool,
+    clock: &Clock,
+) -> Result<Option<&'static str>> {
+    unavailable(cfg, p, db, inflight, existing, clock)
+}
+
 fn unavailable(
     cfg: &Config,
     p: &Provider,
@@ -633,18 +688,12 @@ fn unavailable(
     if !p.cli.exists() {
         return Ok(Some("missing-cli"));
     }
-    let n = inflight.values().filter(|i| i.provider == p.name).count() as u32;
+    let n = live_provider_count(db, inflight, &p.name);
     if n >= p.max_parallel {
         return Ok(Some("full"));
     }
     if p.is_ollama() {
-        let same_model = inflight
-            .values()
-            .filter(|i| {
-                cfg.provider(&i.provider)
-                    .is_some_and(|o| o.is_ollama() && o.model == p.model)
-            })
-            .count();
+        let same_model = live_ollama_same_model(cfg, db, inflight, &p.model);
         if same_model >= 1 {
             return Ok(Some("full"));
         }
@@ -832,7 +881,23 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         crate::plan::apply_plan_args(&mut provider, cfg.planner.max_turns);
     }
 
-    let run_id = shared.db.start_run(&key, &provider.name, &provider.model)?;
+    let run_id = match shared.db.try_start_run(
+        &key,
+        &provider.name,
+        &provider.model,
+        provider.max_parallel.max(1),
+    )? {
+        Some(id) => id,
+        None => {
+            tracing::info!(
+                task = %key,
+                provider = %provider.name,
+                "provider at limit; waiting"
+            );
+            let _ = shared.db.set_status(&key, "queued");
+            return Ok(());
+        }
+    };
     let turn_id = shared.db.start_turn(run_id, &key)?;
     let (mut session, new_session) = ensure_session(&shared.db, &key, &provider)?;
     let fork_from = grok_fork_from(
@@ -1945,6 +2010,15 @@ pub fn reap_orphans_at_start(shared: &Shared) -> Result<usize> {
         if shared.inflight.lock().unwrap().contains_key(&r.task_key) {
             continue;
         }
+        if r.owner_alive() {
+            tracing::info!(
+                run = r.id,
+                task = %r.task_key,
+                owner_pid = r.owner_pid,
+                "leaving open run; owner process is still alive"
+            );
+            continue;
+        }
         let Some(pid) = r.pid.filter(|p| *p > 0) else {
             continue;
         };
@@ -1995,6 +2069,7 @@ fn pid_looks_like(pid: i64, cli: &std::path::Path) -> bool {
 pub async fn reconcile_loop(shared: std::sync::Arc<Shared>) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let _ = shared.db.touch_owner();
         match reconcile(&shared) {
             Ok(n) if n > 0 => tracing::warn!(n, "reconciled orphan runs"),
             Ok(_) => {}
@@ -2010,6 +2085,14 @@ pub fn reclaim_dead_open_run(shared: &Shared, key: &str) -> Result<bool> {
     if shared.inflight.lock().unwrap().contains_key(key) {
         return Ok(false);
     }
+    let me = crate::owner::current();
+    if shared
+        .db
+        .task_owner(key)?
+        .is_some_and(|o| o.is_alive() && o != me)
+    {
+        return Ok(false);
+    }
     let Some(run_id) = shared.db.open_run_for_task(key)? else {
         return Ok(false);
     };
@@ -2017,6 +2100,9 @@ pub fn reclaim_dead_open_run(shared: &Shared, key: &str) -> Result<bool> {
     let Some(r) = runs.into_iter().rev().find(|row| row.id == run_id) else {
         return Ok(false);
     };
+    if r.owner_alive() && r.owner_pid != Some(me.pid) {
+        return Ok(false);
+    }
     let alive = r.pid.filter(|p| *p > 0).is_some_and(pid_alive);
     if alive {
         return Ok(false);
@@ -2073,6 +2159,14 @@ pub fn reconcile(shared: &Shared) -> Result<usize> {
         if shared.inflight.lock().unwrap().contains_key(&t.key) {
             continue;
         }
+        let me = crate::owner::current();
+        if shared
+            .db
+            .task_owner(&t.key)?
+            .is_some_and(|o| o.is_alive() && o != me)
+        {
+            continue;
+        }
         let alive = match shared.db.open_run_for_task(&t.key)? {
             Some(_) => shared
                 .db
@@ -2080,8 +2174,10 @@ pub fn reconcile(shared: &Shared) -> Result<usize> {
                 .into_iter()
                 .rev()
                 .find(|r| r.ended.is_none())
-                .and_then(|r| r.pid)
-                .map(pid_alive)
+                .map(|r| {
+                    let other_owner = r.owner_alive() && r.owner_pid != Some(me.pid);
+                    other_owner || r.pid.filter(|p| *p > 0).is_some_and(pid_alive)
+                })
                 .unwrap_or(false),
             None => false,
         };
@@ -2786,6 +2882,10 @@ cli = "{cli}"
         shared.db.set_status("task-left", "running").unwrap();
         let run = shared.db.start_run("task-left", "claude", "").unwrap();
         shared.db.set_run_pid(run, child.id()).unwrap();
+        // Previous serve is gone: clear the test-process owner stamp so this
+        // looks like a leftover CLI after SIGKILL of serve.
+        shared.db.set_run_owner(run, None).unwrap();
+        shared.db.set_task_owner("task-left", None).unwrap();
 
         assert_eq!(reap_orphans_at_start(&shared).unwrap(), 1);
         assert!(wait_exit(&mut child, 5000), "orphaned CLI must be killed");
@@ -2832,6 +2932,186 @@ cli = "{cli}"
     }
 
     #[test]
+    fn reap_orphans_at_start_spares_live_tui_owner() {
+        // Serve restart must not kill a CLI owned by a live TUI / ask process.
+        let dir = tempfile::tempdir().unwrap();
+        let tui = shared_with_cli(dir.path(), "/bin/sleep");
+        let mut child = spawn_sleeper();
+        tui.db.upsert_task("cli-default", "/etc", None).unwrap();
+        tui.db.set_status("cli-default", "running").unwrap();
+        let run = tui.db.start_run("cli-default", "claude", "").unwrap();
+        tui.db.set_run_pid(run, child.id()).unwrap();
+        assert!(tui.db.list_runs(Some("cli-default")).unwrap()[0].owner_alive());
+
+        let serve = Shared::from_config(
+            dir.path().join("c.toml"),
+            tui.config.read().unwrap().clone(),
+        )
+        .unwrap();
+        assert!(
+            serve.inflight.lock().unwrap().is_empty(),
+            "new serve process has empty inflight"
+        );
+        assert_eq!(reap_orphans_at_start(&serve).unwrap(), 0);
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "live TUI CLI must not be killed"
+        );
+        assert_eq!(reconcile(&serve).unwrap(), 0);
+        let t = serve.db.get_task("cli-default").unwrap().unwrap();
+        assert_eq!(t.status, "running");
+        assert!(serve.db.open_run_for_task("cli-default").unwrap().is_some());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn reap_orphans_at_start_still_reaps_dead_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_cli(dir.path(), "/bin/sleep");
+        let mut child = spawn_sleeper();
+        shared.db.upsert_task("cli-dead", "/etc", None).unwrap();
+        shared.db.set_status("cli-dead", "running").unwrap();
+        let run = shared.db.start_run("cli-dead", "claude", "").unwrap();
+        shared.db.set_run_pid(run, child.id()).unwrap();
+        shared
+            .db
+            .set_run_owner(
+                run,
+                Some(&crate::owner::OwnerId {
+                    pid: 1_999_999_999,
+                    started: "1".into(),
+                }),
+            )
+            .unwrap();
+        assert_eq!(reap_orphans_at_start(&shared).unwrap(), 1);
+        assert!(wait_exit(&mut child, 5000), "dead-owner CLI must be killed");
+    }
+
+    fn live_owner_child(child: &std::process::Child) -> crate::owner::OwnerId {
+        let pid = i64::from(child.id());
+        crate::owner::OwnerId {
+            pid,
+            started: crate::owner::process_start_token(pid).expect("child start token"),
+        }
+    }
+
+    #[test]
+    fn reconcile_spares_live_tui_run_without_cli_pid() {
+        // Window between start_run and set_run_pid: serve must not mark failed.
+        // TUI is a different live process (a sleeper), not this test binary.
+        let dir = tempfile::tempdir().unwrap();
+        let mut tui_proc = spawn_sleeper();
+        let tui_owner = live_owner_child(&tui_proc);
+        let tui = shared_for_reconcile(dir.path());
+        tui.db.upsert_task("cli-default", "/etc", None).unwrap();
+        tui.db.set_status("cli-default", "running").unwrap();
+        let run = tui.db.start_run("cli-default", "grok", "m").unwrap();
+        tui.db.set_run_owner(run, Some(&tui_owner)).unwrap();
+        tui.db
+            .set_task_owner("cli-default", Some(&tui_owner))
+            .unwrap();
+        assert!(tui.db.list_runs(Some("cli-default")).unwrap()[0].owner_alive());
+
+        let serve = Shared::from_config(
+            dir.path().join("c.toml"),
+            tui.config.read().unwrap().clone(),
+        )
+        .unwrap();
+        assert!(!reclaim_dead_open_run(&serve, "cli-default").unwrap());
+        assert_eq!(reconcile(&serve).unwrap(), 0);
+        assert_eq!(
+            serve.db.get_task("cli-default").unwrap().unwrap().status,
+            "running"
+        );
+        assert!(serve.db.open_run_for_task("cli-default").unwrap().is_some());
+        let _ = tui_proc.kill();
+        let _ = tui_proc.wait();
+    }
+
+    #[test]
+    fn reconcile_spares_running_tui_task_with_live_owner_no_run() {
+        // Window between claim_task and start_run.
+        let dir = tempfile::tempdir().unwrap();
+        let mut tui_proc = spawn_sleeper();
+        let tui_owner = live_owner_child(&tui_proc);
+        let tui = shared_for_reconcile(dir.path());
+        tui.db.upsert_task("cli-work", "/etc", None).unwrap();
+        tui.db.set_status("cli-work", "queued").unwrap();
+        assert!(tui.db.claim_task("cli-work").unwrap());
+        tui.db.set_task_owner("cli-work", Some(&tui_owner)).unwrap();
+        assert!(tui.db.task_owner_alive("cli-work").unwrap());
+        assert!(tui.db.open_run_for_task("cli-work").unwrap().is_none());
+
+        let serve = Shared::from_config(
+            dir.path().join("c.toml"),
+            tui.config.read().unwrap().clone(),
+        )
+        .unwrap();
+        assert_eq!(reconcile(&serve).unwrap(), 0);
+        assert_eq!(
+            serve.db.get_task("cli-work").unwrap().unwrap().status,
+            "running"
+        );
+        let _ = tui_proc.kill();
+        let _ = tui_proc.wait();
+    }
+
+    #[test]
+    fn reconcile_still_fails_when_tui_owner_is_dead() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_for_reconcile(dir.path());
+        shared.db.upsert_task("cli-gone", "/etc", None).unwrap();
+        shared.db.set_status("cli-gone", "running").unwrap();
+        let run = shared.db.start_run("cli-gone", "claude", "m").unwrap();
+        shared
+            .db
+            .set_run_owner(
+                run,
+                Some(&crate::owner::OwnerId {
+                    pid: 1_999_999_999,
+                    started: "1".into(),
+                }),
+            )
+            .unwrap();
+        shared
+            .db
+            .set_task_owner(
+                "cli-gone",
+                Some(&crate::owner::OwnerId {
+                    pid: 1_999_999_999,
+                    started: "1".into(),
+                }),
+            )
+            .unwrap();
+        assert!(reclaim_dead_open_run(&shared, "cli-gone").unwrap());
+        let t = shared.db.get_task("cli-gone").unwrap().unwrap();
+        assert_eq!(t.status, "failed");
+    }
+
+    #[test]
+    fn unavailable_counts_live_foreign_owner_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let tui = shared_with_cli(dir.path(), "/bin/true");
+        tui.db.upsert_task("cli-default", "/etc", None).unwrap();
+        tui.db.start_run("cli-default", "claude", "").unwrap();
+        let serve = Shared::from_config(
+            dir.path().join("c.toml"),
+            tui.config.read().unwrap().clone(),
+        )
+        .unwrap();
+        let cfg = serve.config.read().unwrap().clone();
+        let p = cfg.provider("claude").unwrap();
+        let clock = crate::clock::Clock::system();
+        let inflight = HashMap::new();
+        assert_eq!(
+            unavailable(&cfg, p, &serve.db, &inflight, false, &clock).unwrap(),
+            Some("full"),
+            "a live TUI run must fill max_parallel=1 for serve"
+        );
+    }
+
+    #[test]
     fn reconcile_fails_open_run_whose_pid_is_gone() {
         let dir = tempfile::tempdir().unwrap();
         let shared = shared_with_cli(dir.path(), "/bin/sleep");
@@ -2843,6 +3123,8 @@ cli = "{cli}"
         shared.db.set_status("task-gone", "running").unwrap();
         let run = shared.db.start_run("task-gone", "claude", "").unwrap();
         shared.db.set_run_pid(run, pid).unwrap();
+        shared.db.set_run_owner(run, None).unwrap();
+        shared.db.set_task_owner("task-gone", None).unwrap();
         assert!(reconcile(&shared).unwrap() >= 1);
         let t = shared.db.get_task("task-gone").unwrap().unwrap();
         assert_eq!(t.status, "failed");
@@ -2855,6 +3137,7 @@ cli = "{cli}"
         let shared = shared_for_reconcile(dir.path());
         shared.db.upsert_task("task-orphan", "/etc", None).unwrap();
         shared.db.set_status("task-orphan", "running").unwrap();
+        shared.db.set_task_owner("task-orphan", None).unwrap();
         let n = reconcile(&shared).unwrap();
         assert!(n >= 1, "expected to reap orphaned running task");
         let t = shared.db.get_task("task-orphan").unwrap().unwrap();
@@ -2864,6 +3147,24 @@ cli = "{cli}"
             "{}",
             t.result_text
         );
+    }
+
+    #[test]
+    fn reclaim_dead_open_run_reclaims_this_process_leftover_without_cli() {
+        // A stale open run stamped with this process (crash after start_run,
+        // or a test fixture) must not block the next TUI turn.
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_for_reconcile(dir.path());
+        shared.db.upsert_task("cli-default", "", None).unwrap();
+        shared.db.set_status("cli-default", "running").unwrap();
+        let run = shared.db.start_run("cli-default", "grok", "m").unwrap();
+        shared.db.set_run_pid(run, 1_999_999_999).unwrap();
+        assert!(reclaim_dead_open_run(&shared, "cli-default").unwrap());
+        assert!(shared
+            .db
+            .open_run_for_task("cli-default")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2886,6 +3187,8 @@ cli = "{cli}"
             .start_run("cli-default", "grok", "Available")
             .unwrap();
         shared.db.set_run_pid(run, 1_999_999_999).unwrap();
+        shared.db.set_run_owner(run, None).unwrap();
+        shared.db.set_task_owner("cli-default", None).unwrap();
         shared
             .db
             .enqueue_message("cli-default", "what can you do for me?", "cli")
