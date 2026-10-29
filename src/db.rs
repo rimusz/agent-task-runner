@@ -63,6 +63,14 @@ pub struct Task {
     /// When the per-task wall clock (`task_timeout`) was last restarted
     /// (retry or a new turn on a finished task); empty = first run.
     pub clock_started: String,
+    /// Transient provider-error retries already scheduled (0 = none yet).
+    pub retry_attempt: i64,
+    /// RFC 3339; empty = not waiting on a retry.
+    pub retry_next_at: String,
+    pub retry_reason: String,
+    /// Human-needed `after` hold (`held` status).
+    pub hold_reason: String,
+    pub hold_notified: bool,
 }
 
 impl Default for Task {
@@ -101,6 +109,11 @@ impl Default for Task {
             pin_strict: false,
             compare_decision: String::new(),
             clock_started: String::new(),
+            retry_attempt: 0,
+            retry_next_at: String::new(),
+            retry_reason: String::new(),
+            hold_reason: String::new(),
+            hold_notified: false,
         }
     }
 }
@@ -111,7 +124,9 @@ const TASK_SELECT: &str = "key, repo, issue, status, provider, session_id, workt
                           deps, review_rounds, provider_hint, title,
                           workspace_kind, output_kind, output_spec, source_kind,
                           result_text, result_diff, result_pr_url, needs,
-                          pin_strict, compare_decision, clock_started";
+                          pin_strict, compare_decision, clock_started,
+                          retry_attempt, retry_next_at, retry_reason,
+                          hold_reason, hold_notified";
 
 #[derive(Debug, Clone)]
 pub struct RunRow {
@@ -518,6 +533,26 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE tasks ADD COLUMN clock_started TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN retry_attempt INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN retry_next_at TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN retry_reason TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN hold_reason TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN hold_notified INTEGER NOT NULL DEFAULT 0",
             [],
         );
         conn.execute_batch(
@@ -943,7 +978,7 @@ impl Db {
 
     /// Finished (`waiting`/`done`), failed, or cancelled. Running and queued stay.
     pub fn removable_status(status: &str) -> bool {
-        matches!(status, "waiting" | "failed" | "done" | "cancelled")
+        matches!(status, "waiting" | "failed" | "done" | "cancelled" | "held")
     }
 
     pub fn has_open_run(&self, key: &str) -> Result<bool> {
@@ -1184,6 +1219,44 @@ impl Db {
             params![n, now_rfc3339(), key],
         )?;
         Ok(())
+    }
+
+    pub fn set_retry(
+        &self,
+        key: &str,
+        attempt: i64,
+        next_at: Option<&str>,
+        reason: &str,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET retry_attempt = ?1, retry_next_at = ?2, retry_reason = ?3, updated = ?4 WHERE key = ?5",
+            params![
+                attempt,
+                next_at.unwrap_or(""),
+                reason,
+                now_rfc3339(),
+                key
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_retry(&self, key: &str) -> Result<()> {
+        self.set_retry(key, 0, None, "")
+    }
+
+    pub fn set_hold(&self, key: &str, reason: &str, notified: bool) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET hold_reason = ?1, hold_notified = ?2, updated = ?3 WHERE key = ?4",
+            params![reason, if notified { 1 } else { 0 }, now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_hold(&self, key: &str) -> Result<()> {
+        self.set_hold(key, "", false)
     }
 
     pub fn set_verify_retries(&self, key: &str, n: i64) -> Result<()> {
@@ -2580,6 +2653,11 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         pin_strict: r.get::<_, Option<i64>>(30)?.unwrap_or(0) != 0,
         compare_decision: r.get::<_, Option<String>>(31)?.unwrap_or_default(),
         clock_started: r.get::<_, Option<String>>(32)?.unwrap_or_default(),
+        retry_attempt: r.get::<_, Option<i64>>(33)?.unwrap_or(0),
+        retry_next_at: r.get::<_, Option<String>>(34)?.unwrap_or_default(),
+        retry_reason: r.get::<_, Option<String>>(35)?.unwrap_or_default(),
+        hold_reason: r.get::<_, Option<String>>(36)?.unwrap_or_default(),
+        hold_notified: r.get::<_, Option<i64>>(37)?.unwrap_or(0) != 0,
     })
 }
 
@@ -3914,5 +3992,28 @@ mod tests {
         let err = db.delete_task("open").unwrap_err().to_string();
         assert!(err.contains("open run"), "{err}");
         assert!(db.get_task("open").unwrap().is_some());
+    }
+
+    #[test]
+    fn retry_and_hold_columns_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        db.upsert_task("a", "/r", None).unwrap();
+        db.set_retry("a", 2, Some("2026-01-01T00:02:00.000Z"), "overloaded")
+            .unwrap();
+        db.set_hold("a", "after b failed", true).unwrap();
+        let t = db.get_task("a").unwrap().unwrap();
+        assert_eq!(t.retry_attempt, 2);
+        assert_eq!(t.retry_next_at, "2026-01-01T00:02:00.000Z");
+        assert_eq!(t.retry_reason, "overloaded");
+        assert_eq!(t.hold_reason, "after b failed");
+        assert!(t.hold_notified);
+        db.clear_retry("a").unwrap();
+        db.clear_hold("a").unwrap();
+        let t = db.get_task("a").unwrap().unwrap();
+        assert_eq!(t.retry_attempt, 0);
+        assert!(t.retry_next_at.is_empty());
+        assert!(t.hold_reason.is_empty());
+        assert!(!t.hold_notified);
     }
 }

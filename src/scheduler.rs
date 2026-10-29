@@ -95,10 +95,46 @@ async fn dispatch_matching(shared: &Arc<Shared>, only: Option<&str>) -> Result<(
         if task.role == "parent" || task.role == "compare" {
             continue;
         }
-        if !crate::plan::deps_ready(&shared.db, &task)? {
+        let cfg = shared.config.read().unwrap().clone();
+        // Dependencies (`after:`). Separate from reaping / max_parallel.
+        match crate::deps::decide(&shared.db, &task)? {
+            crate::deps::Decision::Ready => {}
+            crate::deps::Decision::Waiting { pending } => {
+                tracing::debug!(
+                    task = %key,
+                    pending = %pending.join(","),
+                    "waiting on after"
+                );
+                continue;
+            }
+            crate::deps::Decision::Held { reason } => {
+                hold_blocked(shared, &cfg, &task, &reason);
+                continue;
+            }
+        }
+        if crate::retry::waiting(&task, &Clock::system()) {
+            tracing::debug!(
+                task = %key,
+                next = %task.retry_next_at,
+                reason = %task.retry_reason,
+                "waiting on transient retry"
+            );
             continue;
         }
-        let cfg = shared.config.read().unwrap().clone();
+        // Host CPU/memory gate. Separate from per-provider max_parallel.
+        {
+            let host = &cfg.host;
+            let snap = crate::host::sample();
+            if let Some(wait) = crate::host::decide(host, &snap) {
+                tracing::debug!(task = %key, reason = %wait.reason, "host gate: keeping queued");
+                continue;
+            }
+            let last = *shared.last_host_start.lock().unwrap();
+            if !crate::host::settle_ready(host, last, std::time::Instant::now()) {
+                tracing::debug!(task = %key, "host settle gap");
+                continue;
+            }
+        }
         if task.pin_strict {
             if let Some(reason) = strict_pin_unusable(&cfg, &shared.db, &task) {
                 fail_strict_arm(shared, &cfg, &task, None, &reason);
@@ -114,6 +150,7 @@ async fn dispatch_matching(shared: &Arc<Shared>, only: Option<&str>) -> Result<(
                 &format!("failed {key} (task timeout)"),
                 task.shadow,
             );
+            notify_held_dependents(shared, &cfg, &key, task.shadow);
             if task.role == crate::compare::ARM_ROLE {
                 crate::compare::after_arm(shared, &key);
             }
@@ -161,7 +198,11 @@ async fn dispatch_matching(shared: &Arc<Shared>, only: Option<&str>) -> Result<(
             );
         }
         match shared.db.claim_task(&key) {
-            Ok(true) => {}
+            Ok(true) => {
+                if cfg.host.enabled {
+                    *shared.last_host_start.lock().unwrap() = Some(std::time::Instant::now());
+                }
+            }
             Ok(false) => {
                 shared.inflight.lock().unwrap().remove(&key);
                 continue;
@@ -1232,6 +1273,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     match result.outcome.as_str() {
         "success" => {
             shared.db.set_stall_retries(&key, 0)?;
+            shared.db.clear_retry(&key)?;
             shared.db.set_tried(&key, None)?;
             let _ = shared.db.set_degraded_until(&provider.name, None);
             let v = verify.unwrap_or_default();
@@ -1350,30 +1392,42 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 &provider.name,
                 &cooldown_rfc3339(provider.health.unhealthy_cooldown),
             )?;
-            shared.db.unconsume_run(run_id)?;
-            notify_run(
-                &cfg.telegram,
-                &format!("fallback {key} {} (unavailable)", provider.name),
-                task.shadow,
-            );
-            handle_failover(&shared, &cfg, &key, &provider, &result, run_id, &wt).await?;
+            if !try_transient_retry(&shared, &cfg, &key, &task, &provider, &result, run_id)? {
+                shared.db.unconsume_run(run_id)?;
+                notify_run(
+                    &cfg.telegram,
+                    &format!("fallback {key} {} (unavailable)", provider.name),
+                    task.shadow,
+                );
+                handle_failover(&shared, &cfg, &key, &provider, &result, run_id, &wt).await?;
+            }
         }
         "limit" | "auth" => {
-            shared.db.set_cooldown(
-                &provider.name,
-                &cooldown_rfc3339(provider.cooldown_after_limit),
-            )?;
-            shared.db.unconsume_run(run_id)?;
-            notify_run(
-                &cfg.telegram,
-                &format!("fallback {key} {} ({})", provider.name, result.outcome),
-                task.shadow,
-            );
-            handle_failover(&shared, &cfg, &key, &provider, &result, run_id, &wt).await?;
+            if result.outcome == "limit"
+                && try_transient_retry(&shared, &cfg, &key, &task, &provider, &result, run_id)?
+            {
+                shared.db.set_cooldown(
+                    &provider.name,
+                    &cooldown_rfc3339(provider.cooldown_after_limit),
+                )?;
+            } else {
+                shared.db.set_cooldown(
+                    &provider.name,
+                    &cooldown_rfc3339(provider.cooldown_after_limit),
+                )?;
+                shared.db.unconsume_run(run_id)?;
+                notify_run(
+                    &cfg.telegram,
+                    &format!("fallback {key} {} ({})", provider.name, result.outcome),
+                    task.shadow,
+                );
+                handle_failover(&shared, &cfg, &key, &provider, &result, run_id, &wt).await?;
+            }
         }
         "cancelled" => {
             shared.db.set_status(&key, "failed")?;
             notify_run(&cfg.telegram, &format!("cancelled {key}"), task.shadow);
+            notify_held_dependents(&shared, &cfg, &key, task.shadow);
         }
         "needs_attention" => {
             shared.db.unconsume_run(run_id)?;
@@ -1385,7 +1439,16 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             handle_failover(&shared, &cfg, &key, &provider, &result, run_id, &wt).await?;
         }
         _ => {
-            if result.classified == Some(ErrorClass::Server)
+            if try_transient_retry(&shared, &cfg, &key, &task, &provider, &result, run_id)? {
+                if result.classified == Some(ErrorClass::Server)
+                    || result.classified == Some(ErrorClass::Unavailable)
+                {
+                    shared.db.set_cooldown(
+                        &provider.name,
+                        &cooldown_rfc3339(provider.health.unhealthy_cooldown),
+                    )?;
+                }
+            } else if result.classified == Some(ErrorClass::Server)
                 || result.classified == Some(ErrorClass::Unavailable)
             {
                 shared.db.set_cooldown(
@@ -1401,6 +1464,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                     &format!("failed {key} provider={}", provider.name),
                     task.shadow,
                 );
+                notify_held_dependents(&shared, &cfg, &key, task.shadow);
             }
         }
     }
@@ -1562,6 +1626,146 @@ enum ReviewAfter {
     Requeue,
     Done,
     Attention,
+}
+
+fn failover_has_next(
+    shared: &Shared,
+    cfg: &Config,
+    task: &crate::db::Task,
+    current: &Provider,
+) -> Result<bool> {
+    if task.pin_strict {
+        return Ok(false);
+    }
+    let mut tried: Vec<&str> = task
+        .tried
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !tried.contains(&current.name.as_str()) {
+        tried.push(current.name.as_str());
+    }
+    let mut probe = task.clone();
+    probe.tried = Some(tried.join(","));
+    let mut inflight = shared.inflight.lock().unwrap().clone();
+    // This run is still in-flight; a real failover happens after it drops.
+    inflight.remove(&task.key);
+    Ok(pick_provider(cfg, &shared.db, &inflight, &probe, &Clock::system())?.is_some())
+}
+
+fn try_transient_retry(
+    shared: &Shared,
+    cfg: &Config,
+    key: &str,
+    task: &crate::db::Task,
+    provider: &Provider,
+    result: &runner::RunResult,
+    run_id: i64,
+) -> Result<bool> {
+    if !cfg.retry.enabled {
+        return Ok(false);
+    }
+    if task.pin_strict {
+        return Ok(false);
+    }
+    let now = Clock::system().now();
+    let class = crate::retry::classify_result(result, now);
+    if !class.transient {
+        return Ok(false);
+    }
+    // Another free provider still wins (existing failover). Retry is for
+    // when this task would otherwise sit failed or wait on the same CLI.
+    if failover_has_next(shared, cfg, task, provider)? {
+        return Ok(false);
+    }
+    let attempt = shared
+        .db
+        .get_task(key)?
+        .map(|t| t.retry_attempt)
+        .unwrap_or(task.retry_attempt)
+        + 1;
+    let Some(delay) = crate::retry::backoff_delay(&cfg.retry, attempt as u32) else {
+        return Ok(false);
+    };
+    let next = now + chrono::Duration::from_std(delay).unwrap_or_default();
+    let next_at = next.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    shared
+        .db
+        .set_retry(key, attempt, Some(&next_at), &class.reason)?;
+    let session = shared.db.task_session(key, &provider.name)?;
+    let resume = crate::retry::can_resume(provider, session.as_deref());
+    if resume {
+        shared
+            .db
+            .enqueue_message(key, &crate::retry::continue_prompt(&class.reason), "retry")?;
+    } else {
+        shared.db.unconsume_run(run_id)?;
+        shared
+            .db
+            .set_provider_session(key, Some(&provider.name), None)?;
+    }
+    shared.db.set_status(key, "queued")?;
+    let wait = crate::duration::format_duration(delay);
+    let how = if resume { "resume" } else { "rerun" };
+    notify_run(
+        &cfg.telegram,
+        &format!("retry {key} in {wait} ({}, {how})", class.reason),
+        task.shadow,
+    );
+    tracing::info!(
+        task = %key,
+        attempt,
+        next = %next_at,
+        reason = %class.reason,
+        resume,
+        "scheduled transient retry"
+    );
+    Ok(true)
+}
+
+fn hold_blocked(shared: &Shared, cfg: &Config, task: &crate::db::Task, reason: &str) {
+    if let Err(e) = shared.db.set_status(&task.key, "held") {
+        tracing::warn!(task = %task.key, "hold status: {e:#}");
+        return;
+    }
+    if let Err(e) = shared.db.set_hold(&task.key, reason, task.hold_notified) {
+        tracing::warn!(task = %task.key, "hold reason: {e:#}");
+    }
+    if task.hold_notified {
+        return;
+    }
+    notify_run(
+        &cfg.telegram,
+        &format!("held {} ({reason})", task.key),
+        task.shadow,
+    );
+    let _ = shared.db.set_hold(&task.key, reason, true);
+}
+
+fn notify_held_dependents(shared: &Shared, cfg: &Config, key: &str, shadow: bool) {
+    let held = match crate::deps::hold_dependents(&shared.db, key) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(task = %key, "hold dependents: {e:#}");
+            return;
+        }
+    };
+    for (child, reason) in held {
+        let already = shared
+            .db
+            .get_task(&child)
+            .ok()
+            .flatten()
+            .is_some_and(|t| t.hold_notified);
+        if already {
+            continue;
+        }
+        notify_run(&cfg.telegram, &format!("held {child} ({reason})"), shadow);
+        let _ = shared.db.set_hold(&child, &reason, true);
+    }
 }
 
 fn finish_waiting(

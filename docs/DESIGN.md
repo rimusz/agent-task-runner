@@ -131,10 +131,14 @@ live run.
 
 ## 2. State (SQLite, WAL)
 
-`tasks(key, repo, issue, status[queued|running|waiting|done|failed], provider, session_id, worktree, created, updated, workspace_kind, output_kind, output_spec, source_kind, result_text, result_diff, result_pr_url)`
+`tasks(key, repo, issue, status[queued|running|waiting|done|failed|held], provider, session_id, worktree, created, updated, workspace_kind, output_kind, output_spec, source_kind, result_text, result_diff, result_pr_url, deps, retry_attempt, retry_next_at, retry_reason, hold_reason, hold_notified)`
 Opening an older DB `ALTER`s these columns in and backfills: empty `repo` →
 `workspace_kind=none`, else `git`; `output_kind=reply`; `source_kind=github`
-when `issue` is set, else `cli`. Existing rows keep their keys and status.
+when `issue` is set, else `cli`. New retry/hold columns default to 0 / empty.
+Existing rows keep their keys and status. `held` means an `after` dependency
+failed or vanished; it is not started until a human `atr retry`s or sends a
+new message. Transient provider retries keep `status=queued` and persist
+`retry_next_at` so a serve restart still waits.
 `task_sessions(task_key, provider, session_id, updated)` — resume id for this provider only.
 `shadow_results(...)` — local-only comparison rows (diff, diffstat of every changed/untracked file, tests, verify, tokens, cost, cache hit). Tasks have a `shadow` flag.
 `verify_results(run_id, command, passed, exit_code, output)` — post-success check commands from `[verify]`.

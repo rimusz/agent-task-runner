@@ -158,7 +158,7 @@ pub fn arms_of(db: &Db, key: &str) -> Result<Vec<crate::db::Task>> {
 pub fn is_terminal(status: &str) -> bool {
     matches!(
         status,
-        "waiting" | "done" | "failed" | "needs_attention" | "cancelled"
+        "waiting" | "done" | "failed" | "needs_attention" | "cancelled" | "held"
     )
 }
 

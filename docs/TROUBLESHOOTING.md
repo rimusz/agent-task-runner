@@ -77,6 +77,23 @@ status, provider, time window) and column sorting are read-only.
 Wrong provider planning or answering? `atr driver` shows the driver; see
 [Choosing the driver provider and model](CONFIG.md#choosing-the-driver-provider-and-model).
 
+**Task stays `queued` with a retry time.** A transient provider error
+(overloaded, 429 without a parsed reset, 5xx, dropped stream) is waiting
+out `[retry]` backoff. `atr status --json` shows `retry_reason` /
+`retry_next_at`. `atr retry <key>` starts now. Turn the feature off with
+`atr config set retry.enabled false`.
+
+**Task is `held`.** It declared `after:` and a dependency failed, was
+cancelled, or is gone. Status / notify show `hold_reason`. Fix or retry the
+dependency, then `atr retry <key>` (clears the hold and the `after` list).
+A new message on the held task also unblocks it unless you pass a new
+`after`.
+
+**Queued work is not starting and status says `host: … waiting`.** CPU load
+or free memory is past `[host]` (`max_load` 0.85 per core, `min_memory_mb`
+512). Wait, raise the limits, or `atr config set host.enabled false`.
+Starts are one-at-a-time with `host.settle` (30s) while the gate is on.
+
 **Task failed with `task timeout`.** The task passed `task_timeout` (default
 `4h`, counted from the first run of the current attempt). `atr tasks <key>`
 shows a last run with outcome `task_timeout`. `atr retry <key>` (or a new

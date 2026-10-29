@@ -50,6 +50,8 @@ worktree_root = "{wt}"
 repo_path = "{repo}"
 system_prompt_file = "{prompt}"
 task_key_prefix = "demo"
+[host]
+enabled = false
 [planner]
 mode = "off"
 [github]
@@ -872,6 +874,7 @@ async fn serve_dispatch_skips_tui_session() {
                     allow_empty_repo: true,
                     provider_hint: Some("claude".into()),
                     needs: Vec::new(),
+                    after: Vec::new(),
                 },
             )
             .unwrap()
@@ -1579,6 +1582,8 @@ state_db = "{db}"
 worktree_root = "{wt}"
 repo_path = "{repo}"
 system_prompt_file = "{prompt}"
+[host]
+enabled = false
 [planner]
 mode = "off"
 [github]

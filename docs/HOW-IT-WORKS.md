@@ -216,13 +216,54 @@ with at least 15 turns.
 stdio — not `grok auth status` (that command does not exist) and never
 `grok login`.
 
+## Transient retries
+
+A run that failed on something that often clears on its own (provider
+overloaded / at capacity, HTTP 429 without a parsed quota reset, 5xx,
+connection reset / timeout / dropped stream) is not failed over or marked
+`failed` on the first hit. `[retry]` (default on: 4 attempts, waits of 1, 2,
+4, then 8 minutes) keeps the task `queued` with `retry_attempt` /
+`retry_next_at` / `retry_reason` on the row so a `serve` restart still waits.
+When the time comes, atr resumes the provider session with a short “continue
+where you left off” prompt if the provider supports resume and a session id is
+still stored; otherwise it reruns the last prompt on a new session.
+`atr status` and Telegram `/status` show the wait. Notify fires once per
+scheduled retry (`retry <key> in 2m (provider overloaded, resume)`).
+
+If another provider can take the task, existing failover still runs first.
+Retry is for when this task would otherwise fail or sit on the same CLI
+(and compare arms with a strict pin never retry). Auth, invalid CLI arguments,
+quota with a reset already handled by `quota.rs`, and task-logic failures
+(`needs_attention`, tests failed) skip this path.
+Stall hangs still use `[[provider]].health.stall_resumes`. `atr retry` clears
+the persisted schedule.
+
+## Task dependencies (`after`)
+
+`atr add … --after build,test` (same field on inbox / HTTP / MCP) stores those
+keys in `tasks.deps`. The scheduler will not start the task until every
+dependency is `done` or `waiting`. A missing, failed, cancelled, or already
+`held` dependency puts the dependent in `held` (human needed). Status and the
+dashboard show the reason; notify fires once. Cycles and unknown keys are
+rejected at create time. `atr retry <key>` on a held task clears the hold and
+the `after` list so it can run anyway.
+
+## Host CPU / memory gate
+
+`[host]` (default on: 1-minute load / cores > 0.85, or free RAM < 512 MiB)
+keeps new work queued while the Mac Mini (or Linux host) is busy. Status
+prints `host: load … — waiting: …`. While the gate is on, starts are one at
+a time with `settle` (default 30s) between them. Sampling uses `sysinfo` and
+fails open. Separate from per-provider `max_parallel`. `enabled = false` or
+thresholds of `0` turn the checks off.
+
 ## Task wall clock
 
 `task_timeout` (default `4h`) caps one attempt of a task, measured from the
 first run since the clock was last restarted (`tasks.clock_started`). The
 clock restarts on `atr retry` (Telegram `/retry`, `POST /tasks/<key>/retry`)
 and when a new message arrives for a finished task (`waiting`, `done`,
-`failed`, `needs_attention`, `cancelled`), so a long-lived Telegram chat or an
+`failed`, `needs_attention`, `cancelled`, `held`), so a long-lived Telegram chat or an
 old issue does not time out because it started days ago. Retry also unconsumes
 the last finished run's messages when none are pending — the scheduler only
 starts a task that has an unconsumed prompt. Internal requeues

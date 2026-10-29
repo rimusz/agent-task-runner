@@ -1279,6 +1279,7 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
             allow_empty_repo: true,
             provider_hint: None,
             needs: Vec::new(),
+            after: Vec::new(),
         },
     ) {
         Ok(SubmitOutcome::Accepted) => Outgoing {
@@ -2086,6 +2087,47 @@ fn format_status_body(v: &Value, tz: &str, paused: bool, repo: Option<&str>) -> 
         out.push_str("\nCache\n");
         out.push_str(&format_status_cache(c));
     }
+    if let Some(line) = v
+        .get("host")
+        .and_then(|h| h.get("line"))
+        .and_then(|x| x.as_str())
+    {
+        out.push('\n');
+        out.push_str(line);
+        out.push('\n');
+    }
+    if let Some(tasks) = v.get("tasks").and_then(|x| x.as_array()) {
+        let held = tasks
+            .iter()
+            .filter(|t| t.get("status").and_then(|x| x.as_str()) == Some("held"))
+            .count();
+        let retrying = tasks
+            .iter()
+            .filter(|t| {
+                t.get("retry_reason")
+                    .and_then(|x| x.as_str())
+                    .is_some_and(|s| !s.is_empty())
+            })
+            .count();
+        if held > 0 || retrying > 0 {
+            out.push_str(&format!("\nTasks held={held} retrying={retrying}\n"));
+            for t in tasks.iter().filter(|t| {
+                t.get("status").and_then(|x| x.as_str()) == Some("held")
+                    || t.get("retry_reason")
+                        .and_then(|x| x.as_str())
+                        .is_some_and(|s| !s.is_empty())
+            }) {
+                let key = t.get("key").and_then(|x| x.as_str()).unwrap_or("-");
+                let why = t
+                    .get("hold_reason")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| t.get("retry_reason").and_then(|x| x.as_str()))
+                    .unwrap_or("-");
+                out.push_str(&format!("• {key} — {why}\n"));
+            }
+        }
+    }
     out
 }
 
@@ -2577,9 +2619,10 @@ pub fn daily_summary_text(shared: &Shared) -> String {
         .filter(|t| t.status == "needs_attention")
         .count();
     let running = tasks.iter().filter(|t| t.status == "running").count();
+    let held = tasks.iter().filter(|t| t.status == "held").count();
     let mut out = format!("daily {day} ({})\n", tz.label);
     out.push_str(&format!(
-        "tasks waiting={waiting} needs_attention={attn} running={running}\n"
+        "tasks waiting={waiting} needs_attention={attn} held={held} running={running}\n"
     ));
     let usage = shared.db.usage_by_day_tz(1, tz).unwrap_or_default();
     let runs = shared.db.runs_on_day(tz, &day).unwrap_or_default();
