@@ -241,15 +241,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SkillsCmd,
     },
-    /// Download a GitHub release, verify sha256, swap the binary, restart.
-    /// Without a version, does nothing if already on the latest release.
+    /// Download a GitHub release, verify sha256, swap the binary, refresh
+    /// the atr skill, restart. Without a version, does nothing if already
+    /// on the latest release.
     Upgrade {
         version: Option<String>,
         /// Reinstall even if already on the latest release.
         #[arg(long)]
         force: bool,
     },
-    /// Restore the previous binary, config, and database.
+    /// Restore the previous binary, config, and database; refresh the atr skill.
     Rollback,
     /// Full reset: stop and remove the service, delete atr's config, data, logs, and skills.
     Reset {

@@ -1,5 +1,7 @@
 use crate::config::{load_config, Config};
-use crate::util::{backup_dir, copy_file, current_bin, host_asset, parse_sha256_line, sha256_file};
+use crate::util::{
+    backup_dir, copy_file, current_bin, host_asset, parse_sha256_line, retry_exec_busy, sha256_file,
+};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::Read;
@@ -15,6 +17,8 @@ pub(crate) struct Env {
     pub tmp: PathBuf,
     /// Version of the running binary (`CARGO_PKG_VERSION` in production).
     pub current: String,
+    /// Override for `<bin> skills install`. `None` execs `bin`.
+    pub skills_install: Option<fn(&Path) -> Result<String>>,
 }
 
 /// Result of an upgrade attempt.
@@ -46,13 +50,17 @@ impl Env {
             backup: backup_dir(),
             tmp: tempfile_dir()?,
             current: env!("CARGO_PKG_VERSION").to_string(),
+            skills_install: None,
         })
     }
 }
 
+const SKILL_RESYNC_SKIP: &str =
+    "skill resync skipped (non-default config dir; set ATR_SKILL_HOME to install)";
+
 pub fn upgrade(version: Option<&str>, force: bool, config_path: &Path) -> Result<String> {
     let env = Env::real()?;
-    let msg = match upgrade_with(version, force, config_path, &env)? {
+    let msg = match upgrade_with_resync(version, force, config_path, &env)? {
         Outcome::UpToDate(msg) => return Ok(msg),
         Outcome::Upgraded(msg) => msg,
     };
@@ -62,6 +70,89 @@ pub fn upgrade(version: Option<&str>, force: bool, config_path: &Path) -> Result
         Err(e) => eprintln!("restart after upgrade: {e:#}"),
     }
     Ok(msg)
+}
+
+/// Like [`upgrade_with`], then execs the newly installed binary's
+/// `skills install` (skipped on [`Outcome::UpToDate`]). A resync failure
+/// becomes a warning; the upgrade itself still succeeds.
+pub(crate) fn upgrade_with_resync(
+    version: Option<&str>,
+    force: bool,
+    config_path: &Path,
+    env: &Env,
+) -> Result<Outcome> {
+    match upgrade_with(version, force, config_path, env)? {
+        Outcome::UpToDate(msg) => Ok(Outcome::UpToDate(msg)),
+        Outcome::Upgraded(msg) => Ok(Outcome::Upgraded(append_skill_resync(
+            msg,
+            &env.bin,
+            config_path,
+            env.skills_install,
+        ))),
+    }
+}
+
+fn append_skill_resync(
+    msg: String,
+    bin: &Path,
+    config_path: &Path,
+    runner: Option<fn(&Path) -> Result<String>>,
+) -> String {
+    let extra = resync_installed_skill(bin, config_path, runner);
+    if extra.is_empty() {
+        msg
+    } else {
+        format!("{msg}\n{extra}")
+    }
+}
+
+fn resync_installed_skill(
+    bin: &Path,
+    config_path: &Path,
+    runner: Option<fn(&Path) -> Result<String>>,
+) -> String {
+    if !crate::skill::should_install_skills(config_path) {
+        return SKILL_RESYNC_SKIP.to_string();
+    }
+    let result = match runner {
+        Some(f) => f(bin),
+        None => exec_skills_install(bin),
+    };
+    match result {
+        Ok(text) => first_nonempty_line(&text),
+        Err(e) => {
+            let warn = format!("warning: skill resync failed ({e:#}); run `atr skills install`");
+            eprintln!("{warn}");
+            warn
+        }
+    }
+}
+
+fn first_nonempty_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("skill resync ok")
+        .to_string()
+}
+
+fn exec_skills_install(bin: &Path) -> Result<String> {
+    let out = retry_exec_busy(|| {
+        std::process::Command::new(bin)
+            .args(["skills", "install"])
+            .output()
+    })
+    .with_context(|| format!("run {} skills install", bin.display()))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let detail = [err.trim(), stdout.trim()]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or("skills install failed");
+        bail!("{detail}");
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Downloads and installs a release. Without an explicit `version` and
@@ -123,13 +214,23 @@ pub(crate) fn upgrade_with(
 }
 
 pub fn rollback(config_path: &Path) -> Result<String> {
-    let msg = rollback_with(config_path, &current_bin(), &backup_dir())?;
+    let msg = rollback_and_resync(config_path, &current_bin(), &backup_dir(), None)?;
     match crate::service::restart() {
         Ok(note) if note == crate::service::RESTART_SKIPPED_NOTE => eprintln!("{note}"),
         Ok(_) => {}
         Err(e) => eprintln!("restart after rollback: {e:#}"),
     }
     Ok(msg)
+}
+
+pub(crate) fn rollback_and_resync(
+    config_path: &Path,
+    bin: &Path,
+    dir: &Path,
+    runner: Option<fn(&Path) -> Result<String>>,
+) -> Result<String> {
+    let msg = rollback_with(config_path, bin, dir)?;
+    Ok(append_skill_resync(msg, bin, config_path, runner))
 }
 
 pub(crate) fn rollback_with(config_path: &Path, bin: &Path, dir: &Path) -> Result<String> {
@@ -424,6 +525,7 @@ mod tests {
             backup: dir.join("backup"),
             tmp: dir.join("tmp"),
             current: "0.1.13".into(),
+            skills_install: None,
         }
     }
 
@@ -656,5 +758,303 @@ mod tests {
         );
         assert_eq!(fs::read(&env.bin).unwrap(), b"REINSTALLED");
         assert_eq!(fs::read(env.backup.join("atr")).unwrap(), b"OLD-BINARY");
+    }
+
+    fn skill_stub(ok: bool) -> Vec<u8> {
+        if ok {
+            br#"#!/bin/sh
+printf '%s\n' "$*" > "${ATR_SKILL_MARKER:?}"
+home="${ATR_SKILL_HOME:?}"
+mkdir -p "$home/.claude/skills/atr" "$home/.cursor/skills/atr"
+printf 'NEW-SKILL\n' > "$home/.claude/skills/atr/SKILL.md"
+printf 'NEW-SKILL\n' > "$home/.cursor/skills/atr/SKILL.md"
+echo "installed atr skill (2 CLI dirs) under $home: claude, cursor"
+"#
+            .to_vec()
+        } else {
+            br#"#!/bin/sh
+printf '%s\n' "$*" > "${ATR_SKILL_MARKER:?}"
+echo "resync boom" >&2
+exit 1
+"#
+            .to_vec()
+        }
+    }
+
+    fn skill_stub_writes_home() -> Vec<u8> {
+        br#"#!/bin/sh
+printf '%s\n' "$*" > "${ATR_SKILL_MARKER:?}"
+home="${ATR_SKILL_HOME:-$HOME}"
+mkdir -p "$home/.claude/skills/atr"
+printf 'LEAKED\n' > "$home/.claude/skills/atr/SKILL.md"
+echo "installed atr skill (1 CLI dirs) under $home: claude"
+"#
+        .to_vec()
+    }
+
+    /// Serializes env-var tests so they never write into the real `$HOME`.
+    struct SkillEnvGuard {
+        skill_home: Option<std::ffi::OsString>,
+        home: Option<std::ffi::OsString>,
+        marker: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn skill_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    impl SkillEnvGuard {
+        fn lock() -> Self {
+            let _lock = skill_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+            Self {
+                skill_home: std::env::var_os("ATR_SKILL_HOME"),
+                home: std::env::var_os("HOME"),
+                marker: std::env::var_os("ATR_SKILL_MARKER"),
+                _lock,
+            }
+        }
+
+        fn set_skill_home(&self, p: &Path) {
+            std::env::set_var("ATR_SKILL_HOME", p);
+        }
+
+        fn clear_skill_home(&self) {
+            std::env::remove_var("ATR_SKILL_HOME");
+        }
+
+        fn set_home(&self, p: &Path) {
+            std::env::set_var("HOME", p);
+        }
+
+        fn set_marker(&self, p: &Path) {
+            std::env::set_var("ATR_SKILL_MARKER", p);
+        }
+    }
+
+    impl Drop for SkillEnvGuard {
+        fn drop(&mut self) {
+            match &self.skill_home {
+                Some(v) => std::env::set_var("ATR_SKILL_HOME", v),
+                None => std::env::remove_var("ATR_SKILL_HOME"),
+            }
+            match &self.home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.marker {
+                Some(v) => std::env::set_var("ATR_SKILL_MARKER", v),
+                None => std::env::remove_var("ATR_SKILL_MARKER"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn chmod_755(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn upgrade_resyncs_skill_via_new_binary() {
+        if host_asset() == "unknown" {
+            return;
+        }
+        let _g = SkillEnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        let skill_home = dir.path().join("skill-home");
+        let marker = dir.path().join("marker");
+        let home = dir.path().join("home");
+        fs::create_dir_all(&skill_home).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        _g.set_skill_home(&skill_home);
+        _g.set_home(&home);
+        _g.set_marker(&marker);
+
+        let base = serve(release(dir.path(), "9.9.9", &skill_stub(true), None));
+        let env = env_in(dir.path(), base);
+        let cfg = write_cfg(dir.path());
+        let msg = match upgrade_with_resync(None, false, &cfg, &env).unwrap() {
+            Outcome::Upgraded(m) => m,
+            o => panic!("{o:?}"),
+        };
+        assert!(msg.contains("v9.9.9"), "{msg}");
+        assert!(msg.contains("installed atr skill"), "{msg}");
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap().trim(),
+            "skills install"
+        );
+        assert_eq!(
+            fs::read_to_string(skill_home.join(".claude/skills/atr/SKILL.md")).unwrap(),
+            "NEW-SKILL\n"
+        );
+        assert_eq!(
+            fs::read_to_string(skill_home.join(".cursor/skills/atr/SKILL.md")).unwrap(),
+            "NEW-SKILL\n"
+        );
+        assert!(
+            !home.join(".claude").exists(),
+            "must not write into HOME when ATR_SKILL_HOME is set"
+        );
+    }
+
+    #[test]
+    fn upgrade_skips_skill_resync_for_custom_dir_without_override() {
+        if host_asset() == "unknown" {
+            return;
+        }
+        let _g = SkillEnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        _g.clear_skill_home();
+        _g.set_home(&home);
+        _g.set_marker(&marker);
+
+        let base = serve(release(
+            dir.path(),
+            "9.9.9",
+            &skill_stub_writes_home(),
+            None,
+        ));
+        let env = env_in(dir.path(), base);
+        let cfg = write_cfg(dir.path());
+        let msg = match upgrade_with_resync(None, false, &cfg, &env).unwrap() {
+            Outcome::Upgraded(m) => m,
+            o => panic!("{o:?}"),
+        };
+        assert!(msg.contains("v9.9.9"), "{msg}");
+        assert!(msg.contains(SKILL_RESYNC_SKIP), "{msg}");
+        assert!(!marker.exists(), "skills install must not run");
+        assert!(
+            !home.join(".claude").exists(),
+            "must not write into HOME for a side config"
+        );
+    }
+
+    fn failing_resync(_: &Path) -> Result<String> {
+        bail!("injected fail")
+    }
+
+    #[test]
+    fn upgrade_resync_failure_is_warning_not_error() {
+        if host_asset() == "unknown" {
+            return;
+        }
+        let _g = SkillEnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        let skill_home = dir.path().join("skill-home");
+        let marker = dir.path().join("marker");
+        let home = dir.path().join("home");
+        fs::create_dir_all(&skill_home).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        _g.set_skill_home(&skill_home);
+        _g.set_home(&home);
+        _g.set_marker(&marker);
+
+        let base = serve(release(dir.path(), "9.9.9", &skill_stub(false), None));
+        let env = env_in(dir.path(), base);
+        let cfg = write_cfg(dir.path());
+        let out = upgrade_with_resync(None, false, &cfg, &env).unwrap();
+        let msg = match &out {
+            Outcome::Upgraded(m) => m,
+            o => panic!("{o:?}"),
+        };
+        assert!(msg.contains("v9.9.9"), "{msg}");
+        assert!(msg.contains("warning: skill resync failed"), "{msg}");
+        assert!(msg.contains("atr skills install"), "{msg}");
+        assert_eq!(fs::read(&env.bin).unwrap(), skill_stub(false));
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap().trim(),
+            "skills install"
+        );
+        assert!(
+            !skill_home.join(".claude").exists(),
+            "failing stub must not write skills"
+        );
+
+        // Injectable runner: still Ok, warning only (no HOME writes).
+        let dir_b = tempfile::tempdir().unwrap();
+        let base_b = serve(release(dir_b.path(), "8.8.8", b"NEW", None));
+        let mut env_b = env_in(dir_b.path(), base_b);
+        env_b.skills_install = Some(failing_resync);
+        let cfg_b = write_cfg(dir_b.path());
+        let msg_b = match upgrade_with_resync(None, false, &cfg_b, &env_b).unwrap() {
+            Outcome::Upgraded(m) => m,
+            o => panic!("{o:?}"),
+        };
+        assert!(msg_b.contains("injected fail"), "{msg_b}");
+        assert!(msg_b.contains("atr skills install"), "{msg_b}");
+        assert_eq!(fs::read(&env_b.bin).unwrap(), b"NEW");
+    }
+
+    #[test]
+    fn upgrade_up_to_date_does_not_resync() {
+        if host_asset() == "unknown" {
+            return;
+        }
+        let _g = SkillEnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        let skill_home = dir.path().join("skill-home");
+        let marker = dir.path().join("marker");
+        let home = dir.path().join("home");
+        fs::create_dir_all(&skill_home).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        _g.set_skill_home(&skill_home);
+        _g.set_home(&home);
+        _g.set_marker(&marker);
+
+        let mut routes = release(dir.path(), "0.1.13", &skill_stub(true), None);
+        routes.retain(|k, _| !k.contains("/download/"));
+        let base = serve(routes);
+        let mut env = env_in(dir.path(), base);
+        env.skills_install = Some(failing_resync);
+        let out = upgrade_with_resync(None, false, &write_cfg(dir.path()), &env).unwrap();
+        assert_eq!(
+            out,
+            Outcome::UpToDate("atr is already up to date (v0.1.13)".into())
+        );
+        assert_eq!(fs::read(&env.bin).unwrap(), b"OLD-BINARY");
+        assert!(!marker.exists());
+        assert!(!skill_home.join(".claude").exists());
+        assert!(!home.join(".claude").exists());
+    }
+
+    #[test]
+    fn rollback_resyncs_restored_binary() {
+        let _g = SkillEnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        let skill_home = dir.path().join("skill-home");
+        let marker = dir.path().join("marker");
+        let home = dir.path().join("home");
+        fs::create_dir_all(&skill_home).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        _g.set_skill_home(&skill_home);
+        _g.set_home(&home);
+        _g.set_marker(&marker);
+
+        let bin = dir.path().join("bin").join("atr");
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(&bin, b"CURRENT").unwrap();
+        let backup = dir.path().join("backup");
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join("atr"), skill_stub(true)).unwrap();
+        #[cfg(unix)]
+        chmod_755(&backup.join("atr"));
+        let cfg = write_cfg(dir.path());
+        let msg = rollback_and_resync(&cfg, &bin, &backup, None).unwrap();
+        assert!(msg.contains("restored"), "{msg}");
+        assert!(msg.contains("installed atr skill"), "{msg}");
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap().trim(),
+            "skills install"
+        );
+        assert_eq!(
+            fs::read_to_string(skill_home.join(".claude/skills/atr/SKILL.md")).unwrap(),
+            "NEW-SKILL\n"
+        );
+        assert!(!home.join(".claude").exists());
     }
 }

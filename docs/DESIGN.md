@@ -18,7 +18,7 @@ doctor. Example config is neutral. Unknown TOML keys are ignored (doctor warns
 with the nearest valid name) so rollbacks work. `[[provider]]` can be name+kind; kind fills CLI flags.
 `atr providers` edits TOML with comments kept and SIGHUPs serve. `atr doctor`
 prints one ok/warn/FAIL line per check. `atr upgrade` / `rollback` / `service`
-/ `logs` cover ops. Existing configs keep their values; init never auto-rewrites
+/ `logs` cover ops (`upgrade`/`rollback` also refresh the atr skill). Existing configs keep their values; init never auto-rewrites
 them.
 
 **Auth:** Claude / Codex / Cursor / Grok keep their own CLI logins. OpenCode

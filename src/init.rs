@@ -129,7 +129,7 @@ pub fn run(opts: InitOpts) -> Result<String> {
     // A non-default config dir keeps its own system prompt (init writes it
     // next to config.toml), so point the config at that copy. Otherwise
     // doctor fails right after `atr init --config <dir>/config.toml`.
-    let custom_dir = !same_dir(&dir, &crate::config::default_atr_dir());
+    let custom_dir = crate::skill::config_dir_is_custom(&opts.config_path);
     let toml = if custom_dir {
         replace_assign(
             &toml,
@@ -170,8 +170,7 @@ pub fn run(opts: InitOpts) -> Result<String> {
     out.push_str(&gh_guide);
     // Skills go into the user's real CLI dirs (~/.claude, ~/.codex, ...).
     // A test/side config must not touch those.
-    let skill_home_set = std::env::var_os("ATR_SKILL_HOME").is_some_and(|v| !v.is_empty());
-    if custom_dir && !skill_home_set {
+    if !crate::skill::should_install_skills(&opts.config_path) {
         out.push_str(
             "skill install skipped (non-default config dir; set ATR_SKILL_HOME to install)\n",
         );
@@ -343,12 +342,6 @@ fn ensure_mcp_token(config_path: &Path, yes: bool) -> Result<Option<String>> {
         "mcp token written to {} (mode 0600; atr never prints it). HTTP clients send Authorization: Bearer $ATR_MCP_TOKEN. `atr mcp` stdio needs no token.\n",
         dest.display()
     )))
-}
-
-fn same_dir(a: &Path, b: &Path) -> bool {
-    let ca = fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
-    let cb = fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
-    ca == cb
 }
 
 fn point_config_at_token_file(config_path: &Path, dest: &Path) -> Result<()> {

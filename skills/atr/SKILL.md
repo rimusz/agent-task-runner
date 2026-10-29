@@ -196,8 +196,8 @@ One `ok` / `warn` / `FAIL` line per check, then `N problems`. Checks CLIs (path 
 ## Upgrade
 
 ```bash
-atr upgrade [version] [--force]   # download, sha256, backup, swap, restart; no-op if already latest
-atr rollback            # previous binary / db / config
+atr upgrade [version] [--force]   # download, sha256, backup, swap, refresh atr skill, restart; no-op if already latest
+atr rollback            # previous binary / db / config; refresh atr skill
 ```
 
 Release repo is `[update] github_repo` (default `rimusz/agent-task-runner`).
