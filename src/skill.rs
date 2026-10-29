@@ -35,6 +35,37 @@ pub fn skill_home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// True when `ATR_SKILL_HOME` is set to a non-empty value.
+pub fn skill_home_override_set() -> bool {
+    std::env::var_os("ATR_SKILL_HOME").is_some_and(|v| !v.is_empty())
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let ca = std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
+    let cb = std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
+    ca == cb
+}
+
+/// Config lives outside the default `~/.config/atr` (tests and side installs).
+pub fn config_dir_is_custom(config_path: &Path) -> bool {
+    let dir = config_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(crate::config::default_atr_dir);
+    !same_dir(&dir, &crate::config::default_atr_dir())
+}
+
+/// Same guard as `atr init`: a non-default config dir must not write into
+/// the real `~/.claude` etc. unless `ATR_SKILL_HOME` is set.
+pub fn should_install_skills(config_path: &Path) -> bool {
+    should_install_skills_with(config_path, skill_home_override_set())
+}
+
+pub(crate) fn should_install_skills_with(config_path: &Path, skill_home_set: bool) -> bool {
+    !(config_dir_is_custom(config_path) && !skill_home_set)
+}
+
 /// Write the skill for each provider whose CLI is found by `installed`.
 /// Providers without a CLI are skipped (no dirs created).
 pub fn install_into_home_with(home: &Path, installed: impl Fn(&str) -> bool) -> Result<String> {
@@ -164,6 +195,18 @@ mod tests {
                 "SKILL.md must mention {needle:?}"
             );
         }
+    }
+
+    #[test]
+    fn custom_config_skips_skills_unless_override_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        assert!(config_dir_is_custom(&cfg));
+        assert!(!should_install_skills_with(&cfg, false));
+        assert!(should_install_skills_with(&cfg, true));
+        let default_cfg = crate::config::default_atr_dir().join("config.toml");
+        assert!(!config_dir_is_custom(&default_cfg));
+        assert!(should_install_skills_with(&default_cfg, false));
     }
 
     #[test]
