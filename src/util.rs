@@ -92,13 +92,54 @@ pub fn write_pid(cfg: &Config) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).ok();
     }
-    fs::write(&path, format!("{}", std::process::id()))
+    let owner = crate::owner::current();
+    debug_assert!(
+        !owner.started.chars().any(char::is_whitespace),
+        "owner start token must be whitespace-free: {:?}",
+        owner.started
+    );
+    fs::write(&path, format!("{} {}\n", owner.pid, owner.started))
         .with_context(|| format!("write {}", path.display()))
 }
 
 pub fn read_pid(cfg: &Config) -> Option<i32> {
     let text = fs::read_to_string(pid_path(cfg)).ok()?;
-    text.trim().parse().ok()
+    parse_pidfile(&text).map(|(pid, _)| pid as i32)
+}
+
+/// `(pid, Some(start_token))`, or `(pid, None)` for a legacy bare-pid file.
+/// The token is the whole remainder after the first whitespace so a
+/// multi-word `ps` lstart is not truncated.
+pub fn parse_pidfile(text: &str) -> Option<(i64, Option<&str>)> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    match text.split_once(char::is_whitespace) {
+        Some((pid_s, rest)) => {
+            let pid: i64 = pid_s.parse().ok()?;
+            let started = rest.trim();
+            if started.is_empty() {
+                Some((pid, None))
+            } else {
+                Some((pid, Some(started)))
+            }
+        }
+        None => Some((text.parse().ok()?, None)),
+    }
+}
+
+/// True when the serve pidfile names a still-live process (pid + start token).
+pub fn pidfile_owner_alive(cfg: &Config) -> bool {
+    let text = match fs::read_to_string(pid_path(cfg)) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    match parse_pidfile(&text) {
+        Some((pid, Some(started))) => crate::owner::owner_alive(pid, started),
+        Some((pid, None)) => crate::db::pid_alive(pid),
+        None => false,
+    }
 }
 
 pub fn sighup_daemon(cfg: &Config) -> Result<()> {
@@ -214,5 +255,70 @@ mod tests {
             parse_sha256_line(&format!("{h}  atr-0.1.1.tar.gz")),
             Some(h)
         );
+    }
+
+    #[test]
+    fn parse_pidfile_keeps_multi_word_start_token() {
+        // macOS `ps -o lstart=` used to be stored raw. Linux CI must catch a
+        // split_whitespace parser that only keeps "Thu".
+        assert_eq!(
+            parse_pidfile("42 Thu Oct 29 10:17:41 2026\n"),
+            Some((42, Some("Thu Oct 29 10:17:41 2026")))
+        );
+        assert_eq!(
+            parse_pidfile("  99\tThu Oct  9 01:02:03 2026  "),
+            Some((99, Some("Thu Oct  9 01:02:03 2026")))
+        );
+        assert_eq!(
+            parse_pidfile("7 1761733061\n"),
+            Some((7, Some("1761733061")))
+        );
+        assert_eq!(parse_pidfile("12345\n"), Some((12345, None)));
+        assert_eq!(parse_pidfile(""), None);
+        assert_eq!(parse_pidfile("not-a-pid leftover"), None);
+    }
+
+    #[test]
+    fn write_pid_round_trips_current_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("p.md"), "p\n").unwrap();
+        let cli = if std::path::Path::new("/bin/true").exists() {
+            "/bin/true"
+        } else {
+            "/usr/bin/true"
+        };
+        let text = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "{cli}"
+"#,
+            db = dir.path().join("s.db").display(),
+            root = dir.path().display(),
+        );
+        let raw: crate::config::RawConfig = toml::from_str(&text).unwrap();
+        let cfg = crate::config::Config::from_raw(raw).unwrap();
+        write_pid(&cfg).unwrap();
+        let body = std::fs::read_to_string(pid_path(&cfg)).unwrap();
+        let owner = crate::owner::current();
+        assert_eq!(
+            parse_pidfile(&body),
+            Some((owner.pid, Some(owner.started.as_str())))
+        );
+        assert!(
+            !owner.started.chars().any(char::is_whitespace),
+            "{}",
+            owner.started
+        );
+        assert!(pidfile_owner_alive(&cfg));
+        // Legacy bare-pid files still count as live.
+        std::fs::write(pid_path(&cfg), format!("{}\n", owner.pid)).unwrap();
+        assert!(pidfile_owner_alive(&cfg));
     }
 }

@@ -318,6 +318,7 @@ pub async fn run(shared: Arc<Shared>, opts: TuiOpts) -> Result<ExitCode> {
             bail!("provider {p:?} is not in config");
         }
     }
+    let _ = shared.db.register_owner(crate::owner::KIND_TUI);
     if opts.new {
         reset_session(&shared, &key)?;
         save_workspace(
@@ -1186,6 +1187,12 @@ pub(crate) fn workspace_chrome_line(shared: &Shared, ws: &Workspace) -> String {
     line
 }
 
+fn append_limit_notice(shared: &Shared, key: &str, line: &mut String) {
+    if provider_at_limit(shared, key) {
+        line.push_str(" · provider at limit");
+    }
+}
+
 /// Test helper: chrome for an explicit kind/path (ignores session meta).
 pub fn workspace_chrome_for(shared: &Shared, kind: &str, repo: Option<&str>) -> Result<String> {
     let ws = match kind {
@@ -1240,19 +1247,67 @@ fn workspace_kind_text(shared: &Shared, ws: &Workspace) -> String {
 }
 
 fn tui_serve_loaded(shared: &Shared) -> bool {
+    if shared
+        .db
+        .live_owner_kind(crate::owner::KIND_SERVE)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let cfg = shared.config.read().unwrap().clone();
+    if crate::util::pidfile_owner_alive(&cfg) {
+        return true;
+    }
     let label = crate::service::launchd_label_for(&shared.config_path);
     crate::service::service_loaded(&label)
         || crate::service::service_loaded(crate::service::LAUNCHD_LABEL)
 }
 
+/// Queued TUI turn whose preferred provider is at `max_parallel` (serve and
+/// TUI share the limit). Shown in chrome; the turn waits.
+pub fn provider_at_limit(shared: &Shared, key: &str) -> bool {
+    let inflight = shared.inflight.lock().unwrap().contains_key(key);
+    let status = shared
+        .db
+        .get_task(key)
+        .ok()
+        .flatten()
+        .map(|t| t.status)
+        .unwrap_or_default();
+    if inflight || status != "queued" {
+        return false;
+    }
+    provider_block_reason(shared, key) == Some("full")
+}
+
+fn provider_block_reason(shared: &Shared, key: &str) -> Option<&'static str> {
+    let cfg = shared.config.read().unwrap().clone();
+    let inflight = shared.inflight.lock().unwrap().clone();
+    shared.db.get_task(key).ok().flatten()?;
+    let name = session_provider_now(shared, key)?;
+    let p = cfg.provider(&name)?;
+    scheduler::provider_skip_reason(
+        &cfg,
+        p,
+        &shared.db,
+        &inflight,
+        true,
+        &crate::clock::Clock::system(),
+    )
+    .ok()
+    .flatten()
+}
+
 fn status_text(shared: &Shared, key: &str, ws: &Workspace) -> String {
     let chrome = session_chrome(shared, key).footer_line(key);
     let workspace = workspace_chrome_line(shared, ws);
-    if chrome.is_empty() {
+    let mut line = if chrome.is_empty() {
         workspace
     } else {
         format!("{chrome} · {workspace}")
-    }
+    };
+    append_limit_notice(shared, key, &mut line);
+    line
 }
 
 fn reset_session(shared: &Shared, key: &str) -> Result<()> {
@@ -1344,6 +1399,7 @@ pub(crate) fn enqueue_turn(
             allow_empty_repo: none,
             provider_hint: launch_pin.map(|s| s.to_string()),
             needs: Vec::new(),
+            after: Vec::new(),
         },
     )?;
     if shared.db.get_task(key)?.is_some_and(|t| t.role == "plan") {
@@ -1372,6 +1428,7 @@ async fn wait_turn(shared: &Arc<Shared>, key: &str) -> Result<()> {
         if ticks >= 3 {
             check_provider_available(shared, key)?;
         }
+        let _ = shared.db.touch_owner();
         if tokio::time::Instant::now() > deadline {
             bail!("timed out waiting for session {key}");
         }
@@ -1391,11 +1448,11 @@ pub(crate) fn turn_is_idle(shared: &Shared, key: &str) -> Result<bool> {
         && pending.is_empty()
         && matches!(
             status,
-            "waiting" | "done" | "failed" | "needs_attention" | "cancelled"
+            "waiting" | "done" | "failed" | "needs_attention" | "cancelled" | "held"
         ))
 }
 
-pub(crate) fn check_provider_available(shared: &Shared, key: &str) -> Result<()> {
+pub fn check_provider_available(shared: &Shared, key: &str) -> Result<()> {
     let inflight = shared.inflight.lock().unwrap().contains_key(key);
     let task = shared.db.get_task(key)?;
     let status = task.as_ref().map(|t| t.status.as_str()).unwrap_or("");
@@ -1408,6 +1465,9 @@ pub(crate) fn check_provider_available(shared: &Shared, key: &str) -> Result<()>
         if scheduler::pick_provider(&cfg, &shared.db, &empty, t, &crate::clock::Clock::system())?
             .is_none()
         {
+            if provider_block_reason(shared, key) == Some("full") {
+                return Ok(());
+            }
             bail!("no provider available for session {key}");
         }
     }
@@ -1542,7 +1602,9 @@ pub fn footer_line(shared: &Shared, key: &str) -> String {
 /// Same source as [`footer_line`] (this provider's session model, then
 /// this provider's last run, then config / detect).
 pub fn composer_status_line(shared: &Shared, key: &str) -> String {
-    session_chrome(shared, key).status_line()
+    let mut line = session_chrome(shared, key).status_line();
+    append_limit_notice(shared, key, &mut line);
+    line
 }
 
 /// Quiet workspace path for the under-composer strip (`~/…` when under `$HOME`).

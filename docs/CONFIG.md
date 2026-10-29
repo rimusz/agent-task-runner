@@ -47,6 +47,7 @@ reloaded with SIGHUP. `atr config migrate` converts shorthand
 `driver`, `[planner]`, `[review]`, `[plugin]`, `[github] enabled / repo / label`
 (default `for:atr`), `[dashboard] enabled / bind`, `[telegram]` and
 `[telegram.assistant]`, `[tui] providers`, `[[provider]]` order and `enabled`, `[mcp]`, `[cache]`,
+`[retry]`, `[host]`,
 `[[source]]`, `max_prompt_bytes` (default `256k`; CLI/HTTP/MCP prompts and
 inbox files).
 
@@ -191,6 +192,65 @@ Lessons only apply to tasks in a configured repo (`[[repo]]`, or the
 atr does not pin CLI versions. `atr doctor` shows `ok cli <name> <path>
 <version>`. An old `[[provider]] expected_version` key is still accepted but
 ignored (doctor prints a one-line note); delete it.
+
+### Transient retries
+
+```toml
+[retry]
+enabled = true
+max_attempts = 4
+backoff = ["1m", "2m", "4m", "8m"]
+```
+
+After a run that looks like it will clear on its own (provider overloaded /
+at capacity, HTTP 429 without a parsed quota reset, 5xx, connection
+reset/timeout/dropped stream), atr keeps the task `queued` and waits the next
+backoff step. Attempt count and `retry_next_at` are stored on the task so a
+`serve` restart keeps the schedule. When the provider still has a session and
+supports resume, the next try sends a short “continue where you left off”
+prompt; otherwise the last prompt is rerun on a new session.
+
+Lasting failures are not retried here: auth / signed out, invalid arguments,
+quota with a reset already parsed by `[quota]` / `quota.rs`, and task-logic
+failures (`needs_attention`, tests failed, …). Stall resumes stay on
+`[[provider]].health.stall_resumes`. `atr retry <key>` (or a new message)
+clears the schedule and starts again.
+
+`max_attempts` is retries after the first failure (4 → waits of 1, 2, 4, then
+8 minutes). `enabled = false` turns this off.
+
+### Host resource gate
+
+```toml
+[host]
+enabled = true
+max_load = 0.85          # 1-minute load / cores; 0 ignores CPU
+min_memory_mb = 512      # available RAM; 0 ignores memory
+settle = "30s"           # gap between starts while gating is on
+```
+
+Before starting a new task, atr samples host load and free memory (macOS and
+Linux, via `sysinfo`). Over the limit, the task stays `queued` and status /
+the dashboard show why. While the gate is on, queued work starts one at a
+time with `settle` between starts so a burst does not pile on. A sample
+failure fails open (does not stall the scheduler). `enabled = false` turns
+the gate off. Separate from per-provider `max_parallel`.
+
+### Task `after` (dependencies)
+
+A task can wait for one or more others to succeed (`done` or `waiting`):
+
+```bash
+atr add "deploy" --after build,test
+```
+
+Same field on inbox files, HTTP `POST /tasks`, and MCP `add_task` (`after`).
+Cycles and unknown keys are rejected at create time. While a dependency is
+still open the dependent stays `queued`. If a dependency fails, is cancelled,
+or is deleted, the dependent goes to `held` (needs a human; notified once).
+`atr retry <key>` on a held task clears the hold and the `after` list so it
+can run. A new message to a held task does the same unless you pass a new
+`after`.
 
 ### Notify hook
 
@@ -383,7 +443,9 @@ Examples: `atr driver set grok` (recommended; enables Grok extras),
 
 Fallback: a preferred provider (driver, or a per-task `provider`) that is
 disabled or has no CLI is skipped and the next provider in order is used; if
-it's busy (`max_parallel`) the task waits. Quota or rate-limit failures during
+it's busy (`max_parallel`, counted across every live TUI and serve owner
+in `state.db`) the task waits. A TUI turn shows `provider at limit` rather
+than starting a second CLI. Quota or rate-limit failures during
 a run fail over to the next provider like any worker.
 
 Verify: `atr driver`, `atr providers` (order + models), the dashboard meta

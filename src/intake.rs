@@ -47,6 +47,7 @@ pub struct CreateIn {
     pub patch: Option<String>,
     pub provider: Option<String>,
     pub needs: Vec<String>,
+    pub after: Vec<String>,
     pub source: String,
     pub source_kind: String,
     pub issue: Option<i64>,
@@ -392,6 +393,7 @@ pub fn create(shared: &Shared, spec: CreateIn) -> Result<CreateOut, CreateError>
             allow_empty_repo: allow_empty,
             provider_hint: spec.provider.clone(),
             needs: spec.needs.clone(),
+            after: spec.after.clone(),
         },
     ) {
         Ok(o) => o,
@@ -541,6 +543,7 @@ fn request_hash(spec: &CreateIn, title: &str) -> String {
         spec.provider.as_deref().unwrap_or("").trim().as_bytes(),
     );
     put(&mut h, b"needs", spec.needs.join(",").as_bytes());
+    put(&mut h, b"after", spec.after.join(",").as_bytes());
     put(
         &mut h,
         b"issue",

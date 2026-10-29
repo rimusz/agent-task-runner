@@ -95,8 +95,21 @@ pub fn snapshot_period(
             let mut j = task_json(shared, &cfg, t, "running");
             j["progress"] = json!(progress_for(shared, t, &secrets));
             running.push(j);
-        } else if t.status == "queued" {
-            queued.push(task_json(shared, &cfg, t, "queued"));
+        } else if t.status == "queued" || t.status == "held" {
+            let mut j = task_json(shared, &cfg, t, t.status.as_str());
+            if t.status == "held" && !t.hold_reason.is_empty() {
+                j["reason"] = json!(t.hold_reason);
+            } else if !t.retry_reason.is_empty() {
+                let mut why = format!("retry: {}", t.retry_reason);
+                if !t.retry_next_at.is_empty() {
+                    why.push_str(" at ");
+                    why.push_str(&t.retry_next_at);
+                }
+                j["reason"] = json!(why);
+            } else if !t.deps.is_empty() {
+                j["reason"] = json!(format!("after {}", t.deps));
+            }
+            queued.push(j);
         }
     }
 
@@ -265,6 +278,12 @@ pub fn snapshot_period(
         .map(|r| r.to_json())
         .unwrap_or_else(|_| json!({"period": period.label(), "by_provider": [], "by_day": []}));
     let repos = repo_rows(&cfg, &shared.config_path);
+    let host_snap = crate::host::sample();
+    let host = json!({
+        "enabled": cfg.host.enabled,
+        "line": crate::host::format_line(&cfg.host, &host_snap),
+        "waiting": crate::host::decide(&cfg.host, &host_snap).map(|w| w.reason),
+    });
 
     json!({
         "ok": true,
@@ -283,6 +302,7 @@ pub fn snapshot_period(
         "telegram_assistant": telegram_assistant(&cfg, &shared.db),
         "running": running,
         "queued": queued,
+        "host": host,
         "finished": finished,
         "providers": providers,
         "today": today,
@@ -323,6 +343,10 @@ fn task_json(shared: &Shared, cfg: &Config, t: &crate::db::Task, state: &str) ->
         "parent": t.parent_key,
         "role": t.role,
         "title": t.title,
+        "after": t.deps,
+        "hold_reason": t.hold_reason,
+        "retry_reason": t.retry_reason,
+        "retry_next_at": t.retry_next_at,
     })
 }
 

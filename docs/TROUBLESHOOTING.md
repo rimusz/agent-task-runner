@@ -77,6 +77,23 @@ status, provider, time window) and column sorting are read-only.
 Wrong provider planning or answering? `atr driver` shows the driver; see
 [Choosing the driver provider and model](CONFIG.md#choosing-the-driver-provider-and-model).
 
+**Task stays `queued` with a retry time.** A transient provider error
+(overloaded, 429 without a parsed reset, 5xx, dropped stream) is waiting
+out `[retry]` backoff. `atr status --json` shows `retry_reason` /
+`retry_next_at`. `atr retry <key>` starts now. Turn the feature off with
+`atr config set retry.enabled false`.
+
+**Task is `held`.** It declared `after:` and a dependency failed, was
+cancelled, or is gone. Status / notify show `hold_reason`. Fix or retry the
+dependency, then `atr retry <key>` (clears the hold and the `after` list).
+A new message on the held task also unblocks it unless you pass a new
+`after`.
+
+**Queued work is not starting and status says `host: … waiting`.** CPU load
+or free memory is past `[host]` (`max_load` 0.85 per core, `min_memory_mb`
+512). Wait, raise the limits, or `atr config set host.enabled false`.
+Starts are one-at-a-time with `host.settle` (30s) while the gate is on.
+
 **Task failed with `task timeout`.** The task passed `task_timeout` (default
 `4h`, counted from the first run of the current attempt). `atr tasks <key>`
 shows a last run with outcome `task_timeout`. `atr retry <key>` (or a new
@@ -157,7 +174,7 @@ owner's env var, ok/warn/fail and days left without printing values.
 - Timestamped `INFO queued follow-up` lines must not appear on the composer. Those go to `[log] path`. User turns are prefixed `>` with a local clock; replies have no role chip. Plain English is a provider turn. A dead CLI whose run `ended`/`outcome` is still NULL is reclaimed so the next message can run; the assistant bubble is the **latest** run only (never an older `tasks.result_text`). Mouse is not captured — use the terminal’s selection to copy.
 - Slash: `/provider` `/model` `/effort` `/context` `/repo` `/new` `/quit` `/status` `/help` `/cli` are atr-local. `/model` changes atr's session model for the **current** provider only (never sent as Claude/Cursor chat; the TUI picker is an overlay, not a transcript dump). `/effort` and `/context` set per-provider spawn knobs (next argv only). Empty `/effort` opens the list when that kind has real effort flags; otherwise the note. Bare `/context` always opens the shared size catalog; apply is claude `--autocompact` / cursor model brackets only — grok/codex get an honesty note, not a skipped picker. Switching `/provider` restores that provider's last session model. The under-input strip shows that provider/model (same source as `/status`) plus the honest workspace kind (`answer-only` / `dir …` / `git …`). `/repo` picks a config git root (`[[repo]]`; serve optional), `/repo .` the cwd git root, `/repo none` answer-only. `/model` lists real ids (`cursor-agent models` `id - Label`, grok bullets, OpenCode `provider/model`); Claude seeds documented full ids (`claude-sonnet-5-5`, …; no bare aliases); Codex reads `~/.codex/models_cache.json` slugs (does not spawn its TUI). `/provider` `/model` `/effort` `/context` `/repo` do not append to the transcript. Other `/…` go to the provider CLI. Never an "unknown command" for a known slash. Ctrl+C quits atr; Esc only dismisses menus.
 - No config yet: on a TTY, atr offers the normal `atr init` (including whether to install the user service) then continues (`Starting atr tui…` / `atr ask`). Without a TTY it exits with a pointer to `atr init` / `atr init --yes` (no auto `--yes`).
-- Session keys are `cli-<name>` (default `cli-default` — internal TUI session, not a model). Serve never starts those tasks. Chrome omits the default key.
+- Session keys are `cli-<name>` (default `cli-default` — internal TUI session, not a model). Serve never starts those tasks. Chrome omits the default key. Restarting serve while a TUI turn is running does not kill that turn (the owner pid + start token is still alive). A `held` or retry-waiting task owned by a live TUI is not reaped or reconciled away. Chrome shows `· serve` for a live foreground `atr serve` as well as the user service. If the status line says `provider at limit`, a serve (or another TUI) already holds that provider's `max_parallel` slots — wait; do not expect a second Claude/Grok/… process to start. Retry and host-gate starts use the same cross-process `max_parallel` slot as any other start.
 - No enabled provider: atr prints which CLIs it saw and how to sign in / `atr providers detect` / enable. `atr ask` exits non-zero; the TUI asks whether to continue anyway.
 - `atr serve` is still an explicit subcommand; a bare `atr` is the TUI.
 

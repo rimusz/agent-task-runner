@@ -297,6 +297,9 @@ token_file = "{token}"
 max_bytes = 8192
 include_diff = true
 
+[host]
+enabled = false
+
 [shadow]
 enabled = false
 repo = ""

@@ -207,7 +207,9 @@ pub fn apply_plan(db: &Db, parent: &Task, plan: &Plan, max_subtasks: u32) -> Res
         let child = &keys[i];
         let deps = resolve_deps(&sub.deps, &title_to_key, &keys);
         if !deps.is_empty() {
-            db.set_task_deps(child, &deps.join(","))?;
+            if let Err(e) = crate::deps::set_after(db, child, &deps) {
+                tracing::warn!(task = %child, "plan after rejected: {e:#}");
+            }
         }
         db.enqueue_message(child, &sub.prompt, "planner")?;
         db.set_status(child, "queued")?;
@@ -246,23 +248,10 @@ fn resolve_deps(deps: &[String], titles: &[(String, String)], keys: &[String]) -
 }
 
 pub fn deps_ready(db: &Db, task: &Task) -> Result<bool> {
-    if task.deps.is_empty() {
-        return Ok(true);
-    }
-    for key in task
-        .deps
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let Some(dep) = db.get_task(key)? else {
-            return Ok(false);
-        };
-        if !matches!(dep.status.as_str(), "waiting" | "done") {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    Ok(matches!(
+        crate::deps::decide(db, task)?,
+        crate::deps::Decision::Ready
+    ))
 }
 
 #[cfg(test)]

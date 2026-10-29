@@ -96,6 +96,9 @@ enum Cmd {
         /// Required provider capabilities: browser, desktop (comma-separated or repeated).
         #[arg(long, value_delimiter = ',')]
         needs: Vec<String>,
+        /// Task keys that must succeed before this one starts.
+        #[arg(long, value_delimiter = ',')]
+        after: Vec<String>,
         /// Run on two providers (e.g. grok,claude) and keep the arm that passes
         /// verify with the smallest diff. Needs --repo and verify commands.
         #[arg(long, conflicts_with_all = ["provider", "dir", "needs"])]
@@ -674,6 +677,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             provider,
             title,
             needs,
+            after,
             compare,
         } => {
             let needs = atr::task::parse_needs(&needs)?;
@@ -767,6 +771,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 provider.as_deref(),
                 matches!(workspace_kind, atr::task::WorkspaceKind::Dir),
                 &needs,
+                &after,
             ) {
                 println!("{key}");
                 return Ok(match status {
@@ -793,6 +798,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     allow_empty_repo: allow_empty,
                     provider_hint: provider.clone(),
                     needs: needs.clone(),
+                    after: after.clone(),
                 },
             )?;
             println!("{key}");
@@ -1338,6 +1344,7 @@ fn http_create(
     provider: Option<&str>,
     as_dir: bool,
     needs: &[String],
+    after: &[String],
 ) -> Result<u16> {
     let url = format!("http://{listen}/tasks");
     let mut payload = serde_json::json!({
@@ -1360,6 +1367,9 @@ fn http_create(
     }
     if !needs.is_empty() {
         payload["needs"] = serde_json::json!(needs);
+    }
+    if !after.is_empty() {
+        payload["after"] = serde_json::json!(after);
     }
     if let Some(spec) = output_spec {
         if output == "webhook" {
