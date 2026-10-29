@@ -105,6 +105,49 @@ atr repos add owner/my-repo --path ~/src/my-repo
 gh issue edit 12 --add-label for:atr
 ```
 
+## Interactive TUI
+
+A bare `atr` (same as `atr tui`) opens a chat in your terminal. It behaves like the provider CLI (Claude Code, Grok Build, Cursor, Codex or OpenCode) with atr in the middle as a proxy: atr keeps the session, reuses the prompt cache and shows tokens and cache use under the input. atr never writes the replies itself.
+
+```bash
+atr                      # chat with no workspace (answer-only)
+atr --repo .             # work in the current directory's git repo
+atr --repo demo          # a repo from your config, by name or path
+atr tui --dir ~/notes    # edit a plain folder in place
+atr ask "what is 2+2?"   # one turn, print the answer, exit (scripts, CI)
+```
+
+| In the chat | What it does |
+|---|---|
+| `/` | Opens the atr command menu |
+| `/provider`, `/model` | Pick the provider, or that provider's model, for this session |
+| `/effort`, `/context` | Set reasoning effort or context size for the next turn, where that CLI has a flag for it |
+| `/repo` | Switch workspace: a repo from your config, `/repo .` (current git repo) or `/repo none` |
+| `/new`, `/status`, `/help` | Fresh session, session status, help |
+| `/cli` | Open the provider's own TUI |
+| `/quit` or Ctrl+C | Leave |
+
+Any other `/…` line (for example `/compact`) goes to the provider as a turn. Press Enter while a turn is running and the line is queued; atr sends queued lines in order once the turn finishes. Full reference: [docs/USAGE.md](docs/USAGE.md#terminal-tui-atr-tui).
+
+## Ways to run atr
+
+| Mode | Use it for | Start it |
+|---|---|---|
+| TUI only | Chatting with your CLIs on a laptop, no background service | `atr` |
+| TUI + serve | A machine that runs background work and that you also chat on | `atr service install`, then `atr` |
+| serve only | A headless runner (Mac Mini, Linux box, VM) | `atr init --yes`, `atr service install` |
+
+**TUI only.** The TUI runs atr's engine in its own process, so `atr serve` is not needed. It only runs its own chat session. Nothing polls GitHub, Telegram or the inbox, the dashboard, HTTP API and MCP over HTTP are off, and tasks from `atr add` wait in the queue until serve runs. The first `atr` on a terminal offers `atr init` if there is no config yet.
+
+**TUI + serve.** Serve runs as the user service and you open `atr` when you want to chat. The TUI does not connect to serve. Both read the same config file and state database (by default `~/.config/atr/config.toml` and `~/.local/share/atr/state.db`; pass the same `--config` or `ATR_CONFIG` to both if you use another one). So:
+
+- `/repo` lists the repos in that config (`[[repo]]` or `repo_path`, added with `atr repos add`) and the status line marks a picked repo `(watched)` when it is enabled there. `/repo` rereads the config each time you open it, and works whether or not serve is running.
+- TUI sessions are tasks named `cli-<name>`. Serve never starts them, and the TUI only starts its own session, so they do not run the same task twice. One catch: starting or restarting serve (`atr service restart`, `atr upgrade`) stops a TUI turn that is running at that moment, because serve treats its CLI as left over from a previous serve.
+- Provider cooldowns and quota limits live in the shared database. Each process counts only its own running turns against a provider's `max_parallel`.
+- The status line under the input shows `· serve` when the atr user service is up (a foreground `atr serve` does not show).
+
+**serve only.** `atr serve` (usually the user service) runs the scheduler, the HTTP API with the dashboard and MCP, and the GitHub, Telegram, inbox and shadow pollers. Nobody needs to be at the keyboard. On headless Linux, also run `sudo loginctl enable-linger "$USER"`. The TUI cannot reach a serve on another machine; to chat with that machine's setup, SSH in and run `atr` there. See [docs/USE-CASES.md](docs/USE-CASES.md#2-always-on-linux-server-or-cloud-vm) and [Sources](docs/CONFIG.md#sources).
+
 ## What you can use it for
 
 - **Background runner on your Mac**: queue work and close the terminal. [More](docs/USE-CASES.md#1-background-runner-on-your-laptop)
@@ -114,7 +157,7 @@ gh issue edit 12 --add-label for:atr
 - **Grok Bot operator**: import the [atr Operator](https://x.ai/bot/oDG33vy41WVZKy-HFKVk0) bot template to queue work and watch atr from Grok Bot.
 - **Inbox folder**: scripts drop a task file and atr runs it. [More](docs/USAGE.md#hand-work-to-atr)
 - **Telegram**: add tasks and check progress from your phone. [More](docs/USE-CASES.md#7-control-from-your-phone)
-- **Terminal TUI**: a bare `atr` (or `atr tui`) is an interactive chat UI (transcript, under-input status strip, slash proxy to the provider CLI). `atr --repo .` / `/repo .` bind the current directory's git root; a config name or path is also fine (full path not required). `atr ask "prompt"` is the one-shot / CI entrypoint (no `atr serve`). [More](docs/USAGE.md#terminal-tui-atr-tui)
+- **Terminal TUI**: chat with your coding CLIs in the terminal, with atr as the proxy. [More](#interactive-tui)
 
 ## Providers
 
