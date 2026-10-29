@@ -2992,8 +2992,17 @@ cli = "{cli}"
         );
     }
 
+    fn existing_true_cli() -> &'static str {
+        if std::path::Path::new("/bin/true").exists() {
+            "/bin/true"
+        } else {
+            "/usr/bin/true"
+        }
+    }
+
     fn shared_for_reconcile(dir: &std::path::Path) -> std::sync::Arc<Shared> {
         std::fs::write(dir.join("p.md"), "p\n").unwrap();
+        let cli = existing_true_cli();
         let text = format!(
             r#"
 listen = "127.0.0.1:0"
@@ -3005,7 +3014,7 @@ display_timezone = "UTC"
 [[provider]]
 name = "claude"
 kind = "claude"
-cli = "/bin/true"
+cli = "{cli}"
 "#,
             db = dir.join("s.db").display(),
             root = dir.display(),
@@ -3344,7 +3353,7 @@ cli = "{cli}"
     #[test]
     fn unavailable_counts_live_foreign_owner_runs() {
         let dir = tempfile::tempdir().unwrap();
-        let tui = shared_with_cli(dir.path(), "/bin/true");
+        let tui = shared_with_cli(dir.path(), existing_true_cli());
         tui.db.upsert_task("cli-default", "/etc", None).unwrap();
         tui.db.start_run("cli-default", "claude", "").unwrap();
         let serve = Shared::from_config(
