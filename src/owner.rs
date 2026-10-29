@@ -7,6 +7,7 @@
 //! serve can tell a live TUI turn from a leftover CLI.
 
 use crate::db::pid_alive;
+use chrono::TimeZone;
 use std::sync::OnceLock;
 
 /// `owners.kind` for `atr serve` / the user service.
@@ -17,7 +18,9 @@ pub const KIND_TUI: &str = "tui";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerId {
     pub pid: i64,
-    /// OS start token (Linux `/proc` starttime, elsewhere `ps` lstart).
+    /// OS start token (Linux `/proc` starttime, elsewhere `ps` lstart as
+    /// epoch seconds). Always whitespace-free so a pidfile can be
+    /// `{pid} {started}` without losing the token.
     pub started: String,
 }
 
@@ -72,21 +75,44 @@ pub fn parse_linux_starttime(stat: &str) -> Option<i64> {
     rest.split_whitespace().nth(19)?.parse().ok()
 }
 
+/// Turn BSD/`macOS` `ps -o lstart=` (`Thu Oct 29 10:17:41 2026`, possibly
+/// with a space-padded day) into a whitespace-free unix-epoch token.
+/// `LC_ALL=C` is required at the `ps` call so the month/weekday stay English.
+pub fn epoch_from_lstart(lstart: &str) -> Option<String> {
+    let mut parts = lstart.split_whitespace();
+    let wday = parts.next()?;
+    let mon = parts.next()?;
+    let day_raw = parts.next()?;
+    let time = parts.next()?;
+    let year = parts.next()?;
+    let day = if day_raw.len() == 1 {
+        format!("0{day_raw}")
+    } else {
+        day_raw.to_string()
+    };
+    let s = format!("{wday} {mon} {day} {time} {year}");
+    let naive = chrono::NaiveDateTime::parse_from_str(&s, "%a %b %d %H:%M:%S %Y").ok()?;
+    let tz = chrono::Local;
+    let dt = tz
+        .from_local_datetime(&naive)
+        .earliest()
+        .or_else(|| tz.from_local_datetime(&naive).latest())?;
+    Some(dt.timestamp().to_string())
+}
+
 #[cfg(not(target_os = "linux"))]
 fn ps_lstart_token(pid: i64) -> Option<String> {
     let out = std::process::Command::new("ps")
         .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    epoch_from_lstart(s.trim())
 }
 
 #[cfg(test)]
@@ -100,6 +126,11 @@ mod tests {
         assert_eq!(a, b);
         assert!(a.pid > 0);
         assert!(!a.started.is_empty(), "start token must be readable");
+        assert!(
+            !a.started.chars().any(char::is_whitespace),
+            "start token must be pidfile-safe: {:?}",
+            a.started
+        );
         assert!(a.is_alive());
         assert!(!owner_alive(0, &a.started));
         assert!(!owner_alive(a.pid, ""));
@@ -113,5 +144,17 @@ mod tests {
         let stat = "1 (some name) S 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 12345 0";
         assert_eq!(parse_linux_starttime(stat), Some(12345));
         assert_eq!(parse_linux_starttime("broken"), None);
+    }
+
+    #[test]
+    fn macos_lstart_becomes_whitespace_free_epoch() {
+        // Same string `ps -o lstart=` prints on macOS (C locale). A space-padded
+        // day (`Oct  9`) must not change the token vs `Oct 9`.
+        let a = epoch_from_lstart("Thu Oct 29 10:17:41 2026").expect("parse");
+        let b = epoch_from_lstart("Thu Oct  29 10:17:41 2026").expect("padded day");
+        assert_eq!(a, b);
+        assert!(!a.chars().any(char::is_whitespace), "{a}");
+        assert!(a.chars().all(|c| c == '-' || c.is_ascii_digit()), "{a}");
+        assert!(epoch_from_lstart("not a date").is_none());
     }
 }

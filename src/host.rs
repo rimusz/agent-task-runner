@@ -201,4 +201,12 @@ mod tests {
         assert_eq!(snap.cores, 4);
         assert_eq!(snap.available_memory_mb, 900);
     }
+
+    #[test]
+    fn live_sample_has_cores_on_this_os() {
+        // sysinfo load/memory paths differ on macOS vs Linux; fail-open
+        // still returns at least one core so the gate never divides by zero.
+        let snap = sample();
+        assert!(snap.cores >= 1);
+    }
 }
