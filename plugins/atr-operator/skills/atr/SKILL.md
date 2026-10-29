@@ -30,7 +30,7 @@ atr --repo .                 # cwd git root; config name or path also fine
 atr tui --repo demo --session work --provider grok
 ```
 
-Mid-session `/provider` sticks and triggers the existing handoff on switch. `/model` / `/model <id>` change atr's session model (under-input strip + next `--model`); they are never forwarded as a Claude/Cursor prompt. `/effort` sets a per-provider spawn knob on the next turn (grok `--effort`, claude `--effort`, cursor `model[effort=]`, codex `-c model_reasoning_effort`); empty `/effort` opens the list when that kind has those flags, otherwise a “not supported” note. Bare `/context` always opens the shared size catalog; apply is claude `--autocompact` / cursor `model[context=]` only — grok/codex get an honesty note (no invented argv). While a turn runs, Enter parks composer lines locally (FIFO); host slashes still run; after the turn finishes, the oldest parked line sends like idle Enter. `/repo` / `/repo .` / `/repo none` change the session workspace (clears a bound `cli-*` worktree/session like `/new`). Ctrl+C quits atr (Esc only dismisses menus). `atr serve` stays an explicit subcommand. TUI + serve on one machine share `state.db`: a live TUI turn survives `atr service restart` / `atr upgrade`; `max_parallel` is counted across both (chrome shows `provider at limit` instead of starting another CLI); `· serve` is a live serve owner or pidfile, not only the user service.
+Mid-session `/provider` sticks and triggers the existing handoff on switch. `/model` / `/model <id>` change atr's session model (under-input strip + next `--model`); they are never forwarded as a Claude/Cursor prompt. `/effort` sets a per-provider spawn knob on the next turn (grok `--effort`, claude `--effort`, cursor `model[effort=]`, codex `-c model_reasoning_effort`); empty `/effort` opens the list when that kind has those flags, otherwise a “not supported” note. Bare `/context` always opens the shared size catalog; apply is claude `--autocompact` / cursor `model[context=]` only — grok/codex get an honesty note (no invented argv). While a turn runs, Enter parks composer lines locally (FIFO); host slashes still run; after the turn finishes, the oldest parked line sends like idle Enter. `/repo` / `/repo .` / `/repo none` change the session workspace (clears a bound `cli-*` worktree/session like `/new`). Ctrl+C quits atr (Esc only dismisses menus). `atr serve` stays an explicit subcommand. TUI + serve on one machine share `state.db`: a live TUI turn (or a `held` / retry-waiting row it owns) survives `atr service restart` / `atr upgrade`; `max_parallel` is counted across both (chrome shows `provider at limit` instead of starting another CLI); retry and host-gate starts use the same slot; `· serve` is a live serve owner or pidfile, not only the user service.
 
 ## Telegram assistant (this chat)
 
@@ -62,7 +62,7 @@ Operators with a shell use the CLI; it shares the same code paths. `atr pause`/`
 | `/task <key>` | `atr tasks <key>` | `GET /tasks/<key>` |
 | `/add <prompt>` | `atr add <prompt>` | `POST /tasks` |
 | `/cancel <key> [force]` | `atr cancel <key> [--force]` | `POST /tasks/<key>/cancel` |
-| `/retry <key>` | `atr retry <key>` (fresh attempt: last consumed prompt is unconsumed so the scheduler can dispatch, wall clock restarts, provider re-picked from current config unless strictly pinned) | `POST /tasks/<key>/retry` |
+| `/retry <key>` | `atr retry <key>` (fresh attempt: last consumed prompt is unconsumed so the scheduler can dispatch, wall clock restarts, provider re-picked from current config unless strictly pinned; on a `held` task also clears the hold and `after` list) | `POST /tasks/<key>/retry` |
 | `/pause` | `atr pause` | `POST /intake/pause` |
 | `/resume` | `atr resume` | `POST /intake/resume` |
 | `/config get <key>` | `atr config get <key>` | none |
@@ -166,7 +166,7 @@ Every change or destructive action still needs inline **Confirm** (old → new).
 
 ## Other agents (MCP)
 
-`atr mcp` is stdio. HTTP is `POST /mcp` on `listen` with `Authorization: Bearer $ATR_MCP_TOKEN` (or the 0600 token file). atr never prints the token. Tools: `add_task` (`body` required; `title` optional from the first prompt line; workspace `none` when neither `dir` nor `repo`; output; optional `idempotency_key` replays the same create, conflicts if the body/files differ; optional `files` `[{name, content_base64|text}]` land in the worktree by filename), `wait_task`, `get_result` (text, diff, PR URL), list/steer/cancel, status, repos, providers, usage, doctor, read-only config. `POST /tasks` takes the same `files` JSON and header `Idempotency-Key`. GitHub-label method still works without MCP (`for:atr`). `atr add "prompt"` / `--dir` / `--repo` enqueue a task without an issue. Prompts, inbox files, and each attached file are capped at 256 KiB by default.
+`atr mcp` is stdio. HTTP is `POST /mcp` on `listen` with `Authorization: Bearer $ATR_MCP_TOKEN` (or the 0600 token file). atr never prints the token. Tools: `add_task` (`body` required; `title` optional from the first prompt line; workspace `none` when neither `dir` nor `repo`; output; optional `after` (task keys that must succeed first); optional `idempotency_key` replays the same create, conflicts if the body/files differ; optional `files` `[{name, content_base64|text}]` land in the worktree by filename), `wait_task`, `get_result` (text, diff, PR URL), list/steer/cancel, status, repos, providers, usage, doctor, read-only config. `POST /tasks` takes the same `files` JSON and header `Idempotency-Key`. GitHub-label method still works without MCP (`for:atr`). `atr add "prompt"` / `--dir` / `--repo` / `--after key1,key2` enqueue a task without an issue. Prompts, inbox files, and each attached file are capped at 256 KiB by default. `[retry]` backs off transient provider errors (default 1/2/4/8m); `[host]` keeps work queued when CPU load or free RAM is past the limit (CONFIG.md).
 
 ```bash
 atr mcp
@@ -232,6 +232,9 @@ With lessons on, atr reflects after informative failures (verify failed, stalled
 | Ollama / spark connection refused | Local server down. Doctor: URL missing from `opencode.json`. |
 | Cursor / Claude fail over SSH | Keychain locked. Run doctor and serve in the desktop session. |
 | `atr submit` does nothing | `atr serve` (or the user service) not running. `/status`. |
+| Task `held` | An `after:` dependency failed or is gone. `atr retry <key>` clears the hold. |
+| Queued with retry time | Transient provider error (overloaded / 429 / 5xx). Wait, or `atr retry <key>`. `[retry]` in CONFIG.md. |
+| Status `host: … waiting` | CPU load or free RAM past `[host]`. Wait or `atr config set host.enabled false`. |
 | Usage `not reported` | Expected for OpenCode, Cursor, Codex. |
 | Wanted a vendor CLI (`kimi`, `qwen`, …) | No kind. Drive the model through OpenCode. |
 

@@ -50,7 +50,7 @@ a { color: inherit; }
 <div id="tghealth" class="banner" hidden></div>
 <p class="meta">
   <label>repo <select id="repoFilter"><option value="">all</option></select></label>
-  <label>status <select id="statusFilter"><option value="">all</option><option>success</option><option>failed</option><option>cancelled</option><option>running</option><option>queued</option></select></label>
+  <label>status <select id="statusFilter"><option value="">all</option><option>success</option><option>failed</option><option>cancelled</option><option>running</option><option>queued</option><option>held</option></select></label>
   <label>provider <select id="providerFilter"><option value="">all</option></select></label>
   <label>window <select id="windowFilter"><option value="">all</option><option value="1">1h</option><option value="24">24h</option><option value="168">7d</option></select></label>
 </p>
@@ -222,7 +222,8 @@ function paint(d) {
   const tzPrefix = d.timezone && !now.includes(d.timezone) ? d.timezone + " · " : "";
   $("meta").textContent = tzPrefix + now +
     " · " + (d.listen || "") + (d.intake_paused ? " · intake paused" : "") +
-    (d.driver ? " · driver " + d.driver : "") + " · refresh 5s";
+    (d.driver ? " · driver " + d.driver : "") +
+    (d.host && d.host.line ? " · " + d.host.line : "") + " · refresh 5s";
   const st = d.stats_today || {};
   $("stats").textContent = "today: " + num(st.runs || 0) + " runs · " +
     (st.success_rate == null ? "no finished runs" : st.success_rate + "% success (" + num(st.success || 0) + ")");
@@ -261,9 +262,10 @@ function paint(d) {
     taskKey(t.key), esc(t.repo), esc(t.role || "worker"), provModel(t.provider, t.model),
     '<span class="live" data-since="' + esc(t.started_utc) + '">' + elapsedSince(t.started_utc) + '</span>', esc(t.progress || "-")
   ], null, ["","","","","","wrap"]);
-  const q = (d.queued || []).filter(t => keep(t, "queued", t.started_utc));
+  const q = (d.queued || []).filter(t => keep(t, t.state || "queued", t.started_utc));
   $("queued").innerHTML = rows("queued", ["key","repo","role","parent","provider","model","waiting"], q, t => [
-    taskKey(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.parent || "-"), esc(t.provider), esc(t.model), esc(t.elapsed)
+    taskKey(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.parent || "-"), esc(t.provider), esc(t.model),
+    esc(t.reason || (t.state === "held" ? "held" : t.elapsed) || "-")
   ]);
   const fin = (d.finished || []).filter(t => keep(t, t.result, t.ended_utc));
   $("finished").innerHTML = rows("finished", [{t:"finished",tip:"local time; hover for the full date"},"key","prompt","repo","provider / model",{t:"elapsed",num:true},{t:"tokens",num:true},{t:"cost",num:true,tip:"as reported by the CLI"},"result"], fin, t => [

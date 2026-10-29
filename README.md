@@ -4,6 +4,7 @@
 
 - Hand it a task (a prompt, plus a folder or repo if you like) and it runs it with Claude Code, Grok Build, Cursor, Codex or OpenCode.
 - When one provider hits its limit, it moves on to the next one in your list.
+- Retries transient provider errors (overloaded, 429, 5xx) with backoff, waits on `after:` task dependencies, and keeps new work queued when the host CPU or memory is busy.
 - Takes work from the terminal, GitHub issues, other agents (MCP), Telegram, HTTP or a drop folder.
 - Shows what is running on a local dashboard, in the terminal or in Telegram.
 

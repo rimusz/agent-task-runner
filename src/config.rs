@@ -95,6 +95,12 @@ pub struct RawConfig {
     /// available for `needs = ["desktop"]` tasks. Empty = built-in detection.
     #[serde(default)]
     pub desktop_check: String,
+    /// Transient provider-error retries (overloaded, 429 without reset, 5xx).
+    #[serde(default)]
+    pub retry: RawRetry,
+    /// Host CPU/memory gate before starting a new task.
+    #[serde(default)]
+    pub host: RawHost,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -674,6 +680,8 @@ pub struct Config {
     pub sources: Vec<SourceEntry>,
     pub max_prompt_bytes: u64,
     pub desktop_check: String,
+    pub retry: RetryConfig,
+    pub host: HostConfig,
     /// Keys in the file this binary does not know (ignored; `atr doctor` warns).
     /// Dotted paths such as `compare.enabled` or `provider.0.foo`.
     pub unknown_keys: Vec<UnknownKey>,
@@ -785,6 +793,95 @@ pub struct NotifyConfig {
     /// `sh -c` command; empty = off.
     pub command: String,
     pub timeout: Duration,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawRetry {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Retries after the first failure (4 → waits of 1, 2, 4, 8 minutes).
+    #[serde(default = "default_retry_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_retry_backoff")]
+    pub backoff: Vec<String>,
+}
+
+impl Default for RawRetry {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_attempts: default_retry_attempts(),
+            backoff: default_retry_backoff(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    pub enabled: bool,
+    pub max_attempts: u32,
+    pub backoff: Vec<Duration>,
+    pub backoff_raw: Vec<String>,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_attempts: default_retry_attempts(),
+            backoff: vec![
+                Duration::from_secs(60),
+                Duration::from_secs(120),
+                Duration::from_secs(240),
+                Duration::from_secs(480),
+            ],
+            backoff_raw: default_retry_backoff(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawHost {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 1-minute load / cores. `0` ignores CPU.
+    #[serde(default = "default_host_load")]
+    pub max_load: f64,
+    /// Available RAM in MiB. `0` ignores memory.
+    #[serde(default = "default_host_mem")]
+    pub min_memory_mb: u64,
+    #[serde(default = "default_host_settle")]
+    pub settle: String,
+}
+
+impl Default for RawHost {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_load: default_host_load(),
+            min_memory_mb: default_host_mem(),
+            settle: default_host_settle(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HostConfig {
+    pub enabled: bool,
+    pub max_load: f64,
+    pub min_memory_mb: u64,
+    pub settle: Duration,
+}
+
+impl Default for HostConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_load: default_host_load(),
+            min_memory_mb: default_host_mem(),
+            settle: Duration::from_secs(30),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1046,6 +1143,61 @@ fn default_assistant_timeout() -> String {
 }
 fn default_true() -> bool {
     true
+}
+
+fn default_retry_attempts() -> u32 {
+    4
+}
+
+fn default_retry_backoff() -> Vec<String> {
+    vec!["1m".into(), "2m".into(), "4m".into(), "8m".into()]
+}
+
+fn default_host_load() -> f64 {
+    0.85
+}
+
+fn default_host_mem() -> u64 {
+    512
+}
+
+fn default_host_settle() -> String {
+    "30s".into()
+}
+
+fn parse_retry(raw: RawRetry) -> Result<RetryConfig> {
+    let backoff_raw = if raw.backoff.is_empty() {
+        default_retry_backoff()
+    } else {
+        raw.backoff
+    };
+    let mut backoff = Vec::with_capacity(backoff_raw.len());
+    for s in &backoff_raw {
+        backoff.push(parse_duration(s).with_context(|| format!("[retry] backoff {s}"))?);
+    }
+    Ok(RetryConfig {
+        enabled: raw.enabled,
+        max_attempts: raw.max_attempts,
+        backoff,
+        backoff_raw,
+    })
+}
+
+fn parse_host(raw: RawHost) -> Result<HostConfig> {
+    if raw.max_load < 0.0 {
+        bail!("[host] max_load {} must be >= 0", raw.max_load);
+    }
+    let settle = if raw.settle.trim().is_empty() {
+        default_host_settle()
+    } else {
+        raw.settle
+    };
+    Ok(HostConfig {
+        enabled: raw.enabled,
+        max_load: raw.max_load,
+        min_memory_mb: raw.min_memory_mb,
+        settle: parse_duration(&settle).context("[host] settle")?,
+    })
 }
 
 fn default_planner_mode() -> String {
@@ -1821,6 +1973,8 @@ fn known_field_names() -> Vec<String> {
         introspect::fields::<RawPreset>(),
         introspect::fields::<RawUpdate>(),
         introspect::fields::<RawNotify>(),
+        introspect::fields::<RawRetry>(),
+        introspect::fields::<RawHost>(),
         introspect::fields::<RawHandoff>(),
         introspect::fields::<RawShadow>(),
         introspect::fields::<GithubConfig>(),
@@ -2427,6 +2581,8 @@ impl Config {
                     parse_duration(&raw.notify.timeout)?
                 },
             },
+            retry: parse_retry(raw.retry)?,
+            host: parse_host(raw.host)?,
             repos: {
                 let mut seen = std::collections::BTreeSet::new();
                 raw.repos
@@ -3065,9 +3221,31 @@ future_knob = true
             "max_parallel",
             "allowed_chat_ids",
             "label",
+            "backoff",
+            "min_memory_mb",
         ] {
             assert!(known.iter().any(|f| f == k), "{k} missing");
         }
+    }
+
+    #[test]
+    fn retry_and_host_defaults() {
+        let cfg = parse_config_toml(
+            r#"
+repo_path = "/tmp"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap();
+        assert!(cfg.retry.enabled);
+        assert_eq!(cfg.retry.max_attempts, 4);
+        assert_eq!(cfg.retry.backoff_raw, ["1m", "2m", "4m", "8m"]);
+        assert!(cfg.host.enabled);
+        assert!((cfg.host.max_load - 0.85).abs() < f64::EPSILON);
+        assert_eq!(cfg.host.min_memory_mb, 512);
+        assert_eq!(cfg.host.settle, Duration::from_secs(30));
     }
 
     #[test]

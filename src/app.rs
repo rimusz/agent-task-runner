@@ -30,6 +30,8 @@ pub struct Shared {
     pub inflight: Mutex<HashMap<String, InFlight>>,
     pub kick: Notify,
     pub intake_paused: AtomicBool,
+    /// Last time a task was started while `[host]` gating is on (settle gap).
+    pub last_host_start: Mutex<Option<std::time::Instant>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +56,8 @@ pub struct SubmitOpts {
     /// Required provider capabilities (`browser`, `desktop`). Stored before
     /// queueing so the scheduler never hands the task to an incapable provider.
     pub needs: Vec<String>,
+    /// Task keys this one waits for (`after:`). Empty = none.
+    pub after: Vec<String>,
 }
 
 impl Shared {
@@ -73,6 +77,7 @@ impl Shared {
             inflight: Mutex::new(HashMap::new()),
             kick: Notify::new(),
             intake_paused: AtomicBool::new(paused),
+            last_host_start: Mutex::new(None),
         }))
     }
 
@@ -198,6 +203,15 @@ impl Shared {
             let needs = crate::task::parse_needs(&opts.needs)?;
             self.db.set_task_needs(key, &needs.join(","))?;
         }
+        if existing.as_ref().is_some_and(|t| t.status == "held") {
+            self.db.clear_hold(key)?;
+            if opts.after.is_empty() {
+                self.db.set_task_deps(key, "")?;
+            }
+        }
+        if !opts.after.is_empty() {
+            crate::deps::set_after(&self.db, key, &opts.after)?;
+        }
         let _ = crate::scheduler::reclaim_dead_open_run(self, key);
         let running = self.inflight.lock().unwrap().contains_key(key)
             || self.db.task_is_running(key)?
@@ -212,7 +226,7 @@ impl Shared {
             && existing.as_ref().is_some_and(|t| {
                 matches!(
                     t.status.as_str(),
-                    "waiting" | "done" | "failed" | "needs_attention" | "cancelled"
+                    "waiting" | "done" | "failed" | "needs_attention" | "cancelled" | "held"
                 )
             })
         {
@@ -251,6 +265,11 @@ impl Shared {
         // task is strictly pinned, e.g. a compare arm) pick the provider again
         // from the current config instead of sticking to the last one.
         self.db.restart_task_clock(key)?;
+        self.db.clear_retry(key)?;
+        if t.status == "held" {
+            self.db.clear_hold(key)?;
+            self.db.set_task_deps(key, "")?;
+        }
         if !t.pin_strict {
             self.reresolve_provider(&t)?;
         }
@@ -319,6 +338,7 @@ impl Shared {
             self.db.finish_run(info.run_id, "cancelled", Some(-2))?;
             self.db.set_status(key, "failed")?;
             self.inflight.lock().unwrap().remove(key);
+            let _ = crate::deps::hold_dependents(&self.db, key);
             return Ok(());
         }
         if let Some(task) = self.db.get_task(key)? {
@@ -326,6 +346,7 @@ impl Shared {
                 bail!("task {key} is running; re-run with --force to cancel");
             }
             self.db.set_status(key, "failed")?;
+            let _ = crate::deps::hold_dependents(&self.db, key);
             Ok(())
         } else {
             bail!("unknown task {key}")
@@ -459,6 +480,15 @@ impl Shared {
                 })
             })
             .unwrap_or_else(|| json!({"headline_min_input": cfg.cache.headline_min_input}));
+        let host_snap = crate::host::sample();
+        let host = json!({
+            "enabled": cfg.host.enabled,
+            "load": host_snap.load,
+            "cores": host_snap.cores,
+            "available_memory_mb": host_snap.available_memory_mb,
+            "waiting": crate::host::decide(&cfg.host, &host_snap).map(|w| w.reason),
+            "line": crate::host::format_line(&cfg.host, &host_snap),
+        });
         json!({
             "version": crate::VERSION,
             "listen": cfg.listen,
@@ -489,11 +519,22 @@ impl Shared {
                 "role": t.role,
                 "title": t.title,
                 "deps": t.deps,
+                "after": crate::deps::split_deps(&t.deps),
                 "issue": t.issue,
                 "workspace": t.workspace_kind,
                 "output": t.output_kind,
                 "source": t.source_kind,
+                "retry_attempt": t.retry_attempt,
+                "retry_next_at": t.retry_next_at,
+                "retry_reason": t.retry_reason,
+                "hold_reason": t.hold_reason,
             })).collect::<Vec<_>>(),
+            "host": host,
+            "retry": {
+                "enabled": cfg.retry.enabled,
+                "max_attempts": cfg.retry.max_attempts,
+                "backoff": cfg.retry.backoff_raw,
+            },
             "driver": cfg.driver_name(),
             "planner": cfg.planner.mode.as_str(),
             "review": cfg.review.enabled,
@@ -934,6 +975,42 @@ fn print_task_detail(shared: &Shared, key: &str, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+fn task_status_note(t: &Value) -> String {
+    let status = t.get("status").and_then(|x| x.as_str()).unwrap_or("");
+    if status == "held" {
+        if let Some(r) = t
+            .get("hold_reason")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            return format!("  {r}");
+        }
+    }
+    if let Some(r) = t
+        .get("retry_reason")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let when = t
+            .get("retry_next_at")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        return if when.is_empty() {
+            format!("  retry ({r})")
+        } else {
+            format!("  retry {when} ({r})")
+        };
+    }
+    if let Some(after) = t.get("after").and_then(|x| x.as_array()) {
+        let keys: Vec<&str> = after.iter().filter_map(|x| x.as_str()).collect();
+        if !keys.is_empty() && status == "queued" {
+            return format!("  after {}", keys.join(","));
+        }
+    }
+    String::new()
+}
+
 pub fn format_status_table(shared: &Shared, repo: Option<&str>) -> String {
     let v = shared.status_json_filtered(repo);
     let cfg = shared.config.read().unwrap().clone();
@@ -1114,6 +1191,14 @@ pub fn format_status_table(shared: &Shared, repo: Option<&str>) -> String {
         out.push('\n');
     }
     out.push_str(&format!("running: {running}\n"));
+    if let Some(line) = v
+        .get("host")
+        .and_then(|h| h.get("line"))
+        .and_then(|x| x.as_str())
+    {
+        out.push_str(line);
+        out.push('\n');
+    }
     if let Some(sh) = v.get("shadow") {
         if sh.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false) {
             out.push_str(&format!(
@@ -1130,12 +1215,14 @@ pub fn format_status_table(shared: &Shared, repo: Option<&str>) -> String {
         .unwrap_or_default();
     out.push_str(&format!("tasks: {}\n", tasks.len()));
     for t in tasks.iter().take(8) {
+        let extra = task_status_note(t);
         out.push_str(&format!(
-            "  {}  {}  {}  {}\n",
+            "  {}  {}  {}  {}{}\n",
             t.get("key").and_then(|x| x.as_str()).unwrap_or("-"),
             t.get("repo").and_then(|x| x.as_str()).unwrap_or("-"),
             t.get("status").and_then(|x| x.as_str()).unwrap_or("-"),
-            t.get("provider").and_then(|x| x.as_str()).unwrap_or("-")
+            t.get("provider").and_then(|x| x.as_str()).unwrap_or("-"),
+            extra
         ));
     }
     if tasks.len() > 8 {
@@ -1531,6 +1618,58 @@ cli = "/bin/true"
             .unwrap_err()
             .to_string();
         assert!(err.contains("at least one task key"), "{err}");
+        std::mem::forget(dir);
+    }
+
+    #[test]
+    fn submit_after_and_retry_clears_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = test_shared(&dir);
+        shared.db.upsert_task("build", "/repo", None).unwrap();
+        shared
+            .submit_with(
+                "deploy",
+                "ship it",
+                "cli",
+                None,
+                None,
+                false,
+                false,
+                SubmitOpts {
+                    after: vec!["build".into()],
+                    ..SubmitOpts::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(shared.db.get_task("deploy").unwrap().unwrap().deps, "build");
+        let err = shared
+            .submit_with(
+                "loop",
+                "x",
+                "cli",
+                None,
+                None,
+                false,
+                false,
+                SubmitOpts {
+                    after: vec!["loop".into()],
+                    ..SubmitOpts::default()
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("itself"), "{err}");
+        shared.db.set_status("build", "failed").unwrap();
+        crate::deps::hold_dependents(&shared.db, "build").unwrap();
+        assert_eq!(
+            shared.db.get_task("deploy").unwrap().unwrap().status,
+            "held"
+        );
+        shared.retry("deploy").unwrap();
+        let t = shared.db.get_task("deploy").unwrap().unwrap();
+        assert_eq!(t.status, "queued");
+        assert!(t.deps.is_empty());
+        assert!(t.hold_reason.is_empty());
         std::mem::forget(dir);
     }
 }

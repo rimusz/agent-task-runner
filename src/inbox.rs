@@ -37,6 +37,9 @@ struct InboxFile {
     /// `browser`, `desktop`, or a list of them.
     #[serde(default, deserialize_with = "crate::task::de_needs")]
     needs: Vec<String>,
+    /// Task keys this one waits for.
+    #[serde(default, deserialize_with = "crate::deps::de_after")]
+    after: Vec<String>,
     #[serde(default)]
     shadow: bool,
 }
@@ -205,6 +208,7 @@ fn ingest_file(shared: &Shared, inbox: &Path, path: &Path, max_bytes: u64) -> Re
             allow_empty_repo: workspace_kind == WorkspaceKind::None,
             provider_hint: Some(spec.provider.trim().to_string()).filter(|s| !s.is_empty()),
             needs: spec.needs.clone(),
+            after: spec.after.clone(),
         },
     )?;
     let _ = outcome;

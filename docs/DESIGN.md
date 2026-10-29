@@ -135,15 +135,20 @@ live run.
 
 ## 2. State (SQLite, WAL)
 
-`tasks(key, repo, issue, status[queued|running|waiting|done|failed], provider, session_id, worktree, created, updated, workspace_kind, output_kind, output_spec, source_kind, result_text, result_diff, result_pr_url)`
+`tasks(key, repo, issue, status[queued|running|waiting|done|failed|held], provider, session_id, worktree, created, updated, workspace_kind, output_kind, output_spec, source_kind, result_text, result_diff, result_pr_url, deps, retry_attempt, retry_next_at, retry_reason, hold_reason, hold_notified)`
 Opening an older DB `ALTER`s these columns in and backfills: empty `repo` →
 `workspace_kind=none`, else `git`; `output_kind=reply`; `source_kind=github`
-when `issue` is set, else `cli`. Existing rows keep their keys and status.
+when `issue` is set, else `cli`. New retry/hold columns default to 0 / empty.
+Existing rows keep their keys and status. `held` means an `after` dependency
+failed or vanished; it is not started until a human `atr retry`s or sends a
+new message. Transient provider retries keep `status=queued` and persist
+`retry_next_at` so a serve restart still waits.
 `task_sessions(task_key, provider, session_id, updated)` — resume id for this provider only.
 `shadow_results(...)` — local-only comparison rows (diff, diffstat of every changed/untracked file, tests, verify, tokens, cost, cache hit). Tasks have a `shadow` flag.
 `verify_results(run_id, command, passed, exit_code, output)` — post-success check commands from `[verify]`.
 `provider_limits` / `provider_state.quota_reset_at` — 429/limit events and CLI-reported reset.
-`runs(id, task_key, provider, model, pid, started, ended, outcome, last_event_at, exit_code, session_id, handoff)`
+`runs(id, task_key, provider, model, pid, started, ended, outcome, last_event_at, exit_code, session_id, handoff, owner_pid, owner_started)`
+`owners(pid, started, kind, heartbeat)` — live `serve` / `tui` processes. Opening an older DB `ALTER`s owner and retry/hold columns in additively (`CREATE TABLE IF NOT EXISTS` / `ADD COLUMN` with defaults); either feature's DDL can run first on a v0.1.31 `state.db`.
 `messages(id, task_key, body, source, received, consumed_by_run)` — FIFO queue per task.
 `events(id, run_id, recorded, kind, raw_json)` — assistant / tool / result lines used to build a handoff.
 `usage(run_id, input, cache_read, cache_write, output, cost_usd, cost_kind[est|plan], raw_json)` — one row per run (upsert). Subscription CLIs with no dollar figure use `plan`; a reported estimate is `est`. Opening the DB backfills empty `cost_kind`, recovers a Grok cost from `raw_json` when possible, and canonicalizes Grok usage-window names.

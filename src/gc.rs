@@ -94,7 +94,7 @@ impl TaskGc {
             }
         }
         match self.status.as_deref() {
-            Some("failed") => matches!(t.status.as_str(), "failed" | "cancelled"),
+            Some("failed") => matches!(t.status.as_str(), "failed" | "cancelled" | "held"),
             Some("done") => matches!(t.status.as_str(), "waiting" | "done"),
             Some(_) => false,
             None => crate::db::Db::removable_status(&t.status),

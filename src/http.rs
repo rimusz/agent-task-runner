@@ -168,6 +168,9 @@ struct TaskIn {
     /// Required capabilities: `"browser"`, `"desktop"`, or a list.
     #[serde(default, deserialize_with = "crate::task::de_needs")]
     needs: Vec<String>,
+    /// Task keys this one waits for.
+    #[serde(default, deserialize_with = "crate::deps::de_after")]
+    after: Vec<String>,
     /// Optional; the `Idempotency-Key` header wins when both are set.
     #[serde(default, alias = "idempotencyKey")]
     idempotency_key: Option<String>,
@@ -230,6 +233,7 @@ async fn create_task(
             patch: payload.patch,
             provider: payload.provider,
             needs: payload.needs,
+            after: payload.after,
             source: source.clone().unwrap_or_else(|| "http".into()),
             source_kind: source
                 .as_deref()

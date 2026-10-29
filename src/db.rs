@@ -63,6 +63,14 @@ pub struct Task {
     /// When the per-task wall clock (`task_timeout`) was last restarted
     /// (retry or a new turn on a finished task); empty = first run.
     pub clock_started: String,
+    /// Transient provider-error retries already scheduled (0 = none yet).
+    pub retry_attempt: i64,
+    /// RFC 3339; empty = not waiting on a retry.
+    pub retry_next_at: String,
+    pub retry_reason: String,
+    /// Human-needed `after` hold (`held` status).
+    pub hold_reason: String,
+    pub hold_notified: bool,
 }
 
 impl Default for Task {
@@ -101,6 +109,11 @@ impl Default for Task {
             pin_strict: false,
             compare_decision: String::new(),
             clock_started: String::new(),
+            retry_attempt: 0,
+            retry_next_at: String::new(),
+            retry_reason: String::new(),
+            hold_reason: String::new(),
+            hold_notified: false,
         }
     }
 }
@@ -111,7 +124,9 @@ const TASK_SELECT: &str = "key, repo, issue, status, provider, session_id, workt
                           deps, review_rounds, provider_hint, title,
                           workspace_kind, output_kind, output_spec, source_kind,
                           result_text, result_diff, result_pr_url, needs,
-                          pin_strict, compare_decision, clock_started";
+                          pin_strict, compare_decision, clock_started,
+                          retry_attempt, retry_next_at, retry_reason,
+                          hold_reason, hold_notified";
 
 const RUN_SELECT: &str = "id, task_key, provider, model, pid, started, ended, outcome,
                           last_event_at, exit_code, session_id, handoff, prefix_hash,
@@ -533,6 +548,30 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE tasks ADD COLUMN clock_started TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        // Retry/hold (retry-deps-gating) and owner stamps (tui-serve-coexist)
+        // are additive: each `ALTER` / `CREATE TABLE IF NOT EXISTS` is
+        // idempotent, so a v0.1.31 `state.db` upgrades regardless of which
+        // feature's DDL ran first.
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN retry_attempt INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN retry_next_at TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN retry_reason TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN hold_reason TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN hold_notified INTEGER NOT NULL DEFAULT 0",
             [],
         );
         conn.execute_batch(
@@ -984,7 +1023,7 @@ impl Db {
 
     /// Finished (`waiting`/`done`), failed, or cancelled. Running and queued stay.
     pub fn removable_status(status: &str) -> bool {
-        matches!(status, "waiting" | "failed" | "done" | "cancelled")
+        matches!(status, "waiting" | "failed" | "done" | "cancelled" | "held")
     }
 
     pub fn has_open_run(&self, key: &str) -> Result<bool> {
@@ -1227,6 +1266,44 @@ impl Db {
             params![n, now_rfc3339(), key],
         )?;
         Ok(())
+    }
+
+    pub fn set_retry(
+        &self,
+        key: &str,
+        attempt: i64,
+        next_at: Option<&str>,
+        reason: &str,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET retry_attempt = ?1, retry_next_at = ?2, retry_reason = ?3, updated = ?4 WHERE key = ?5",
+            params![
+                attempt,
+                next_at.unwrap_or(""),
+                reason,
+                now_rfc3339(),
+                key
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_retry(&self, key: &str) -> Result<()> {
+        self.set_retry(key, 0, None, "")
+    }
+
+    pub fn set_hold(&self, key: &str, reason: &str, notified: bool) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET hold_reason = ?1, hold_notified = ?2, updated = ?3 WHERE key = ?4",
+            params![reason, if notified { 1 } else { 0 }, now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_hold(&self, key: &str) -> Result<()> {
+        self.set_hold(key, "", false)
     }
 
     pub fn set_verify_retries(&self, key: &str, n: i64) -> Result<()> {
@@ -2788,6 +2865,11 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         pin_strict: r.get::<_, Option<i64>>(30)?.unwrap_or(0) != 0,
         compare_decision: r.get::<_, Option<String>>(31)?.unwrap_or_default(),
         clock_started: r.get::<_, Option<String>>(32)?.unwrap_or_default(),
+        retry_attempt: r.get::<_, Option<i64>>(33)?.unwrap_or(0),
+        retry_next_at: r.get::<_, Option<String>>(34)?.unwrap_or_default(),
+        retry_reason: r.get::<_, Option<String>>(35)?.unwrap_or_default(),
+        hold_reason: r.get::<_, Option<String>>(36)?.unwrap_or_default(),
+        hold_notified: r.get::<_, Option<i64>>(37)?.unwrap_or(0) != 0,
     })
 }
 
@@ -4192,5 +4274,243 @@ mod tests {
         db.register_owner(crate::owner::KIND_SERVE).unwrap();
         assert!(db.live_owner_kind(crate::owner::KIND_SERVE).unwrap());
         assert!(!db.live_owner_kind(crate::owner::KIND_TUI).unwrap());
+    }
+
+    #[test]
+    fn retry_and_hold_columns_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        db.upsert_task("a", "/r", None).unwrap();
+        db.set_retry("a", 2, Some("2026-01-01T00:02:00.000Z"), "overloaded")
+            .unwrap();
+        db.set_hold("a", "after b failed", true).unwrap();
+        let t = db.get_task("a").unwrap().unwrap();
+        assert_eq!(t.retry_attempt, 2);
+        assert_eq!(t.retry_next_at, "2026-01-01T00:02:00.000Z");
+        assert_eq!(t.retry_reason, "overloaded");
+        assert_eq!(t.hold_reason, "after b failed");
+        assert!(t.hold_notified);
+        db.clear_retry("a").unwrap();
+        db.clear_hold("a").unwrap();
+        let t = db.get_task("a").unwrap().unwrap();
+        assert_eq!(t.retry_attempt, 0);
+        assert!(t.retry_next_at.is_empty());
+        assert!(t.hold_reason.is_empty());
+        assert!(!t.hold_notified);
+    }
+
+    /// Schema `atr` v0.1.31 (main) left after `migrate()`: `clock_started` and
+    /// `idempotency`, but no retry/hold columns, no owner stamps, no `owners`.
+    fn write_v0_1_31_main_schema(path: &std::path::Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE tasks (
+                key TEXT PRIMARY KEY,
+                repo TEXT,
+                issue INTEGER,
+                status TEXT NOT NULL,
+                provider TEXT,
+                session_id TEXT,
+                worktree TEXT,
+                stall_retries INTEGER NOT NULL DEFAULT 0,
+                handoff TEXT,
+                tried TEXT,
+                comment_cursor TEXT,
+                created TEXT NOT NULL,
+                updated TEXT NOT NULL,
+                shadow INTEGER NOT NULL DEFAULT 0,
+                verify_retries INTEGER NOT NULL DEFAULT 0,
+                protect_tests_skip INTEGER NOT NULL DEFAULT 0,
+                labels TEXT,
+                parent_key TEXT,
+                role TEXT NOT NULL DEFAULT 'worker',
+                deps TEXT NOT NULL DEFAULT '',
+                review_rounds INTEGER NOT NULL DEFAULT 0,
+                provider_hint TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                needs TEXT NOT NULL DEFAULT '',
+                workspace_kind TEXT NOT NULL DEFAULT '',
+                output_kind TEXT NOT NULL DEFAULT '',
+                output_spec TEXT NOT NULL DEFAULT '',
+                source_kind TEXT NOT NULL DEFAULT '',
+                result_text TEXT NOT NULL DEFAULT '',
+                result_diff TEXT NOT NULL DEFAULT '',
+                result_pr_url TEXT NOT NULL DEFAULT '',
+                pin_strict INTEGER NOT NULL DEFAULT 0,
+                compare_decision TEXT NOT NULL DEFAULT '',
+                clock_started TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_key TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT,
+                pid INTEGER,
+                started TEXT NOT NULL,
+                ended TEXT,
+                outcome TEXT,
+                last_event_at TEXT,
+                exit_code INTEGER,
+                session_id TEXT,
+                handoff TEXT,
+                prefix_hash TEXT,
+                checklist TEXT,
+                lessons TEXT,
+                FOREIGN KEY(task_key) REFERENCES tasks(key)
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_key TEXT NOT NULL,
+                body TEXT NOT NULL,
+                source TEXT NOT NULL,
+                received TEXT NOT NULL,
+                consumed_by_run INTEGER,
+                FOREIGN KEY(task_key) REFERENCES tasks(key)
+            );
+            CREATE TABLE idempotency (
+                id_key TEXT PRIMARY KEY,
+                request_hash TEXT NOT NULL,
+                task_key TEXT NOT NULL,
+                outcome TEXT NOT NULL DEFAULT '',
+                created TEXT NOT NULL
+            );
+            INSERT INTO tasks (key, repo, issue, status, created, updated, workspace_kind, output_kind, source_kind, clock_started)
+            VALUES ('acme-12', '/src/acme', 12, 'waiting', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'git', 'reply', 'github', '2026-01-01T00:00:00Z');
+            INSERT INTO runs (task_key, provider, model, started, ended, outcome)
+            VALUES ('acme-12', 'claude', 'm', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success');
+            INSERT INTO messages (task_key, body, source, received)
+            VALUES ('acme-12', 'fix it', 'cli', '2026-01-01T00:00:00Z');
+            INSERT INTO idempotency (id_key, request_hash, task_key, outcome, created)
+            VALUES ('ik-1', 'hash-1', 'acme-12', 'ok', '2026-01-01T00:00:00Z');
+            "#,
+        )
+        .unwrap();
+    }
+
+    fn sqlite_columns(path: &std::path::Path, table: &str) -> Vec<String> {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    fn sqlite_has_table(path: &std::path::Path, name: &str) -> bool {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        n == 1
+    }
+
+    fn assert_v0_1_31_upgraded(path: &std::path::Path) {
+        let db = Db::open(path).unwrap();
+        let t = db.get_task("acme-12").unwrap().unwrap();
+        assert_eq!(t.status, "waiting");
+        assert_eq!(t.repo.as_deref(), Some("/src/acme"));
+        assert_eq!(t.issue, Some(12));
+        assert_eq!(t.clock_started, "2026-01-01T00:00:00Z");
+        assert_eq!(t.retry_attempt, 0);
+        assert!(t.retry_next_at.is_empty());
+        assert!(t.retry_reason.is_empty());
+        assert!(t.hold_reason.is_empty());
+        assert!(!t.hold_notified);
+        assert!(db.get_idempotency("ik-1").unwrap().is_some());
+        assert_eq!(db.list_runs(Some("acme-12")).unwrap().len(), 1);
+        assert_eq!(db.all_messages("acme-12").unwrap().len(), 1);
+
+        let task_cols = sqlite_columns(path, "tasks");
+        for col in [
+            "retry_attempt",
+            "retry_next_at",
+            "retry_reason",
+            "hold_reason",
+            "hold_notified",
+            "owner_pid",
+            "owner_started",
+            "clock_started",
+        ] {
+            assert!(task_cols.iter().any(|c| c == col), "missing tasks.{col}");
+        }
+        let run_cols = sqlite_columns(path, "runs");
+        assert!(run_cols.iter().any(|c| c == "owner_pid"));
+        assert!(run_cols.iter().any(|c| c == "owner_started"));
+        assert!(sqlite_has_table(path, "owners"));
+
+        db.register_owner(crate::owner::KIND_SERVE).unwrap();
+        assert!(db.live_owner_kind(crate::owner::KIND_SERVE).unwrap());
+        db.upsert_task("next", "/r", None).unwrap();
+        assert!(db
+            .try_start_run("next", "claude", "m", 1)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn migrate_from_v0_1_31_main_db_is_additive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        write_v0_1_31_main_schema(&path);
+        assert!(!sqlite_has_table(&path, "owners"));
+        let before = sqlite_columns(&path, "tasks");
+        assert!(!before.iter().any(|c| c == "retry_attempt"));
+        assert!(!before.iter().any(|c| c == "owner_pid"));
+        assert_v0_1_31_upgraded(&path);
+    }
+
+    #[test]
+    fn migrate_from_v0_1_31_applies_in_either_feature_order() {
+        // Retry/hold columns first (as if that branch migrated), then coexist.
+        let dir = tempfile::tempdir().unwrap();
+        let retry_first = dir.path().join("retry-first.db");
+        write_v0_1_31_main_schema(&retry_first);
+        {
+            let conn = rusqlite::Connection::open(&retry_first).unwrap();
+            conn.execute_batch(
+                r#"
+                ALTER TABLE tasks ADD COLUMN retry_attempt INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE tasks ADD COLUMN retry_next_at TEXT NOT NULL DEFAULT '';
+                ALTER TABLE tasks ADD COLUMN retry_reason TEXT NOT NULL DEFAULT '';
+                ALTER TABLE tasks ADD COLUMN hold_reason TEXT NOT NULL DEFAULT '';
+                ALTER TABLE tasks ADD COLUMN hold_notified INTEGER NOT NULL DEFAULT 0;
+                "#,
+            )
+            .unwrap();
+        }
+        assert_v0_1_31_upgraded(&retry_first);
+
+        // Owner stamps first, then retry/hold.
+        let owner_first = dir.path().join("owner-first.db");
+        write_v0_1_31_main_schema(&owner_first);
+        {
+            let conn = rusqlite::Connection::open(&owner_first).unwrap();
+            conn.execute_batch(
+                r#"
+                ALTER TABLE runs ADD COLUMN owner_pid INTEGER;
+                ALTER TABLE runs ADD COLUMN owner_started TEXT;
+                ALTER TABLE tasks ADD COLUMN owner_pid INTEGER;
+                ALTER TABLE tasks ADD COLUMN owner_started TEXT;
+                CREATE TABLE IF NOT EXISTS owners (
+                    pid INTEGER NOT NULL,
+                    started TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    heartbeat TEXT NOT NULL,
+                    PRIMARY KEY (pid, started)
+                );
+                "#,
+            )
+            .unwrap();
+        }
+        assert_v0_1_31_upgraded(&owner_first);
     }
 }

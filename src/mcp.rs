@@ -16,7 +16,7 @@ pub const PROTOCOL_VERSION: &str = "2025-03-26";
 const TOOLS: &[(&str, &str)] = &[
     (
         "add_task",
-        "Enqueue a new atr task. Optional workspace (git repo, local dir, or none), output, key, provider/driver hint, idempotency_key (replay the same create), and files (name + content_base64 or text; land in the worktree by filename).",
+        "Enqueue a new atr task. Optional workspace (git repo, local dir, or none), output, key, provider/driver hint, after (task keys that must succeed first), idempotency_key (replay the same create), and files (name + content_base64 or text; land in the worktree by filename).",
     ),
     (
         "list_tasks",
@@ -368,6 +368,7 @@ fn tool_schema(name: &str) -> Value {
                 "key": {"type": "string"},
                 "provider": {"type": "string", "description": "Provider or driver hint"},
                 "needs": {"type": "array", "items": {"type": "string", "enum": ["browser", "desktop"]}, "description": "Required provider capabilities; desktop tasks wait for a logged-in, unlocked graphical session"},
+                "after": {"type": "array", "items": {"type": "string"}, "description": "Task keys that must succeed before this one starts"},
                 "hint": {"type": "string"},
                 "idempotency_key": {"type": "string", "description": "Optional. Same key + same request returns the existing task; same key + different body/files is a conflict."},
                 "files": {
@@ -551,6 +552,23 @@ fn arg_needs(args: &Value) -> Result<Vec<String>, String> {
     crate::task::parse_needs(&items).map_err(|e| e.to_string())
 }
 
+fn arg_after(args: &Value) -> Result<Vec<String>, String> {
+    let items: Vec<String> = match args.get("after") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or("after must be strings")
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err("after must be a string or array".into()),
+    };
+    Ok(items)
+}
+
 fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
     let body = arg_str(args, &["body", "prompt", "text", "message"]).ok_or("missing body")?;
     let cfg = shared.config.read().unwrap().clone();
@@ -569,6 +587,7 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
             patch: arg_str(args, &["patch"]),
             provider: arg_str(args, &["provider", "hint", "driver"]),
             needs: arg_needs(args)?,
+            after: crate::deps::parse_after(&arg_after(args)?),
             source: "mcp".into(),
             source_kind: "mcp".into(),
             issue: None,
@@ -590,7 +609,7 @@ pub fn slugify(title: &str) -> String {
 fn terminal_status(status: &str) -> bool {
     matches!(
         status,
-        "waiting" | "done" | "failed" | "needs_attention" | "cancelled"
+        "waiting" | "done" | "failed" | "needs_attention" | "cancelled" | "held"
     )
 }
 
@@ -674,6 +693,9 @@ fn list_tasks(shared: &Shared, args: &Value) -> Result<Value, String> {
                 "output": t.output_kind,
                 "source": t.source_kind,
                 "updated": t.updated,
+                "after": t.deps,
+                "hold_reason": t.hold_reason,
+                "retry_reason": t.retry_reason,
             })
         })
         .collect();
@@ -724,6 +746,11 @@ fn task_status(shared: &Shared, args: &Value) -> Result<Value, String> {
         "workspace": t.workspace_kind,
         "output": t.output_kind,
         "source": t.source_kind,
+        "after": t.deps,
+        "hold_reason": t.hold_reason,
+        "retry_attempt": t.retry_attempt,
+        "retry_next_at": t.retry_next_at,
+        "retry_reason": t.retry_reason,
         "session_id": t.session_id,
         "updated": t.updated,
         "children": kids.iter().map(|c| json!({"key": c.key, "status": c.status, "title": c.title})).collect::<Vec<_>>(),

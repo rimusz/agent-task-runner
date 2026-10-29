@@ -1399,6 +1399,7 @@ pub(crate) fn enqueue_turn(
             allow_empty_repo: none,
             provider_hint: launch_pin.map(|s| s.to_string()),
             needs: Vec::new(),
+            after: Vec::new(),
         },
     )?;
     if shared.db.get_task(key)?.is_some_and(|t| t.role == "plan") {
@@ -1447,7 +1448,7 @@ pub(crate) fn turn_is_idle(shared: &Shared, key: &str) -> Result<bool> {
         && pending.is_empty()
         && matches!(
             status,
-            "waiting" | "done" | "failed" | "needs_attention" | "cancelled"
+            "waiting" | "done" | "failed" | "needs_attention" | "cancelled" | "held"
         ))
 }
 
