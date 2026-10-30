@@ -157,6 +157,8 @@ struct TaskIn {
     webhook: Option<String>,
     #[serde(default)]
     patch: Option<String>,
+    #[serde(default, alias = "triage_spec")]
+    triage: Option<String>,
     #[serde(default)]
     issue: Option<i64>,
     #[serde(default)]
@@ -234,6 +236,7 @@ async fn create_task(
             output: payload.output,
             webhook: payload.webhook,
             patch: payload.patch,
+            triage: payload.triage,
             provider: payload.provider,
             needs: payload.needs,
             after: payload.after,

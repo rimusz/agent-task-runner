@@ -1467,6 +1467,8 @@ fn http_create(
             payload["webhook"] = serde_json::Value::String(spec.into());
         } else if output == "patch" {
             payload["patch"] = serde_json::Value::String(spec.into());
+        } else if output == "triage" {
+            payload["triage"] = serde_json::Value::String(spec.into());
         }
     }
     let mut req = ureq::post(&url).set("User-Agent", "atr");

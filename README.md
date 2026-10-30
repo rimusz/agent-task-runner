@@ -194,3 +194,7 @@ main-edit
 worktree-edit
 
 main-edit
+
+worktree-edit
+
+main-edit

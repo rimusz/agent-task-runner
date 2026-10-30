@@ -586,6 +586,7 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
             output: arg_str(args, &["output"]),
             webhook: arg_str(args, &["webhook"]),
             patch: arg_str(args, &["patch"]),
+            triage: arg_str(args, &["triage", "triage_spec"]),
             provider: arg_str(args, &["provider", "hint", "driver"]),
             needs: arg_needs(args)?,
             after: crate::deps::parse_after(&arg_after(args)?),

@@ -45,6 +45,8 @@ pub struct CreateIn {
     pub output: Option<String>,
     pub webhook: Option<String>,
     pub patch: Option<String>,
+    /// `triage:<owner/name>#<issue>:<labels>` for `output = "triage"`.
+    pub triage: Option<String>,
     pub provider: Option<String>,
     pub needs: Vec<String>,
     pub after: Vec<String>,
@@ -375,7 +377,11 @@ pub fn create(shared: &Shared, spec: CreateIn) -> Result<CreateOut, CreateError>
     }
 
     let text = format!("# {title}\n\n{body}");
-    let output_spec = spec.webhook.clone().or(spec.patch.clone());
+    let output_spec = spec
+        .webhook
+        .clone()
+        .or(spec.patch.clone())
+        .or(spec.triage.clone());
     let outcome = match shared.submit_with(
         &key,
         &text,
@@ -536,6 +542,11 @@ fn request_hash(spec: &CreateIn, title: &str) -> String {
         &mut h,
         b"patch",
         spec.patch.as_deref().unwrap_or("").trim().as_bytes(),
+    );
+    put(
+        &mut h,
+        b"triage",
+        spec.triage.as_deref().unwrap_or("").trim().as_bytes(),
     );
     put(
         &mut h,
@@ -792,6 +803,19 @@ cli = "/bin/true"
             other => panic!("{other:?}"),
         }
         assert_eq!(s.db.list_tasks().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn create_keeps_the_triage_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path());
+        let mut t = spec("triage issue 3");
+        t.output = Some("triage".into());
+        t.triage = Some("triage:o/r#3:bug,duplicate".into());
+        let out = create(&s, t).unwrap();
+        let task = s.db.get_task(&out.key).unwrap().unwrap();
+        assert_eq!(task.output_kind, "triage");
+        assert_eq!(task.output_spec, "triage:o/r#3:bug,duplicate");
     }
 
     #[test]
