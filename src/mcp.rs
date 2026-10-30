@@ -28,7 +28,7 @@ const TOOLS: &[(&str, &str)] = &[
     ),
     (
         "steer_task",
-        "Send a follow-up message to a running or waiting task.",
+        "Send a follow-up message to a running or waiting task. interrupt=true stops the live turn and resumes the same session with the message (then the unfinished task).",
     ),
     ("cancel_task", "Cancel a task. force=true kills a live run."),
     (
@@ -421,7 +421,8 @@ fn tool_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "key": {"type": "string"},
-                "message": {"type": "string"}
+                "message": {"type": "string"},
+                "interrupt": {"type": "boolean"}
             },
             "required": ["key", "message"]
         }),
@@ -785,17 +786,31 @@ fn steer_task(shared: &Shared, args: &Value) -> Result<Value, String> {
     {
         return Err(format!("unknown task {key}"));
     }
+    let interrupt = args
+        .get("interrupt")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let outcome = shared
         .submit(&key, &message, "mcp", None, None, false, false)
         .map_err(|e| e.to_string())?;
-    Ok(json!({
+    let mut out = json!({
         "ok": true,
         "key": key,
         "status": match outcome {
             crate::SubmitOutcome::Accepted => "accepted",
             crate::SubmitOutcome::Queued => "queued",
         },
-    }))
+    });
+    if interrupt && outcome == crate::SubmitOutcome::Queued {
+        let i = shared.interrupt_live(&key).map_err(|e| e.to_string())?;
+        out["interrupt"] = json!(i.as_str());
+        if i == crate::InterruptOutcome::NotResumable {
+            out["note"] = json!(
+                "provider cannot resume a session; the message waits for the live turn to finish"
+            );
+        }
+    }
+    Ok(out)
 }
 
 fn cancel_task(shared: &Shared, args: &Value) -> Result<Value, String> {

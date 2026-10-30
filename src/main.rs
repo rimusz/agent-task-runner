@@ -65,6 +65,11 @@ enum Cmd {
         /// Allow verify to use the agent's test-file edits (`[verify] protect_tests`).
         #[arg(long)]
         tests_ok: bool,
+        /// If the task is mid-turn, stop that turn and resume the same session
+        /// with this message, then the unfinished task (no-op for providers
+        /// that cannot resume: the message just waits).
+        #[arg(long)]
+        interrupt: bool,
     },
     /// Enqueue a generic task (prompt + optional workspace). No issue number.
     Add {
@@ -641,6 +646,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             issue,
             shadow,
             tests_ok,
+            interrupt,
         } => {
             let text = read_body(body, body_file)?;
             let cfg = load_config(&path)?;
@@ -655,6 +661,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 issue,
                 shadow,
                 tests_ok,
+                interrupt,
             ) {
                 return Ok(match status {
                     200 => ExitCode::SUCCESS,
@@ -673,7 +680,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 tests_ok,
             )? {
                 SubmitOutcome::Accepted => Ok(ExitCode::SUCCESS),
-                SubmitOutcome::Queued => Ok(ExitCode::from(EX_TEMPFAIL as u8)),
+                SubmitOutcome::Queued => {
+                    if interrupt {
+                        let i = shared.interrupt_live(&key)?;
+                        eprintln!("interrupt: {}", i.as_str());
+                    }
+                    Ok(ExitCode::from(EX_TEMPFAIL as u8))
+                }
             }
         }
         Cmd::Add {
@@ -1339,6 +1352,7 @@ fn http_submit(
     issue: Option<i64>,
     shadow: bool,
     tests_ok: bool,
+    interrupt: bool,
 ) -> Result<u16> {
     let url = format!("http://{listen}/tasks/{key}/messages");
     let mut req = ureq::post(&url).set("User-Agent", "atr");
@@ -1352,6 +1366,7 @@ fn http_submit(
         "issue": issue,
         "shadow": shadow,
         "tests_ok": tests_ok,
+        "interrupt": interrupt,
     }))?;
     Ok(resp.status())
 }

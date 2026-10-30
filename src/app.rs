@@ -34,6 +34,29 @@ pub struct Shared {
     pub last_host_start: Mutex<Option<std::time::Instant>>,
 }
 
+/// Result of [`Shared::interrupt_live`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptOutcome {
+    /// The live run was stopped; the scheduler resumes the stored session
+    /// with any pending messages (or leaves the task waiting if none).
+    Interrupted,
+    /// Nothing was running; pending messages start a normal turn.
+    NotRunning,
+    /// The provider cannot resume a session, so killing the turn would lose
+    /// its work. Left running; pending messages wait for it to finish.
+    NotResumable,
+}
+
+impl InterruptOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interrupted => "interrupted",
+            Self::NotRunning => "not_running",
+            Self::NotResumable => "not_resumable",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmitOutcome {
     Accepted,
@@ -316,6 +339,70 @@ impl Shared {
         } else {
             format!("cancelled {key}")
         }
+    }
+
+    /// Stop a task's live turn without cancelling the task. Enqueue the new
+    /// message first (`submit`); the scheduler then sees outcome
+    /// `interrupted`, keeps the provider session (no cooldown, no failover),
+    /// and resumes it with the pending messages plus a "continue your
+    /// unfinished task" preamble. If the run never reported a resumable
+    /// session, its messages are unconsumed so a fresh run sees them again.
+    pub fn interrupt_live(&self, key: &str) -> Result<InterruptOutcome> {
+        let Some((run_id, provider, pid)) = self.live_run(key)? else {
+            return Ok(InterruptOutcome::NotRunning);
+        };
+        let resumable = {
+            let cfg = self.config.read().unwrap();
+            cfg.providers
+                .iter()
+                .find(|p| p.name == provider)
+                .map(crate::providers::supports_resume)
+                .unwrap_or(false)
+        };
+        if !resumable {
+            tracing::info!(task = %key, %provider, "interrupt skipped; provider cannot resume");
+            return Ok(InterruptOutcome::NotResumable);
+        }
+        tracing::info!(task = %key, run = run_id, "interrupt live run");
+        // Mark first so the scheduler reads `interrupted`, not a failure.
+        self.db.finish_run(run_id, "interrupted", Some(-2))?;
+        if pid > 0 {
+            terminate_tree_now(pid);
+        }
+        self.kick.notify_waiters();
+        Ok(InterruptOutcome::Interrupted)
+    }
+
+    /// (run id, provider, pid) of the task's live run: this process's
+    /// in-flight slot, else an open run with a live pid in the DB (the run
+    /// belongs to `atr serve` while the caller is e.g. stdio `atr mcp`).
+    fn live_run(&self, key: &str) -> Result<Option<(i64, String, u32)>> {
+        if let Some(info) = self.inflight.lock().unwrap().get(key).cloned() {
+            if info.run_id <= 0 {
+                return Ok(None);
+            }
+            let pid = info
+                .kill
+                .lock()
+                .ok()
+                .and_then(|g| *g)
+                .filter(|p| *p > 0)
+                .unwrap_or(info.pid);
+            return Ok(Some((info.run_id, info.provider, pid)));
+        }
+        let Some(run_id) = self.db.open_run_for_task(key)? else {
+            return Ok(None);
+        };
+        let row = self
+            .db
+            .list_runs(Some(key))?
+            .into_iter()
+            .rev()
+            .find(|r| r.id == run_id);
+        Ok(row.and_then(|r| {
+            let pid = r.pid.filter(|p| *p > 0 && crate::db::pid_alive(*p))?;
+            Some((r.id, r.provider, pid as u32))
+        }))
     }
 
     pub fn cancel(&self, key: &str, force: bool) -> Result<()> {

@@ -667,9 +667,35 @@ fn knob_picker_text(shared: &Shared, key: &str, knob: knobs::Knob) -> String {
 }
 
 /// Raw-mode Ctrl+C: always exit atr (same as `/quit`). Never "cancel the
-/// turn and stay in the TUI". Esc still dismisses overlays only.
+/// turn and stay in the TUI". Esc interrupts a busy turn (see [`esc_action`]).
 pub fn classify_interrupt() -> &'static str {
     "quit"
+}
+
+/// What Esc does in the composer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscAction {
+    /// Close the picker / slash menu.
+    Dismiss,
+    /// Busy, nothing parked: stop the live turn; the task goes idle.
+    Interrupt,
+    /// Busy with parked lines: stop the live turn and resume the same
+    /// session with the parked lines (then the unfinished task).
+    InterruptWithParked,
+    /// Idle: nothing to do.
+    Ignore,
+}
+
+pub fn esc_action(overlay_open: bool, busy: bool, parked: usize) -> EscAction {
+    if overlay_open {
+        EscAction::Dismiss
+    } else if !busy {
+        EscAction::Ignore
+    } else if parked > 0 {
+        EscAction::InterruptWithParked
+    } else {
+        EscAction::Interrupt
+    }
 }
 
 /// Local FIFO for composer lines parked while a turn is busy.
@@ -692,6 +718,15 @@ impl PendingTurns {
 
     pub fn pop(&mut self) -> Option<String> {
         self.lines.pop_front()
+    }
+
+    /// Take every parked line as one message (blank-line separated).
+    pub fn drain_joined(&mut self) -> Option<String> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        let v: Vec<String> = self.lines.drain(..).collect();
+        Some(v.join("\n\n"))
     }
 
     pub fn len(&self) -> usize {
@@ -1703,6 +1738,16 @@ mod tests {
         assert_eq!(classify_line("   \t"), "ignore");
         assert_eq!(classify_line("\u{0001}\u{0007}"), "ignore");
         assert_eq!(classify_interrupt(), "quit");
+        assert_eq!(esc_action(true, true, 2), EscAction::Dismiss);
+        assert_eq!(esc_action(false, false, 0), EscAction::Ignore);
+        assert_eq!(esc_action(false, true, 0), EscAction::Interrupt);
+        assert_eq!(esc_action(false, true, 1), EscAction::InterruptWithParked);
+        let mut q = PendingTurns::default();
+        assert_eq!(q.drain_joined(), None);
+        q.park("one");
+        q.park("two");
+        assert_eq!(q.drain_joined().as_deref(), Some("one\n\ntwo"));
+        assert!(q.is_empty());
     }
 
     #[test]

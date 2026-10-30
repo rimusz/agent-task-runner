@@ -192,6 +192,9 @@ struct MessageIn {
     shadow: bool,
     #[serde(default)]
     tests_ok: bool,
+    /// Stop the live turn and resume its session with this message.
+    #[serde(default)]
+    interrupt: bool,
 }
 
 async fn create_task(
@@ -348,10 +351,16 @@ async fn post_message(
             StatusCode::OK,
             Json(json!({"ok": true, "status": "accepted", "key": key})),
         ),
-        Ok(SubmitOutcome::Queued) => (
-            StatusCode::ACCEPTED,
-            Json(json!({"ok": true, "status": "queued", "key": key})),
-        ),
+        Ok(SubmitOutcome::Queued) => {
+            let mut out = json!({"ok": true, "status": "queued", "key": key});
+            if payload.interrupt {
+                match shared.interrupt_live(&key) {
+                    Ok(i) => out["interrupt"] = json!(i.as_str()),
+                    Err(e) => out["interrupt_error"] = json!(e.to_string()),
+                }
+            }
+            (StatusCode::ACCEPTED, Json(out))
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"ok": false, "error": e.to_string()})),

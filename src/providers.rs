@@ -494,6 +494,12 @@ pub fn parse_grok_usage_cli(value: &Value) -> Option<UsageNumbers> {
     })
 }
 
+/// Whether atr can resume a stored session for this provider (resume flag,
+/// or a CLI with a built-in resume subcommand).
+pub fn supports_resume(p: &Provider) -> bool {
+    matches!(p.kind.as_str(), "codex" | "opencode") || !p.resume_flag.is_empty()
+}
+
 pub fn session_id(value: &Value) -> Option<String> {
     for key in [
         "session_id",

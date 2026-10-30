@@ -14,8 +14,8 @@
 use crate::config::{Config, Provider};
 use crate::doctor::{Check, Status};
 use crate::providers::{
-    build_command_opts, classify_error_value, new_session_uuid, parse_line, session_id, ErrorClass,
-    ParsedEvent,
+    build_command_opts, classify_error_value, new_session_uuid, parse_line, session_id,
+    supports_resume, ErrorClass, ParsedEvent,
 };
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -152,11 +152,6 @@ pub fn first_prompt(word: &str) -> String {
 
 pub const SECOND_PROMPT: &str = "What was the code word I asked you to remember in the \
 previous turn? Do not call any tools. Reply with only the code word.";
-
-/// Whether this provider can resume a stored session at all.
-pub fn can_resume(p: &Provider) -> bool {
-    matches!(p.kind.as_str(), "codex" | "opencode") || !p.resume_flag.is_empty()
-}
 
 /// Run one CLI turn in `dir` with a hard timeout. No DB, no events.
 pub async fn run_turn(
@@ -327,7 +322,7 @@ pub async fn probe_provider(p: &Provider, timeout: Duration) -> Check {
             ),
         );
     }
-    if !can_resume(p) {
+    if !supports_resume(p) {
         return Check {
             name,
             status: Status::Warn,

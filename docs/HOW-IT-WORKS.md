@@ -62,7 +62,9 @@ on the TUI composer — it goes to `[log] path` (or
 `~/Library/Logs/atr/atr.log` / `~/.local/share/atr/atr.log`).
 Enter while a turn is busy parks composer lines locally (FIFO); host
 slashes still run. After the turn finishes, the oldest parked line
-sends like idle Enter (not a second spawn mid-turn). Ctrl+C quits atr; Esc dismisses menus only.
+sends like idle Enter (not a second spawn mid-turn). Ctrl+C quits atr. Esc dismisses menus; with
+none open during a busy turn, Esc interrupts it: parked lines (if any) go as the next message and
+the same session resumes with a "continue your unfinished task" preamble.
 `/new` `/quit` `/status` `/help`
 `/cli` `/repo` stay in atr; other `/…` lines may be proxied. `/cli` opens the
 vendor TUI.
@@ -389,7 +391,8 @@ workspace defaults to `none` when neither `dir` nor `repo` is set; optional
 `workspace` git/dir/none, `dir`, `repo`, `output`,
 `webhook`, `patch`, `idempotency_key`, `files`), `wait_task` (block until waiting/done/failed or
 `timeout_seconds`), `get_result` (text, diff, PR URL), `list_tasks`,
-`task_status` (timeline + last output), `steer_task`, `cancel_task`,
+`task_status` (timeline + last output), `steer_task` (`interrupt: true` stops the
+live turn and resumes its session with the message), `cancel_task`,
 `list_repos`, `list_providers` (with usage), `usage_summary`, `doctor`, and
 read-only `config_get` (secrets redacted).
 `idempotency_key` on `add_task` (HTTP: header `Idempotency-Key` on `POST /tasks`)
