@@ -354,7 +354,7 @@ pub fn workspace_note(kind: WorkspaceKind, path: &str, output: OutputKind) -> Op
 Stay inside {path}. Do not read or write files outside that directory. Do not `cd` elsewhere. \
 Do not create a `.atr/` folder here.\n\
 atr asks the CLI to confine you where it can (Claude `--add-dir`, Codex `-s workspace-write`, \
-Grok `--cwd`, OpenCode `--dir`). That is best-effort: some CLIs can still write outside, \
+Grok `--cwd`, OpenCode runs in the folder). That is best-effort: some CLIs can still write outside, \
 and atr does not snapshot-detect outside writes.\n"
             ));
         }

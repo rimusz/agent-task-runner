@@ -174,8 +174,8 @@ pub fn build_command_opts(
 
 /// Best-effort confinement for `--dir` workspaces. Codex already sandboxes
 /// with `-s`; Claude gets `--add-dir` so the folder is an explicit allowlist
-/// even if the CLI would otherwise walk up to a git root. Grok/OpenCode
-/// already pass `--cwd` / `--dir`. This is not a hard jail.
+/// even if the CLI would otherwise walk up to a git root. Grok passes
+/// `--cwd`; OpenCode runs with the folder as its cwd. This is not a hard jail.
 pub fn apply_dir_confinement(p: &Provider, spec: &mut CommandSpec, dir: &Path) {
     match p.kind.as_str() {
         "claude" if !spec.args.iter().any(|a| a == "--add-dir") => {
@@ -262,13 +262,14 @@ fn build_opencode(
     new_session: bool,
     system_prompt: Option<&Path>,
 ) -> CommandSpec {
+    // No `--dir`: OpenCode 2.x rejects it ("Unrecognized flag: --dir") and
+    // exits 1 after printing help. The worktree is already the spawn cwd
+    // (`CommandSpec.cwd`), which every OpenCode release uses as the project.
     let mut args = vec![
         "run".into(),
         "--format".into(),
         "json".into(),
         "--auto".into(),
-        "--dir".into(),
-        worktree.display().to_string(),
     ];
     if !p.model.is_empty() {
         let flag = if p.model_flag.is_empty() {
@@ -292,11 +293,18 @@ fn build_opencode(
     }
     args.extend(p.args.iter().cloned());
     args.extend(p.extra_args.iter().cloned());
+    // The stable prefix is attached first (default flag `--file`; OpenCode
+    // 2.x has no `--system`), so its bytes lead the request and stay cacheable.
+    let has_system = system_prompt.is_some() && !p.system_prompt_flag.trim().is_empty();
     attach_system_prompt(p, &mut args, system_prompt);
     // Prompt is a file attach, never argv/`ps`.
     args.push("--file".into());
     args.push(prompt_path.display().to_string());
-    args.push("Follow the attached prompt.".into());
+    args.push(if has_system {
+        "Follow the attached files: the first is your standing instructions, the second is the task.".into()
+    } else {
+        "Follow the attached prompt.".into()
+    });
     CommandSpec {
         program: p.cli.clone(),
         args,
@@ -1258,6 +1266,10 @@ pub(crate) mod tests {
             .args
             .windows(2)
             .any(|w| w == ["--file", "/wt/.atr/prompt.md"]));
+        // OpenCode 2.x rejects both flags ("Unrecognized flag") and exits 1.
+        assert!(!spec.args.iter().any(|a| a == "--dir"), "{:?}", spec.args);
+        assert!(!spec.args.iter().any(|a| a == "--system"), "{:?}", spec.args);
+        assert_eq!(spec.cwd, PathBuf::from("/wt"));
         assert!(!spec.args.iter().any(|a| a.contains("SECRET-PROMPT")));
         assert!(spec.stdin_text.is_none());
     }
@@ -1681,10 +1693,13 @@ pub(crate) mod tests {
         assert!(
             o.args
                 .windows(2)
-                .any(|w| w == ["--system", "/wt/.atr/system.md"]),
+                .any(|w| w == ["--file", "/wt/.atr/system.md"]),
             "{:?}",
             o.args
         );
+        let sys_at = o.args.iter().position(|a| a == "/wt/.atr/system.md").unwrap();
+        let prompt_at = o.args.iter().position(|a| a == "/wt/.atr/prompt.md").unwrap();
+        assert!(sys_at < prompt_at, "stable prefix must be attached first: {:?}", o.args);
 
         let mut cx = stub("codex");
         cx.kind = "codex".into();

@@ -1253,7 +1253,9 @@ pub fn default_system_prompt_flag(kind: &str) -> &'static str {
     match kind {
         "claude" => "--append-system-prompt-file",
         "grok" => "--rules",
-        "opencode" => "--system",
+        // OpenCode 2.x has no `--system` flag; attach the prefix as the
+        // first `--file` (before the task prompt) instead.
+        "opencode" => "--file",
         _ => "",
     }
 }

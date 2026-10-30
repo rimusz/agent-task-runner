@@ -230,7 +230,7 @@ Grok/Cursor cache server-side; OpenCode/Ollama via a stable prefix +
    - Claude: `--append-system-prompt-file`
    - Grok: `--rules` (override with `system_prompt_flag`)
    - Codex: `-c instructions_file="…"`
-   - OpenCode: `--system`
+   - OpenCode: first `--file` (OpenCode 2.x has no `--system`)
    - Cursor: no slot; prefix stays in the prompt file
    - **Stable, hashed, must be byte-identical for every task on a provider:**
      system/append-prompt file + repo `AGENTS.md` + the provider contract

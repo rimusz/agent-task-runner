@@ -22,7 +22,7 @@ atr submit my-task --body "also fix the footer"
 atr ask "what is 2+2?"
 ```
 
-`--dir` edits in place. atr asks the CLI to stay inside that folder where the CLI supports it (Claude `--add-dir`, Codex sandbox `workspace-write`, Grok `--cwd`, OpenCode `--dir`). That is best-effort: some CLIs can still write outside, and atr does not snapshot-detect outside writes. Prompt files for dir tasks live in the state directory, not a `.atr/` folder in your notes. `--repo` uses a git worktree. Neither flag means answer-only. `--output` is `reply` (default: answer the source), `pr`, `issue-comment`, `branch`, `patch`, `text`, or `webhook`. Prompts (and inbox files) are capped at 256 KiB by default (`max_prompt_bytes`).
+`--dir` edits in place. atr asks the CLI to stay inside that folder where the CLI supports it (Claude `--add-dir`, Codex sandbox `workspace-write`, Grok `--cwd`, OpenCode runs in the folder). That is best-effort: some CLIs can still write outside, and atr does not snapshot-detect outside writes. Prompt files for dir tasks live in the state directory, not a `.atr/` folder in your notes. `--repo` uses a git worktree. Neither flag means answer-only. `--output` is `reply` (default: answer the source), `pr`, `issue-comment`, `branch`, `patch`, `text`, or `webhook`. Prompts (and inbox files) are capped at 256 KiB by default (`max_prompt_bytes`).
 
 Other agents and scripts can also hand it work through MCP, the HTTP API, Telegram, or an inbox folder. See [Hand work to atr](#hand-work-to-atr).
 
