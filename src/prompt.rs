@@ -54,7 +54,9 @@ You have no shell tool. Do not try to run commands, scripts, tests, `git`, or `g
 and do not write tool calls as plain text. Use only your file tools (read, glob, grep, \
 edit, write) inside the Worktree. atr itself commits, pushes, opens the pull request, \
 and posts any GitHub comment after you finish, so ignore any instruction above to do \
-those yourself. End with a short plain-text summary of what you changed and why.
+those yourself. atr runs the repo's checks after you finish, so do not create scratch \
+scripts or test-runner files; change only what the task needs. End with a short \
+plain-text summary of what you changed and why.
 ";
 
 /// The `Repo:` header value. A git task edits only its worktree, so the main
