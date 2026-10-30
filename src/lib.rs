@@ -35,6 +35,7 @@ pub mod owner;
 pub mod plan;
 pub mod plugin;
 pub mod presets;
+pub mod probe;
 pub mod prompt;
 pub mod providers;
 pub mod providers_edit;

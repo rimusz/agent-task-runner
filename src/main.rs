@@ -192,6 +192,17 @@ enum Cmd {
         /// Print the report as JSON.
         #[arg(long)]
         json: bool,
+        /// Live round trip per provider: reply with a code word, then resume
+        /// the same session and recall it. Spends two model turns each; no
+        /// tasks or state are touched.
+        #[arg(long)]
+        probe: bool,
+        /// Only probe this provider (repeatable). Default: every enabled one.
+        #[arg(long = "provider", value_name = "NAME", requires = "probe")]
+        probe_providers: Vec<String>,
+        /// Per-turn timeout for --probe (e.g. 90s, 3m).
+        #[arg(long, default_value = "120s", requires = "probe")]
+        probe_timeout: String,
     },
     /// Prune old worktrees, events, runs, and (opt-in) task rows or CLI session files.
     Gc {
@@ -973,7 +984,21 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             app::print_usage(&shared, &period, by, repo.as_deref())?;
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Doctor { cache, json } => {
+        Cmd::Doctor {
+            cache,
+            json,
+            probe,
+            probe_providers,
+            probe_timeout,
+        } => {
+            let probe_opts = if probe {
+                Some(atr::probe::ProbeOpts {
+                    providers: probe_providers,
+                    timeout: atr::duration::parse_duration(&probe_timeout)?,
+                })
+            } else {
+                None
+            };
             let outcome = atr::init::ensure_config(&path).await?;
             if outcome.ran_init {
                 if let Some(c) = &outcome.doctor_callout {
@@ -982,7 +1007,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 eprintln!("Starting atr doctor…");
             }
             let cfg = load_config(&path)?;
-            let report = atr::doctor::run(&cfg, &path, cache).await;
+            let report = atr::doctor::run_with_probe(&cfg, &path, cache, probe_opts.as_ref()).await;
             if json {
                 println!("{}", report.to_json());
             } else {

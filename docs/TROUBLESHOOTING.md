@@ -8,7 +8,16 @@ tokens; don't paste them into a terminal or chat to "check" them.
 ```bash
 atr doctor            # one ok / warn / FAIL line per check, then "N problems"
 atr doctor --json     # same, machine-readable
+atr doctor --probe    # plus a live round trip through every enabled provider
+atr doctor --probe --provider claude --probe-timeout 90s
 ```
+
+`--probe` is opt-in because it spends two real model turns per provider. Turn 1
+asks the CLI to remember a random code word; turn 2 resumes the same session and
+asks for it back (the second prompt never contains the word). It runs in a
+throwaway temp dir with the same argv atr uses for tasks, and never touches the
+state DB (no tasks, runs, sessions, or usage rows). A turn that runs past
+`--probe-timeout` (default 120s) is killed with its whole process group.
 
 `ok` is fine. `warn` works but needs attention. `FAIL` means a feature is
 broken. Each non-ok line prints a `fix:` hint.
@@ -32,6 +41,7 @@ broken. Each non-ok line prints a `fix:` hint.
 | `telegram`, `telegram token`, `telegram chat` | config incomplete | token set but unusable / no chat | `atr telegram setup`, then `atr telegram test` |
 | `mcp token`, `mcp http` | — | MCP on but no token | create `~/.config/atr/mcp.token` (0600) |
 | `atr on PATH` | `atr` not on PATH | — | re-run `install.sh` or add `~/.local/bin` to PATH |
+| `probe <name>` (`--probe` only) | replied, but the provider has no resume flag, so follow-ups start fresh | could not start, signed out / limit / error, timed out, no session id in the output, or the resumed turn did not recall the code word | Run the CLI by hand and sign in; a recall FAIL means follow-ups and retries lose context |
 
 ### `cli cursor` version over SSH on macOS
 

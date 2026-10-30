@@ -264,6 +264,16 @@ fn push(checks: &mut Vec<Check>, name: &str, status: Status, detail: String, hin
 }
 
 pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
+    run_with_probe(cfg, config_path, cache, None).await
+}
+
+/// `run`, plus the opt-in live provider round trip (`--probe`).
+pub async fn run_with_probe(
+    cfg: &Config,
+    config_path: &Path,
+    cache: bool,
+    probe: Option<&crate::probe::ProbeOpts>,
+) -> Report {
     let mut checks = Vec::new();
     push(
         &mut checks,
@@ -392,6 +402,12 @@ pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
                 text.replace('\n', " "),
                 Some("keep the system prompt and tool preamble byte-stable".into()),
             );
+        }
+    }
+
+    if let Some(opts) = probe {
+        for c in crate::probe::run(cfg, opts).await {
+            push(&mut checks, &c.name, c.status, c.detail, c.hint);
         }
     }
 

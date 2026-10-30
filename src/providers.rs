@@ -1018,12 +1018,12 @@ pub fn is_error_event(value: &Value) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::Provider;
     use std::time::Duration;
 
-    fn stub(kind: &str) -> Provider {
+    pub(crate) fn stub(kind: &str) -> Provider {
         Provider {
             name: kind.into(),
             kind: kind.into(),
