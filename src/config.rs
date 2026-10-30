@@ -610,6 +610,10 @@ pub struct RawProvider {
     /// Tasks with `needs` only run on providers listing every need.
     #[serde(default, deserialize_with = "crate::task::de_needs")]
     pub capabilities: Vec<String>,
+    /// OpenCode only: let the model use its shell tool. Default false: atr
+    /// denies `shell`/`execute` and does git, gh, and comments itself.
+    #[serde(default)]
+    pub allow_shell: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -930,6 +934,8 @@ pub struct Provider {
     pub system_prompt_flag: String,
     pub keep_alive: String,
     pub capabilities: Vec<String>,
+    /// OpenCode only: keep the model's shell tool (default: denied).
+    pub allow_shell: bool,
 }
 
 impl Provider {
@@ -999,6 +1005,7 @@ impl Provider {
             system_prompt_flag: String::new(),
             keep_alive: String::new(),
             capabilities: Vec::new(),
+            allow_shell: false,
         }
     }
 }
@@ -2260,6 +2267,7 @@ impl Config {
             };
             providers.push(Provider {
                 capabilities: p.capabilities.clone(),
+                allow_shell: p.allow_shell,
                 name: p.name,
                 kind: p.kind.clone(),
                 preset: p.preset.clone(),

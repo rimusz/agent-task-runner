@@ -46,6 +46,9 @@ pub enum OutputKind {
     Patch,
     Text,
     Webhook,
+    /// Suggest-only triage: atr records a label/comment suggestion locally
+    /// and posts nothing until `atr triage approve`.
+    Triage,
 }
 
 impl OutputKind {
@@ -58,6 +61,7 @@ impl OutputKind {
             Self::Patch => "patch",
             Self::Text => "text",
             Self::Webhook => "webhook",
+            Self::Triage => "triage",
         }
     }
 
@@ -70,8 +74,9 @@ impl OutputKind {
             "patch" | "patch_file" | "diff" => Ok(Self::Patch),
             "text" | "answer" => Ok(Self::Text),
             "webhook" | "callback" => Ok(Self::Webhook),
+            "triage" => Ok(Self::Triage),
             other => bail!(
-                "output {other:?} must be reply, pr, issue_comment, branch, patch, text, or webhook"
+                "output {other:?} must be reply, pr, issue_comment, branch, patch, text, webhook, or triage"
             ),
         }
     }
@@ -377,7 +382,16 @@ unless the messages ask you to.\n"
         }
         OutputKind::PullRequest => {
             parts.push(
-                "## Output\nFinish by leaving a reviewable branch. atr will open the pull request.\n"
+                "## Output\nEdit the files in the Worktree. atr commits your changes, pushes the \
+branch, and opens the pull request with a description. Do not run `git commit`, `git push`, \
+or `gh pr create` yourself. End with a short summary of what you changed and why.\n"
+                    .into(),
+            );
+        }
+        OutputKind::Triage => {
+            parts.push(
+                "## Output\nSuggest only. Do not edit files and do not run `gh`. atr records your \
+JSON suggestion for a maintainer to approve.\n"
                     .into(),
             );
         }

@@ -36,10 +36,44 @@ pub fn load_stable_prefix(system_prompt_file: &Path, repo_path: &Path) -> String
 
 /// Provider tool/skill contract. Same bytes for every task on this provider.
 pub fn provider_preamble(p: &Provider) -> String {
-    format!(
+    let mut out = format!(
         "## Provider contract\nkind={}\nname={}\npermission_mode={}\nprompt_mode={}\nresume_flag={}\n",
         p.kind, p.name, p.permission_mode, p.prompt_mode, p.resume_flag
-    )
+    );
+    if p.kind == "opencode" && !p.allow_shell {
+        out.push_str(NO_SHELL_CONTRACT);
+    }
+    out
+}
+
+/// Appended to the provider contract when atr denies the model's shell.
+/// It overrides any instruction above to run commands, `git`, or `gh`.
+pub const NO_SHELL_CONTRACT: &str = "\
+## No shell on this provider
+You have no shell tool. Do not try to run commands, scripts, tests, `git`, or `gh`, \
+and do not write tool calls as plain text. Use only your file tools (read, glob, grep, \
+edit, write) inside the Worktree. atr itself commits, pushes, opens the pull request, \
+and posts any GitHub comment after you finish, so ignore any instruction above to do \
+those yourself. End with a short plain-text summary of what you changed and why.
+";
+
+/// The `Repo:` header value. A git task edits only its worktree, so the main
+/// checkout's path is never shown (small models edited it instead of the
+/// worktree). Shows `owner/name` when known, else the checkout's folder name.
+pub fn repo_label(github: Option<&str>, repo: &Path, worktree: &Path) -> String {
+    if repo == worktree {
+        return repo.display().to_string();
+    }
+    let name = github
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            repo.file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "repo".into())
+        });
+    format!("{name} (read-only reference; edit files only under the Worktree path)")
 }
 
 /// System prompt + AGENTS.md + provider preamble + task header template.
@@ -214,6 +248,31 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::tempdir;
+
+    #[test]
+    fn repo_header_never_shows_main_checkout_path() {
+        let l = repo_label(
+            Some("o/r"),
+            Path::new("/Users/tom/repos/r"),
+            Path::new("/Users/tom/work/r/k1"),
+        );
+        assert!(!l.contains("/Users/tom/repos"), "{l}");
+        assert!(l.starts_with("o/r (read-only reference"), "{l}");
+        let l = repo_label(None, Path::new("/x/sandbox"), Path::new("/w/k"));
+        assert!(l.starts_with("sandbox (read-only"), "{l}");
+        // Dir workspaces edit in place: the path is the workspace.
+        assert_eq!(repo_label(None, Path::new("/d"), Path::new("/d")), "/d");
+    }
+
+    #[test]
+    fn opencode_preamble_carries_no_shell_contract_unless_allowed() {
+        let mut p = crate::providers::tests::stub("opencode");
+        assert!(provider_preamble(&p).contains("You have no shell tool"));
+        p.allow_shell = true;
+        assert!(!provider_preamble(&p).contains("You have no shell tool"));
+        let c = crate::providers::tests::stub("claude");
+        assert!(!provider_preamble(&c).contains("You have no shell tool"));
+    }
 
     #[test]
     fn variable_section_is_after_stable_prefix() {

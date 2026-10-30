@@ -63,6 +63,13 @@ Per provider: `cache_window` (Claude default `5m`, others `60m`),
 `system_prompt_flag`, `keep_alive` (Ollama default `24h`). See
 [HOW-IT-WORKS.md](HOW-IT-WORKS.md#token-caching).
 
+OpenCode providers only: `allow_shell` (default `false`). When false, atr
+denies the model's `shell`/`execute` tools (plus `subagent`, `question`,
+`webfetch`, `websearch`, `external_directory`) through
+`OPENCODE_CONFIG_CONTENT`, and atr does every commit, push, PR and comment
+itself. `allow_shell = true` keeps the shell for a trusted model; leaving the
+worktree stays denied.
+
 ### MCP
 
 ```toml

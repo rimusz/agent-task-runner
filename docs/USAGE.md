@@ -22,7 +22,7 @@ atr submit my-task --body "also fix the footer"
 atr ask "what is 2+2?"
 ```
 
-`--dir` edits in place. atr asks the CLI to stay inside that folder where the CLI supports it (Claude `--add-dir`, Codex sandbox `workspace-write`, Grok `--cwd`, OpenCode runs in the folder). That is best-effort: some CLIs can still write outside, and atr does not snapshot-detect outside writes. Prompt files for dir tasks live in the state directory, not a `.atr/` folder in your notes. `--repo` uses a git worktree. Neither flag means answer-only. `--output` is `reply` (default: answer the source), `pr`, `issue-comment`, `branch`, `patch`, `text`, or `webhook`. Prompts (and inbox files) are capped at 256 KiB by default (`max_prompt_bytes`).
+`--dir` edits in place. atr asks the CLI to stay inside that folder where the CLI supports it (Claude `--add-dir`, Codex sandbox `workspace-write`, Grok `--cwd`, OpenCode runs in the folder). That is best-effort: some CLIs can still write outside, and atr does not snapshot-detect outside writes. Prompt files for dir tasks live in the state directory, not a `.atr/` folder in your notes. `--repo` uses a git worktree. Neither flag means answer-only. `--output` is `reply` (default: answer the source), `pr`, `issue-comment`, `branch`, `patch`, `text`, `webhook`, or `triage` (suggest-only; see below). With `--output pr` atr itself commits the agent's edits, pushes the branch and opens the PR with a description built from the task, `git diff --stat` and the agent's summary. A run that changes nothing (no diff for `pr`/`branch`/`patch`, no usable suggestion for `triage`, no text for `issue-comment`) is a **no-op**: the run outcome is `no_op`, the task goes to `needs_attention` with a `NO-OP <key>: <reason>` result, and nothing is delivered. Prompts (and inbox files) are capped at 256 KiB by default (`max_prompt_bytes`).
 
 Other agents and scripts can also hand it work through MCP, the HTTP API, Telegram, or an inbox folder. See [Hand work to atr](#hand-work-to-atr).
 
@@ -297,6 +297,20 @@ model = "ollama/llama3.2"
 ```
 
 More, including self-hosted vLLM: [HOW-IT-WORKS.md](HOW-IT-WORKS.md#providers).
+
+**No shell for OpenCode models.** Every OpenCode run gets `OPENCODE_CONFIG_CONTENT` (loaded last, so it wins over your own `opencode.json`) that denies `shell`, `execute`, `subagent`, `question`, `webfetch`, `websearch` and `external_directory` (2.x `permissions`; 1.x gets the `permission` map with `bash`/`webfetch`/`external_directory` denied; unknown versions get both). The model only reads and edits files inside its worktree; atr commits, pushes, opens PRs and posts comments itself through `gh` argv/stdin, never a shell string. The prompt's `Repo:` line shows `owner/name (read-only reference…)`, not the main checkout path. Set `allow_shell = true` on a `[[provider]]` to give a trusted model its shell back (outside-worktree access stays denied). OpenCode 2.x is supported (no `--dir`; standing instructions go in as an extra `--file`).
+
+### Suggest-only triage
+
+```bash
+atr triage run --repo sandbox --issue 6          # queue; the model only suggests
+atr triage list [--all] [--json]                 # pending suggestions
+atr triage show <id>
+atr triage approve <id> [--label L] [--comment "…"] [--no-comment]
+atr triage reject <id>
+```
+
+`atr triage run` fetches the issue, the other issues and recent commits itself (read-only `gh`/`git`) and asks for a JSON reply with one of the allowed labels (`--labels`, default `bug,duplicate,needs-info,already-fixed`). The suggestion is stored under the state directory (`triage/<id>.json`); **nothing is posted** until `atr triage approve`, which adds the label and posts the sanitized comment (ANSI, control characters and tool-call markup stripped, 4000-char cap) with `gh issue comment --body-file -`. Approve only works for a repo configured as `[[repo]]`.
 
 ### Grok Build as the main provider
 

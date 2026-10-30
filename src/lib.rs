@@ -54,6 +54,7 @@ pub mod task;
 pub mod telegram;
 pub mod telegram_health;
 pub mod telegram_setup;
+pub mod triage;
 pub mod tui;
 pub mod tz;
 pub mod ui;

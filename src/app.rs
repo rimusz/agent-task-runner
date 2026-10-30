@@ -289,6 +289,11 @@ impl Shared {
         // from the current config instead of sticking to the last one.
         self.db.restart_task_clock(key)?;
         self.db.clear_retry(key)?;
+        // Fresh session: a resumed session tends to say "already done" and
+        // stop. The worktree (and its edits) is kept.
+        if !crate::telegram::is_assistant_key(key) {
+            self.db.clear_task_sessions(key)?;
+        }
         if t.status == "held" {
             self.db.clear_hold(key)?;
             self.db.set_task_deps(key, "")?;
@@ -312,7 +317,7 @@ impl Shared {
     /// Drop the task's current provider pin and failover history so the
     /// scheduler chooses again from the current config. A Telegram assistant
     /// task is re-pinned to what `[telegram.assistant]` picks now. Per-provider
-    /// sessions are kept (`task_sessions`), so returning to a provider resumes.
+    /// sessions are kept here; `retry` clears them first (except assistant chats).
     fn reresolve_provider(&self, t: &crate::db::Task) -> Result<()> {
         self.db.set_tried(&t.key, None)?;
         self.db.set_stall_retries(&t.key, 0)?;
@@ -1616,7 +1621,16 @@ cli = "/bin/true"
         assert!(err.contains("is running"), "{err}");
         shared.db.set_status("real-1", "waiting").unwrap();
 
+        shared
+            .db
+            .set_provider_session("real-1", Some("opencode"), Some("ses_old"))
+            .unwrap();
         shared.retry("real-1").unwrap();
+        assert_eq!(
+            shared.db.task_session("real-1", "opencode").unwrap(),
+            None,
+            "retry must start a fresh session"
+        );
         assert_eq!(
             shared.db.get_task("real-1").unwrap().unwrap().status,
             "queued"

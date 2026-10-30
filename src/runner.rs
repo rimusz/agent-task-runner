@@ -207,6 +207,9 @@ pub async fn run_cli(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .env("ATR_PROVIDER", &provider.name);
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
     if let Some(extra) = path_prepend {
         let mut path = extra.display().to_string();
         if let Ok(old) = std::env::var("PATH") {

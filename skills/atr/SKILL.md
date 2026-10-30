@@ -220,6 +220,8 @@ With lessons on, atr reflects after informative failures (verify failed, stalled
 
 `atr add --repo R --output pr --compare grok,claude "…"` runs the task on both providers (arms `K-a`, `K-b`, each pinned to its provider, no failover, no pushes). The arm that passes verify with the smallest diff wins; its branch becomes `atr/K` and the PR comes from `K`. Neither passes → `K` is `needs_attention`, no PR. Needs verify commands for the repo; refused when a provider is disabled or over quota. About 2x tokens. `atr compare show K [--json]` shows arms, verify, diff sizes, decision and PR URL. No Telegram command yet.
 
+`atr triage run --repo R --issue N` is suggest-only: the suggestion (label + comment) is stored locally and nothing is posted until `atr triage approve <id>` (`list`, `show`, `reject` too). With `--output pr` atr commits, pushes and opens the PR (with a description) itself; a run with no diff is a no-op (`needs_attention`, result `NO-OP <key>: …`), never success. OpenCode workers have no shell (`allow_shell = true` on the provider to opt back in).
+
 ## Troubleshooting
 
 | Symptom | What to check |

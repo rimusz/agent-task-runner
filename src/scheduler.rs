@@ -1045,6 +1045,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         None
     };
     let resume_delta = !new_session && session.is_some() && !switching && !cannot_resume;
+    let repo_label = prompt::repo_label(entry.as_ref().map(|e| e.github.as_str()), &repo, &wt);
     let has_slot = provider.kind == "codex" || !provider.system_prompt_flag.is_empty();
     let mut rendered = if resume_delta {
         prompt::render_resume(&bodies, handoff_text.as_deref())
@@ -1052,7 +1053,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         prompt::render_variable(
             &key,
             &wt,
-            &repo.display().to_string(),
+            &repo_label,
             task.issue,
             &cfg.shell_command_timeout_raw,
             handoff_text.as_deref(),
@@ -1066,7 +1067,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             &prefix,
             &key,
             &wt,
-            &repo.display().to_string(),
+            &repo_label,
             task.issue,
             &cfg.shell_command_timeout_raw,
             handoff_text.as_deref(),
@@ -1299,7 +1300,27 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         .finish_run(run_id, &result.outcome, result.exit_code)?;
     shared.db.finish_turn(turn_id, &result.outcome)?;
 
-    let verify = if result.outcome == "success" && !assistant {
+    // A worker run that "succeeded" but changed nothing (empty diff, no
+    // usable suggestion, no answer) is a no-op, never reported as success.
+    let noop: Option<String> = if result.outcome == "success"
+        && !assistant
+        && !task.shadow
+        && task.role != "plan"
+        && task.role != crate::compare::ARM_ROLE
+    {
+        let task_now = shared.db.get_task(&key)?.unwrap_or_else(|| task.clone());
+        let text = crate::output::last_text(&shared, &key);
+        crate::output::noop_reason(&cfg, &task_now, &text)
+            .map(|why| crate::output::noop_report(&task_now, &why, &text))
+    } else {
+        None
+    };
+    if noop.is_some() {
+        shared.db.set_run_outcome(run_id, "no_op")?;
+        shared.db.finish_turn(turn_id, "no_op")?;
+    }
+
+    let verify = if result.outcome == "success" && !assistant && noop.is_none() {
         let task_now = shared.db.get_task(&key)?.unwrap_or_else(|| task.clone());
         Some(
             crate::verify::run(&cfg, &shared.db, &key, &repo, &wt, run_id, &task_now)
@@ -1327,7 +1348,9 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     };
 
     let mut final_outcome = result.outcome.clone();
-    if result.outcome == "success" {
+    if noop.is_some() {
+        final_outcome = "no_op".into();
+    } else if result.outcome == "success" {
         let v = verify.as_ref().cloned().unwrap_or_default();
         if v.reason.as_deref() == Some("tests_modified") {
             final_outcome = "tests_modified".into();
@@ -1367,7 +1390,27 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         );
     }
 
-    match result.outcome.as_str() {
+    let match_on = if noop.is_some() {
+        "no_op"
+    } else {
+        result.outcome.as_str()
+    };
+    match match_on {
+        "no_op" => {
+            let report = noop.clone().unwrap_or_default();
+            shared.db.set_stall_retries(&key, 0)?;
+            shared.db.clear_retry(&key)?;
+            shared.db.set_tried(&key, None)?;
+            let diff = shared
+                .db
+                .get_task(&key)?
+                .map(|t| t.result_diff)
+                .unwrap_or_default();
+            shared.db.set_task_result(&key, &report, &diff, None)?;
+            shared.db.set_status(&key, "needs_attention")?;
+            tracing::warn!(task = %key, "{report}");
+            notify_run(&cfg.telegram, &report, task.shadow);
+        }
         "success" => {
             shared.db.set_stall_retries(&key, 0)?;
             shared.db.clear_retry(&key)?;
@@ -1568,7 +1611,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     if assistant {
         crate::telegram::deliver_assistant_result(&shared, &key, run_id, &final_outcome);
     }
-    if final_outcome != "success" {
+    if final_outcome != "success" && final_outcome != "no_op" {
         let _ = crate::output::capture(&shared, &key);
     }
     if !assistant && cfg.lessons_enabled_for(&task) {
@@ -2607,6 +2650,7 @@ mod tests {
             system_prompt_flag: String::new(),
             keep_alive: String::new(),
             capabilities: Vec::new(),
+            allow_shell: false,
         }
     }
 

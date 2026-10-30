@@ -188,6 +188,9 @@ pub async fn run_turn(
         .kill_on_drop(true)
         .env("ATR_PROVIDER", &p.name)
         .env("ATR_PROBE", "1");
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
     #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
