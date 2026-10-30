@@ -100,7 +100,8 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   composer lines locally (FIFO); host slashes still run. After idle, the
   oldest parked line sends like idle Enter — not to the live CLI stdin.
   Ctrl+C quits atr (same as `/quit`);
-  Esc dismisses overlays only. Other `/…` lines may be proxied. `/cli`
+  Esc dismisses overlays; with none open and a turn busy, Esc interrupts it
+  and resumes the same session with any parked lines (§8). Other `/…` lines may be proxied. `/cli`
   opens the provider's own interactive TUI. A full PTY host of the vendor
   TUI is out of scope: atr still spawns print-mode / `exec` / `run` per
   turn.
@@ -134,7 +135,7 @@ folder where the CLI supports it (best-effort; prompt files live in the state
 dir, not `.atr/` in the user's folder). None workspaces answer in text only.
 
 A new message for a running task is queued and never cancels or supersedes the
-live run.
+live run, unless the sender asks to interrupt (see §8).
 
 ## 2. State (SQLite, WAL)
 
@@ -324,9 +325,24 @@ sweep at startup: runs marked running whose pid is gone → failed.
 
 ## 8. Message queueing
 
-New message for a running task is appended to `messages` and never interrupts.
-When the run ends, all pending messages are joined into one `--resume` turn.
-`--force` (explicit, logged) is the only way to cancel a live run.
+New message for a running task is appended to `messages` and, by default,
+never interrupts. When the run ends, all pending messages are joined into one
+`--resume` turn. `--force` (explicit, logged) is the only way to cancel a live run.
+
+**Interrupt and continue** is opt-in: `steer_task` with `interrupt: true`,
+`POST /tasks/:key/messages` with `"interrupt": true`, `atr submit --interrupt`,
+or Esc in the TUI. atr enqueues the message, marks the live run `interrupted`,
+and kills its process group (in-process slot, else the open run's pid from the
+DB, so stdio `atr mcp` can interrupt a run owned by `atr serve`). The scheduler
+then applies no cooldown and no failover: it keeps the provider session and
+queues a resume turn whose first message is a fixed "your previous turn was
+interrupted … continue your unfinished task" preamble, followed by the pending
+messages. With no pending message the task goes to `waiting`.
+Graceful cases: a provider with no resume support (`resume_flag` empty and not
+codex/opencode) is never killed (`not_resumable`; the message just waits); a
+run that never reported a session id (or a fresh atr-chosen Grok id the CLI
+never confirmed) has its messages unconsumed, so the fresh run sees the
+original request plus the new message, with the usual handoff.
 
 ## 9. Notifications
 

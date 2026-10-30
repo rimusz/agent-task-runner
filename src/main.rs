@@ -65,6 +65,11 @@ enum Cmd {
         /// Allow verify to use the agent's test-file edits (`[verify] protect_tests`).
         #[arg(long)]
         tests_ok: bool,
+        /// If the task is mid-turn, stop that turn and resume the same session
+        /// with this message, then the unfinished task (no-op for providers
+        /// that cannot resume: the message just waits).
+        #[arg(long)]
+        interrupt: bool,
     },
     /// Enqueue a generic task (prompt + optional workspace). No issue number.
     Add {
@@ -192,6 +197,17 @@ enum Cmd {
         /// Print the report as JSON.
         #[arg(long)]
         json: bool,
+        /// Live round trip per provider: reply with a code word, then resume
+        /// the same session and recall it. Spends two model turns each; no
+        /// tasks or state are touched.
+        #[arg(long)]
+        probe: bool,
+        /// Only probe this provider (repeatable). Default: every enabled one.
+        #[arg(long = "provider", value_name = "NAME", requires = "probe")]
+        probe_providers: Vec<String>,
+        /// Per-turn timeout for --probe (e.g. 90s, 3m).
+        #[arg(long, default_value = "120s", requires = "probe")]
+        probe_timeout: String,
     },
     /// Prune old worktrees, events, runs, and (opt-in) task rows or CLI session files.
     Gc {
@@ -630,6 +646,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             issue,
             shadow,
             tests_ok,
+            interrupt,
         } => {
             let text = read_body(body, body_file)?;
             let cfg = load_config(&path)?;
@@ -644,6 +661,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 issue,
                 shadow,
                 tests_ok,
+                interrupt,
             ) {
                 return Ok(match status {
                     200 => ExitCode::SUCCESS,
@@ -662,7 +680,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 tests_ok,
             )? {
                 SubmitOutcome::Accepted => Ok(ExitCode::SUCCESS),
-                SubmitOutcome::Queued => Ok(ExitCode::from(EX_TEMPFAIL as u8)),
+                SubmitOutcome::Queued => {
+                    if interrupt {
+                        let i = shared.interrupt_live(&key)?;
+                        eprintln!("interrupt: {}", i.as_str());
+                    }
+                    Ok(ExitCode::from(EX_TEMPFAIL as u8))
+                }
             }
         }
         Cmd::Add {
@@ -973,7 +997,21 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             app::print_usage(&shared, &period, by, repo.as_deref())?;
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Doctor { cache, json } => {
+        Cmd::Doctor {
+            cache,
+            json,
+            probe,
+            probe_providers,
+            probe_timeout,
+        } => {
+            let probe_opts = if probe {
+                Some(atr::probe::ProbeOpts {
+                    providers: probe_providers,
+                    timeout: atr::duration::parse_duration(&probe_timeout)?,
+                })
+            } else {
+                None
+            };
             let outcome = atr::init::ensure_config(&path).await?;
             if outcome.ran_init {
                 if let Some(c) = &outcome.doctor_callout {
@@ -982,7 +1020,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 eprintln!("Starting atr doctor…");
             }
             let cfg = load_config(&path)?;
-            let report = atr::doctor::run(&cfg, &path, cache).await;
+            let report = atr::doctor::run_with_probe(&cfg, &path, cache, probe_opts.as_ref()).await;
             if json {
                 println!("{}", report.to_json());
             } else {
@@ -1314,6 +1352,7 @@ fn http_submit(
     issue: Option<i64>,
     shadow: bool,
     tests_ok: bool,
+    interrupt: bool,
 ) -> Result<u16> {
     let url = format!("http://{listen}/tasks/{key}/messages");
     let mut req = ureq::post(&url).set("User-Agent", "atr");
@@ -1327,6 +1366,7 @@ fn http_submit(
         "issue": issue,
         "shadow": shadow,
         "tests_ok": tests_ok,
+        "interrupt": interrupt,
     }))?;
     Ok(resp.status())
 }

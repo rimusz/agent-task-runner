@@ -997,13 +997,16 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         }
     }
     let _ = shared.db.set_run_prefix_hash(run_id, &prefix_hash);
-    let bodies: Vec<String> = pending.into_iter().map(|m| m.body).collect();
+    let mut bodies: Vec<String> = pending.into_iter().map(|m| m.body).collect();
     let prior: Vec<_> = shared
         .db
         .list_runs(Some(&key))?
         .into_iter()
         .filter(|r| r.id != run_id)
         .collect();
+    if prior.last().and_then(|r| r.outcome.as_deref()) == Some("interrupted") {
+        bodies.insert(0, prompt::INTERRUPT_PREAMBLE.to_string());
+    }
     let switching = prior
         .last()
         .map(|r| r.provider != provider.name)
@@ -1165,6 +1168,35 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         &files_dir,
     )
     .await;
+
+    if shared.db.run_outcome(run_id)?.as_deref() == Some("interrupted") {
+        let reported = result.as_ref().ok().and_then(|r| r.session_id.clone());
+        if let Some(sid) = &reported {
+            let _ = shared
+                .db
+                .set_provider_session(&key, Some(&provider.name), Some(sid));
+        }
+        let resumable =
+            interrupted_session_resumable(reported.as_deref(), session.as_deref(), new_session);
+        if !resumable {
+            // Nothing to resume: forget the session and hand this run's
+            // messages to the next (fresh) run together with the new ones.
+            let _ = shared
+                .db
+                .set_provider_session(&key, Some(&provider.name), None);
+            shared.db.unconsume_run(run_id)?;
+        }
+        let _ = shared.db.finish_turn(turn_id, "interrupted");
+        let next = if shared.db.pending_messages(&key)?.is_empty() {
+            "waiting"
+        } else {
+            "queued"
+        };
+        shared.db.set_status(&key, next)?;
+        tracing::info!(task = %key, resumable, next, "run interrupted; no provider cooldown");
+        shared.kick.notify_waiters();
+        return Ok(());
+    }
 
     if shared.db.run_outcome(run_id)?.as_deref() == Some("cancelled") {
         if let Ok(r) = &result {
@@ -2073,6 +2105,19 @@ fn spawn_workspace_changed(previous: Option<&str>, next: &std::path::Path) -> bo
     }
 }
 
+/// After an interrupt: can the next run resume this run's session? Yes if
+/// the CLI reported one, or if it was an existing session atr resumed. A
+/// brand-new atr-chosen id (Grok `--session-id`) the CLI never confirmed
+/// may not exist on disk yet, so start fresh instead of a failing resume.
+fn interrupted_session_resumable(
+    reported: Option<&str>,
+    session: Option<&str>,
+    new_session: bool,
+) -> bool {
+    reported.is_some_and(|s| !s.is_empty())
+        || (!new_session && session.is_some_and(|s| !s.is_empty()))
+}
+
 fn ensure_session(db: &Db, key: &str, provider: &Provider) -> Result<(Option<String>, bool)> {
     // Never resume another provider's session. Sessions are stored per
     // (task, provider); the task-level session_id is only the current one.
@@ -2563,6 +2608,19 @@ mod tests {
             keep_alive: String::new(),
             capabilities: Vec::new(),
         }
+    }
+
+    #[test]
+    fn interrupted_session_resume_rules() {
+        // CLI reported a session: resume it.
+        assert!(interrupted_session_resumable(Some("s1"), None, false));
+        assert!(interrupted_session_resumable(Some("s1"), Some("g1"), true));
+        // Existing session atr resumed: still resumable.
+        assert!(interrupted_session_resumable(None, Some("s0"), false));
+        // Fresh atr-chosen id never confirmed, or nothing at all: start fresh.
+        assert!(!interrupted_session_resumable(None, Some("g1"), true));
+        assert!(!interrupted_session_resumable(None, None, false));
+        assert!(!interrupted_session_resumable(Some(""), None, false));
     }
 
     #[test]

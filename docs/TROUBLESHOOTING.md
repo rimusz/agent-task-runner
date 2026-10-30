@@ -8,7 +8,16 @@ tokens; don't paste them into a terminal or chat to "check" them.
 ```bash
 atr doctor            # one ok / warn / FAIL line per check, then "N problems"
 atr doctor --json     # same, machine-readable
+atr doctor --probe    # plus a live round trip through every enabled provider
+atr doctor --probe --provider claude --probe-timeout 90s
 ```
+
+`--probe` is opt-in because it spends two real model turns per provider. Turn 1
+asks the CLI to remember a random code word; turn 2 resumes the same session and
+asks for it back (the second prompt never contains the word). It runs in a
+throwaway temp dir with the same argv atr uses for tasks, and never touches the
+state DB (no tasks, runs, sessions, or usage rows). A turn that runs past
+`--probe-timeout` (default 120s) is killed with its whole process group.
 
 `ok` is fine. `warn` works but needs attention. `FAIL` means a feature is
 broken. Each non-ok line prints a `fix:` hint.
@@ -32,6 +41,7 @@ broken. Each non-ok line prints a `fix:` hint.
 | `telegram`, `telegram token`, `telegram chat` | config incomplete | token set but unusable / no chat | `atr telegram setup`, then `atr telegram test` |
 | `mcp token`, `mcp http` | — | MCP on but no token | create `~/.config/atr/mcp.token` (0600) |
 | `atr on PATH` | `atr` not on PATH | — | re-run `install.sh` or add `~/.local/bin` to PATH |
+| `probe <name>` (`--probe` only) | replied, but the provider has no resume flag, so follow-ups start fresh | could not start, signed out / limit / error, timed out, no session id in the output, or the resumed turn did not recall the code word | Run the CLI by hand and sign in; a recall FAIL means follow-ups and retries lose context |
 
 ### `cli cursor` version over SSH on macOS
 
@@ -172,7 +182,7 @@ owner's env var, ok/warn/fail and days left without printing values.
 
 - A bare `atr` / `atr tui` is the interactive chat TUI. `atr ask "prompt"` is one-shot / CI (no alternate screen). Both run the engine in-process and do **not** need `atr serve`. Without a TTY, `atr tui` uses line mode.
 - Timestamped `INFO queued follow-up` lines must not appear on the composer. Those go to `[log] path`. User turns are prefixed `>` with a local clock; replies have no role chip. Plain English is a provider turn. A dead CLI whose run `ended`/`outcome` is still NULL is reclaimed so the next message can run; the assistant bubble is the **latest** run only (never an older `tasks.result_text`). Mouse is not captured — use the terminal’s selection to copy.
-- Slash: `/provider` `/model` `/effort` `/context` `/repo` `/new` `/quit` `/status` `/help` `/cli` are atr-local. `/model` changes atr's session model for the **current** provider only (never sent as Claude/Cursor chat; the TUI picker is an overlay, not a transcript dump). `/effort` and `/context` set per-provider spawn knobs (next argv only). Empty `/effort` opens the list when that kind has real effort flags; otherwise the note. Bare `/context` always opens the shared size catalog; apply is claude `--autocompact` / cursor model brackets only — grok/codex get an honesty note, not a skipped picker. Switching `/provider` restores that provider's last session model. The under-input strip shows that provider/model (same source as `/status`) plus the honest workspace kind (`answer-only` / `dir …` / `git …`). `/repo` picks a config git root (`[[repo]]`; serve optional), `/repo .` the cwd git root, `/repo none` answer-only. `/model` lists real ids (`cursor-agent models` `id - Label`, grok bullets, OpenCode `provider/model`); Claude seeds documented full ids (`claude-sonnet-5-5`, …; no bare aliases); Codex reads `~/.codex/models_cache.json` slugs (does not spawn its TUI). `/provider` `/model` `/effort` `/context` `/repo` do not append to the transcript. Other `/…` go to the provider CLI. Never an "unknown command" for a known slash. Ctrl+C quits atr; Esc only dismisses menus.
+- Slash: `/provider` `/model` `/effort` `/context` `/repo` `/new` `/quit` `/status` `/help` `/cli` are atr-local. `/model` changes atr's session model for the **current** provider only (never sent as Claude/Cursor chat; the TUI picker is an overlay, not a transcript dump). `/effort` and `/context` set per-provider spawn knobs (next argv only). Empty `/effort` opens the list when that kind has real effort flags; otherwise the note. Bare `/context` always opens the shared size catalog; apply is claude `--autocompact` / cursor model brackets only — grok/codex get an honesty note, not a skipped picker. Switching `/provider` restores that provider's last session model. The under-input strip shows that provider/model (same source as `/status`) plus the honest workspace kind (`answer-only` / `dir …` / `git …`). `/repo` picks a config git root (`[[repo]]`; serve optional), `/repo .` the cwd git root, `/repo none` answer-only. `/model` lists real ids (`cursor-agent models` `id - Label`, grok bullets, OpenCode `provider/model`); Claude seeds documented full ids (`claude-sonnet-5-5`, …; no bare aliases); Codex reads `~/.codex/models_cache.json` slugs (does not spawn its TUI). `/provider` `/model` `/effort` `/context` `/repo` do not append to the transcript. Other `/…` go to the provider CLI. Never an "unknown command" for a known slash. Ctrl+C quits atr; Esc dismisses menus, or interrupts a busy turn and resumes it with parked lines.
 - No config yet: on a TTY, atr offers the normal `atr init` (including whether to install the user service) then continues (`Starting atr tui…` / `atr ask`). Without a TTY it exits with a pointer to `atr init` / `atr init --yes` (no auto `--yes`).
 - Session keys are `cli-<name>` (default `cli-default` — internal TUI session, not a model). Serve never starts those tasks. Chrome omits the default key. Restarting serve while a TUI turn is running does not kill that turn (the owner pid + start token is still alive). A `held` or retry-waiting task owned by a live TUI is not reaped or reconciled away. Chrome shows `· serve` for a live foreground `atr serve` as well as the user service. If the status line says `provider at limit`, a serve (or another TUI) already holds that provider's `max_parallel` slots — wait; do not expect a second Claude/Grok/… process to start. Retry and host-gate starts use the same cross-process `max_parallel` slot as any other start.
 - No enabled provider: atr prints which CLIs it saw and how to sign in / `atr providers detect` / enable. `atr ask` exits non-zero; the TUI asks whether to continue anyway.

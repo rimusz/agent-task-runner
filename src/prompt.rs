@@ -178,6 +178,11 @@ pub fn render_variable(
 }
 
 /// Follow-up on an existing session: new messages only, no prefix or task header.
+/// First message of the turn after `steer --interrupt` / TUI Esc.
+pub const INTERRUPT_PREAMBLE: &str = "Your previous turn was interrupted so you \
+could read the message below. Address it, then continue your unfinished task \
+from the current state of the workspace (edits you already made are still there).";
+
 pub fn render_resume(messages: &[String], handoff: Option<&str>) -> String {
     let mut out = String::new();
     if let Some(h) = handoff.filter(|s| !s.is_empty()) {

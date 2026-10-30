@@ -35,6 +35,7 @@ pub mod owner;
 pub mod plan;
 pub mod plugin;
 pub mod presets;
+pub mod probe;
 pub mod prompt;
 pub mod providers;
 pub mod providers_edit;
@@ -62,7 +63,9 @@ pub mod util;
 pub mod verify;
 pub mod worktree;
 
-pub use app::{serve, serve_background, Shared, SubmitOpts, SubmitOutcome, EX_TEMPFAIL};
+pub use app::{
+    serve, serve_background, InterruptOutcome, Shared, SubmitOpts, SubmitOutcome, EX_TEMPFAIL,
+};
 pub use config::{default_config_path, load_config, Config};
 pub use providers::new_session_uuid;
 

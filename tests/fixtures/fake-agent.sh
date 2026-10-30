@@ -160,6 +160,17 @@ set -- $BEH
 ACTION=${1:-success}
 SLEEP=${2:-0}
 
+# Opt-in: record each prompt read from stdin (tests that assert prompt text).
+if [[ -f "$DIR/${KIND}.capture" ]]; then
+  { cat; echo; echo "=====ATR-FAKE-END====="; } >> "$DIR/${KIND}.stdin"
+fi
+
+if [[ "$ACTION" == "hold_session" ]]; then
+  # Like hold, but report a session id first (a resumable live turn).
+  echo "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"${KIND}-hold-sid\"}"
+  ACTION=hold
+fi
+
 if [[ "$ACTION" == "hold" ]]; then
   # Stay live until the test writes $DIR/${KIND}.release. Heartbeats keep the runner from stalling.
   python3 - "$DIR/${KIND}.release" <<'PY'

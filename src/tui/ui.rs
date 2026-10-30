@@ -9,9 +9,9 @@ use super::history::InputHistory;
 use super::proxy;
 use super::slash;
 use super::{
-    busy_enter_action, collect_result, composer_status_line, enqueue_turn, park_busy_line,
-    step_line, truncate_middle_end, turn_is_idle, workspace_chrome_line, BusyEnter, PendingTurns,
-    Step, Workspace,
+    busy_enter_action, collect_result, composer_status_line, enqueue_turn, esc_action,
+    park_busy_line, step_line, truncate_middle_end, turn_is_idle, workspace_chrome_line, BusyEnter,
+    EscAction, PendingTurns, Step, Workspace,
 };
 use crate::app::Shared;
 use crate::scheduler;
@@ -90,6 +90,8 @@ struct App {
     scroll: u16,
     follow: bool,
     busy: bool,
+    /// Esc stopped the live turn; don't report it as "turn failed".
+    interrupted: bool,
     pending: PendingTurns,
     picker: Option<Picker>,
     slash_menu: Option<SlashMenu>,
@@ -152,6 +154,7 @@ impl App {
             scroll: 0,
             follow: true,
             busy: false,
+            interrupted: false,
             pending: PendingTurns::default(),
             picker: None,
             slash_menu: None,
@@ -205,9 +208,10 @@ async fn event_loop(
             if turn_is_idle(shared, key)? {
                 app.busy = false;
                 ticks = 0;
-                if !snap.ok {
+                if !snap.ok && !std::mem::take(&mut app.interrupted) {
                     app.push(Role::Error, "turn failed");
                 }
+                app.interrupted = false;
                 if let Some(end) = flush_parked(app, shared, key, ws, pin)? {
                     return Ok(end);
                 }
@@ -260,8 +264,18 @@ fn handle_key(
         return Ok(None);
     }
     if matches!(ev.code, KeyCode::Esc) {
-        if app.picker.take().is_some() || app.slash_menu.take().is_some() {
-            return Ok(None);
+        let overlay = app.picker.is_some() || app.slash_menu.is_some();
+        match esc_action(overlay, app.busy, app.pending.len()) {
+            EscAction::Dismiss => {
+                app.picker = None;
+                app.slash_menu = None;
+            }
+            EscAction::Ignore => {}
+            EscAction::Interrupt => esc_interrupt(app, shared, key, ws, pin, None)?,
+            EscAction::InterruptWithParked => {
+                let msg = app.pending.drain_joined();
+                esc_interrupt(app, shared, key, ws, pin, msg)?;
+            }
         }
         return Ok(None);
     }
@@ -340,6 +354,39 @@ fn handle_key(
         }
         _ => Ok(None),
     }
+}
+
+/// Esc while busy: send any parked lines as the next message, then stop the
+/// live turn so the scheduler resumes the same session with them.
+fn esc_interrupt(
+    app: &mut App,
+    shared: &Shared,
+    key: &str,
+    ws: &mut Workspace,
+    pin: Option<&str>,
+    message: Option<String>,
+) -> Result<()> {
+    if let Some(m) = &message {
+        enqueue_turn(shared, key, ws, m, pin)?;
+        app.push(Role::You, m.clone());
+    }
+    match shared.interrupt_live(key)? {
+        crate::InterruptOutcome::Interrupted => {
+            app.interrupted = true;
+            if message.is_some() {
+                app.push(Role::System, "interrupted · resuming with your message");
+                app.push(Role::Assistant, " ");
+            } else {
+                app.push(Role::System, "interrupted · type to continue");
+            }
+        }
+        crate::InterruptOutcome::NotResumable => app.push(
+            Role::System,
+            "this provider cannot resume a session; not interrupted (message waits for this turn)",
+        ),
+        crate::InterruptOutcome::NotRunning => {}
+    }
+    Ok(())
 }
 
 fn ctrl_c(app: &mut App, shared: &Shared, key: &str) -> Result<Option<LoopEnd>> {
@@ -926,9 +973,12 @@ fn composer_hint(app: &App) -> String {
     }
     if app.busy {
         return if app.pending.is_empty() {
-            "↵ queue  ^C quit  PgUp scroll".into()
+            "↵ queue  Esc interrupt  ^C quit  PgUp scroll".into()
         } else {
-            format!("↵ queue · {} waiting  ^C quit", app.pending.len())
+            format!(
+                "↵ queue · {} waiting  Esc send now  ^C quit",
+                app.pending.len()
+            )
         };
     }
     if !app.follow {
@@ -1224,6 +1274,7 @@ mod tests {
             scroll: 0,
             follow: true,
             busy: false,
+            interrupted: false,
             pending: PendingTurns::default(),
             picker: None,
             slash_menu: None,
