@@ -406,6 +406,15 @@ PY
     emit_success
     exit 0
     ;;
+  edit_main)
+    # Escape test: edit the worktree AND the main checkout it was cut from
+    # (what OpenCode 2.x did when its project dir came from a stale $PWD).
+    main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)
+    printf '\nworktree-edit\n' >> README.md
+    printf '\nmain-edit\n' >> "$main/README.md"
+    emit_success
+    exit 0
+    ;;
   edit_success)
     if [[ -f README.md ]]; then
       printf '\nshadow-edit\n' >> README.md

@@ -186,3 +186,11 @@ Claude Code, Grok Build, Cursor, Codex and OpenCode. OpenCode also opens the doo
 atr is not affiliated with or endorsed by Anthropic, xAI, Anysphere, OpenAI or the OpenCode authors. Claude, Grok, Cursor, Codex, ChatGPT and OpenCode are trademarks of their owners. Use atr with **your own** CLI accounts and follow each provider's terms. Do not resell access or share accounts.
 
 Licensed under MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`). Dependency licenses: `THIRD_PARTY_LICENSES`.
+
+worktree-edit
+
+main-edit
+
+worktree-edit
+
+main-edit

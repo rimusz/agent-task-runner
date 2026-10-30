@@ -18,10 +18,8 @@ use crate::providers::{
     supports_resume, ErrorClass, ParsedEvent,
 };
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
 
 /// Default per-turn timeout for `--probe`.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -179,18 +177,8 @@ pub async fn run_turn(
         None,
         None,
     );
-    let mut cmd = Command::new(&spec.program);
-    cmd.args(&spec.args)
-        .current_dir(&spec.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env("ATR_PROVIDER", &p.name)
-        .env("ATR_PROBE", "1");
-    for (k, v) in &spec.env {
-        cmd.env(k, v);
-    }
+    let mut cmd = crate::runner::agent_command(&spec);
+    cmd.env("ATR_PROVIDER", &p.name).env("ATR_PROBE", "1");
     #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {

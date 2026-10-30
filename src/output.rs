@@ -217,6 +217,49 @@ pub fn noop_report(task: &Task, reason: &str, text: &str) -> String {
     out
 }
 
+/// `git status` of the main checkout, taken before and after a worktree run
+/// so atr notices when an agent escaped its worktree and edited the repo the
+/// worktree was cut from. `None` when the folder is not a git checkout.
+pub fn main_checkout_snapshot(repo: &Path) -> Option<String> {
+    let head = git_out(repo, &["rev-parse", "HEAD"])?;
+    let status = git_out(repo, &["status", "--porcelain", "--untracked-files=all"])?;
+    Some(format!("HEAD {}\n{status}", head.trim()))
+}
+
+/// Paths whose status in the main checkout changed during the run (sorted).
+pub fn main_checkout_changes(before: &str, after: &str) -> Vec<String> {
+    let lines = |s: &str| -> std::collections::BTreeSet<String> {
+        s.lines().skip(1).map(|l| l.to_string()).collect()
+    };
+    let (b, a) = (lines(before), lines(after));
+    let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for l in a.symmetric_difference(&b) {
+        let path = l.get(3..).unwrap_or(l).trim().to_string();
+        if !path.is_empty() {
+            out.insert(path);
+        }
+    }
+    if before.lines().next() != after.lines().next() {
+        out.insert("(HEAD moved)".into());
+    }
+    out.into_iter().collect()
+}
+
+/// Report for a run that touched the main checkout instead of its worktree.
+pub fn main_checkout_report(task: &Task, repo: &Path, changed: &[String]) -> String {
+    let mut list: Vec<&str> = changed.iter().take(20).map(String::as_str).collect();
+    if changed.len() > 20 {
+        list.push("...");
+    }
+    format!(
+        "BLOCKED {}: the agent changed the main checkout {} (outside its worktree): {}. \
+Nothing was delivered; review and restore those files there.",
+        task.key,
+        repo.display(),
+        list.join(", ")
+    )
+}
+
 /// Commit any uncommitted worktree edits on the task branch (the model
 /// never commits). Returns true when a commit was made.
 pub fn commit_pending(wt: &Path, task: &Task) -> Result<bool> {
@@ -1080,5 +1123,32 @@ cli = "/bin/true"
             ..Task::default()
         };
         assert_eq!(patch_path(&t), PathBuf::from("/tmp/out.patch"));
+    }
+    #[test]
+    fn main_checkout_edits_are_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        crate::worktree::init_sample_repo(&repo).unwrap();
+        std::fs::write(repo.join("already-dirty.txt"), "x\n").unwrap();
+        let before = main_checkout_snapshot(&repo).unwrap();
+        assert!(main_checkout_changes(&before, &before).is_empty());
+        std::fs::write(repo.join("README.md"), "edited by the agent\n").unwrap();
+        std::fs::write(repo.join("scratch.py"), "print(1)\n").unwrap();
+        let after = main_checkout_snapshot(&repo).unwrap();
+        let changed = main_checkout_changes(&before, &after);
+        assert_eq!(
+            changed,
+            vec!["README.md".to_string(), "scratch.py".to_string()]
+        );
+        let task = Task {
+            key: "fix-1".into(),
+            ..Default::default()
+        };
+        let r = main_checkout_report(&task, &repo, &changed);
+        assert!(
+            r.starts_with("BLOCKED fix-1: the agent changed the main checkout"),
+            "{r}"
+        );
+        assert!(r.contains("README.md, scratch.py"), "{r}");
     }
 }

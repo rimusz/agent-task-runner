@@ -1146,6 +1146,14 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         std::fs::create_dir_all(sys_path.parent().unwrap())?;
         std::fs::write(&sys_path, &prefix)?;
     }
+    // Snapshot the main checkout so a run that escapes its worktree is
+    // caught (and never delivered), whatever the agent's own sandboxing did.
+    let main_guard =
+        if ws_kind == crate::task::WorkspaceKind::Git && !assistant && !task.shadow && repo != wt {
+            crate::output::main_checkout_snapshot(&repo)
+        } else {
+            None
+        };
     let result = runner::run_cli(
         &shared.db,
         &cfg,
@@ -1315,9 +1323,34 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     } else {
         None
     };
+    let escaped: Option<String> = main_guard.as_deref().and_then(|before| {
+        let after = crate::output::main_checkout_snapshot(&repo)?;
+        let changed = crate::output::main_checkout_changes(before, &after);
+        if changed.is_empty() {
+            None
+        } else {
+            let task_now = shared
+                .db
+                .get_task(&key)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| task.clone());
+            Some(crate::output::main_checkout_report(
+                &task_now, &repo, &changed,
+            ))
+        }
+    });
+    // Both are "stop here, deliver nothing, needs attention"; an escape from
+    // the worktree wins over a plain no-op.
+    let halt_outcome = if escaped.is_some() {
+        "main_checkout_edit"
+    } else {
+        "no_op"
+    };
+    let noop = escaped.or(noop);
     if noop.is_some() {
-        shared.db.set_run_outcome(run_id, "no_op")?;
-        shared.db.finish_turn(turn_id, "no_op")?;
+        shared.db.set_run_outcome(run_id, halt_outcome)?;
+        shared.db.finish_turn(turn_id, halt_outcome)?;
     }
 
     let verify = if result.outcome == "success" && !assistant && noop.is_none() {
@@ -1349,7 +1382,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
 
     let mut final_outcome = result.outcome.clone();
     if noop.is_some() {
-        final_outcome = "no_op".into();
+        final_outcome = halt_outcome.into();
     } else if result.outcome == "success" {
         let v = verify.as_ref().cloned().unwrap_or_default();
         if v.reason.as_deref() == Some("tests_modified") {
@@ -1611,7 +1644,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     if assistant {
         crate::telegram::deliver_assistant_result(&shared, &key, run_id, &final_outcome);
     }
-    if final_outcome != "success" && final_outcome != "no_op" {
+    if final_outcome != "success" && noop.is_none() {
         let _ = crate::output::capture(&shared, &key);
     }
     if !assistant && cfg.lessons_enabled_for(&task) {

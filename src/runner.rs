@@ -118,6 +118,27 @@ pub fn runtime_files_dir(
     }
 }
 
+/// The agent child process: argv, cwd, piped stdio, and the spec's env.
+///
+/// `current_dir` alone does not update `$PWD`, and OpenCode 2.x takes its
+/// project directory from `$PWD`; without the explicit `PWD` it runs (and
+/// edits files) in whatever folder atr itself was started from, which can be
+/// the main checkout or its parent.
+pub(crate) fn agent_command(spec: &crate::providers::CommandSpec) -> Command {
+    let mut cmd = Command::new(&spec.program);
+    cmd.args(&spec.args)
+        .current_dir(&spec.cwd)
+        .env("PWD", &spec.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
+    cmd
+}
+
 pub async fn run_cli(
     db: &Db,
     cfg: &Config,
@@ -199,17 +220,8 @@ pub async fn run_cli(
         });
     }
 
-    let mut cmd = Command::new(&spec.program);
-    cmd.args(&spec.args)
-        .current_dir(&spec.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env("ATR_PROVIDER", &provider.name);
-    for (k, v) in &spec.env {
-        cmd.env(k, v);
-    }
+    let mut cmd = agent_command(&spec);
+    cmd.env("ATR_PROVIDER", &provider.name);
     if let Some(extra) = path_prepend {
         let mut path = extra.display().to_string();
         if let Ok(old) = std::env::var("PATH") {
@@ -940,5 +952,29 @@ mod codex_model_tests {
         );
         assert_eq!(codex_model_from_rollout(home.path(), "missing"), None);
         assert_eq!(codex_model_from_rollout(home.path(), "../x"), None);
+    }
+    #[test]
+    fn agent_command_sets_pwd_to_the_worktree() {
+        let spec = crate::providers::CommandSpec {
+            program: PathBuf::from("opencode"),
+            args: vec!["run".into()],
+            cwd: PathBuf::from("/wt/local-0"),
+            stdin_text: None,
+            env: vec![("OPENCODE_CONFIG_CONTENT".into(), "{}".into())],
+        };
+        let cmd = agent_command(&spec);
+        let std = cmd.as_std();
+        assert_eq!(std.get_current_dir(), Some(Path::new("/wt/local-0")));
+        let envs: Vec<_> = std.get_envs().collect();
+        assert!(
+            envs.contains(&(
+                std::ffi::OsStr::new("PWD"),
+                Some(std::ffi::OsStr::new("/wt/local-0"))
+            )),
+            "{envs:?}"
+        );
+        assert!(envs
+            .iter()
+            .any(|(k, _)| *k == std::ffi::OsStr::new("OPENCODE_CONFIG_CONTENT")));
     }
 }
