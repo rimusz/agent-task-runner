@@ -1,0 +1,118 @@
+//! atr drops scratch files the agent left (root-level helpers such as
+//! `test_fix.py`, `run_tests.py`; `debug*` names anywhere) before verify and
+//! commit, keeps the real change, and names what it dropped in the PR body.
+#[allow(dead_code)]
+mod common;
+
+use common::Harness;
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let o = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+#[tokio::test]
+async fn scratch_files_are_dropped_before_verify_and_commit() {
+    let h = Harness::with_providers(&[("grok", true, "edit_scratch")], "127.0.0.1:0").await;
+    h.install_gh_stub();
+    let origin = h.dir.path().join("origin.git");
+    git(
+        h.dir.path(),
+        &["init", "-q", "--bare", origin.to_str().unwrap()],
+    );
+    git(
+        &h.repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    std::fs::write(h.fake_dir.join("gh-allow-pr"), "").unwrap();
+    {
+        // Verify fails if a stray root test file is still there (pytest would
+        // collect it), so a pass proves the drop happened before verify.
+        let mut cfg = h.shared.config.write().unwrap();
+        cfg.verify.enabled = true;
+        cfg.verify.max_retries = 0;
+        cfg.verify.only_listed_repos = false;
+        cfg.verify.commands = vec!["test ! -e test_fix.py && test ! -e run_tests.py".into()];
+    }
+    let repo = h.repo.display().to_string();
+    h.shared
+        .submit_with(
+            "demo-s1",
+            "# Fix the readme\n\nadd a line to README.md and document usage",
+            "test",
+            Some(&repo),
+            None,
+            false,
+            false,
+            atr::SubmitOpts {
+                workspace_kind: Some("git".into()),
+                output_kind: Some("pr".into()),
+                source_kind: Some("cli".into()),
+                title: Some("Fix the readme".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    h.wait_status("demo-s1", &["waiting", "needs_attention"], 15000)
+        .await;
+    let t = h.shared.db.get_task("demo-s1").unwrap().unwrap();
+    assert_eq!(t.status, "waiting", "{}", t.result_text);
+    let runs = h.shared.db.list_runs(Some("demo-s1")).unwrap();
+    assert_eq!(runs.last().unwrap().outcome.as_deref(), Some("success"));
+
+    let files = git(
+        &origin,
+        &["ls-tree", "-r", "--name-only", "refs/heads/atr/demo-s1"],
+    );
+    let files: Vec<&str> = files.lines().collect();
+    assert!(files.contains(&"README.md"), "{files:?}");
+    assert!(files.contains(&"docs/usage.md"), "{files:?}");
+    for stray in ["test_fix.py", "run_tests.py", "docs/debug_notes.md"] {
+        assert!(!files.contains(&stray), "{stray} reached the PR: {files:?}");
+    }
+
+    let pr = std::fs::read_to_string(h.fake_dir.join("gh-pr.log")).unwrap();
+    assert!(pr.contains("## Dropped scratch files"), "{pr}");
+    for stray in ["`test_fix.py`", "`run_tests.py`", "`docs/debug_notes.md`"] {
+        assert!(pr.contains(stray), "{stray} missing from PR note: {pr}");
+    }
+    let note_at = pr.find("## Dropped scratch files").unwrap();
+    let footer_at = pr.rfind("Opened by atr").unwrap();
+    assert!(note_at < footer_at, "note goes before the footer");
+}
+
+#[tokio::test]
+async fn scratch_drop_can_be_turned_off() {
+    let h = Harness::with_providers(&[("grok", true, "edit_scratch")], "127.0.0.1:0").await;
+    h.install_gh_stub();
+    h.shared.config.write().unwrap().scratch.drop = false;
+    let repo = h.repo.display().to_string();
+    h.shared
+        .submit_with(
+            "demo-s2",
+            "# Fix the readme\n\nadd a line",
+            "test",
+            Some(&repo),
+            None,
+            false,
+            false,
+            atr::SubmitOpts {
+                workspace_kind: Some("git".into()),
+                output_kind: Some("branch".into()),
+                source_kind: Some("cli".into()),
+                title: Some("Fix the readme".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    h.wait_status("demo-s2", &["waiting", "needs_attention"], 15000)
+        .await;
+    let t = h.shared.db.get_task("demo-s2").unwrap().unwrap();
+    let wt = std::path::PathBuf::from(t.worktree.unwrap());
+    assert!(wt.join("test_fix.py").exists());
+    assert!(wt.join("run_tests.py").exists());
+}

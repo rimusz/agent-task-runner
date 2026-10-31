@@ -70,6 +70,25 @@ denies the model's `shell`/`execute` tools (plus `subagent`, `question`,
 itself. `allow_shell = true` keeps the shell for a trusted model; leaving the
 worktree stays denied.
 
+### Scratch files
+
+```toml
+[scratch]
+drop = true   # default
+```
+
+After a successful run in a git worktree (and again right before atr commits
+for a PR), atr deletes **new untracked** files the task never named (by path or
+file name; attached files count as named) when they sit at the repo root or
+have a scratch name anywhere (`debug*`, `scratch*`, `tmp*`, `simple_test*`,
+`run_test*`, `verify_*`, `validate_*`, `final_*`, `*_verification*`, `*.orig`,
+`*.rej`, `*.bak`, `*.swp`). Tracked files are never touched; new files with
+ordinary names in subfolders (`src/new.rs`, `tests/test_new.py`) are kept.
+Dropped paths are logged, kept in `.atr/dropped-scratch.txt`, and listed in the
+PR body under "Dropped scratch files". This runs before verify, so a stray root
+`test_*.py` can't be collected by pytest. Shadow runs are not pruned. Set
+`drop = false` to keep everything the agent wrote.
+
 ### MCP
 
 ```toml

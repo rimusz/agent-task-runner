@@ -1308,6 +1308,38 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         .finish_run(run_id, &result.outcome, result.exit_code)?;
     shared.db.finish_turn(turn_id, &result.outcome)?;
 
+    // Drop scratch files the agent left (test_*.py, run_tests.py, verify_*.md
+    // at the root, …) before the no-op check, verify, and commit, so they
+    // never reach the PR or get collected by the verify command.
+    // Only after a successful run: a stalled or failed run's files are what
+    // the next provider's handoff describes. Shadow runs only measure.
+    if cfg.scratch.drop
+        && result.outcome == "success"
+        && ws_kind == crate::task::WorkspaceKind::Git
+        && !assistant
+        && !task.shadow
+        && repo != wt
+        && crate::worktree::is_git_repo(&wt)
+    {
+        let title = shared
+            .db
+            .get_task(&key)
+            .ok()
+            .flatten()
+            .map(|t| t.title)
+            .unwrap_or_else(|| task.title.clone());
+        let dropped = crate::scratch::drop_for_task(&cfg, &shared.db, &key, &title, &wt);
+        if !dropped.is_empty() {
+            tracing::info!(
+                task = %key,
+                run = run_id,
+                "dropped {} scratch file(s) the task did not ask for: {}",
+                dropped.len(),
+                dropped.join(", ")
+            );
+        }
+    }
+
     // A worker run that "succeeded" but changed nothing (empty diff, no
     // usable suggestion, no answer) is a no-op, never reported as success.
     let noop: Option<String> = if result.outcome == "success"

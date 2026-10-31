@@ -406,7 +406,29 @@ PY
     emit_success
     exit 0
     ;;
+  edit_scratch)
+    # Only inside the harness worktree (side calls run from the test cwd).
+    case "$(pwd -P)/" in
+      "$(cd "$SELF_DIR/.." && pwd -P)/work/"*) ;;
+      *) emit_success; exit 0 ;;
+    esac
+    # Local-model litter: a real fix plus throwaway helpers at the root and a
+    # scratch-named file in a subfolder; one legit new file in a subfolder.
+    printf '\nscratch-test fix\n' >> README.md
+    printf 'def test_x(): assert False\n' > test_fix.py
+    : > run_tests.py
+    mkdir -p docs
+    printf 'notes\n' > docs/usage.md
+    printf 'dbg\n' > docs/debug_notes.md
+    emit_success
+    exit 0
+    ;;
   edit_main)
+    # Only inside the harness worktree (side calls run from the test cwd).
+    case "$(pwd -P)/" in
+      "$(cd "$SELF_DIR/.." && pwd -P)/work/"*) ;;
+      *) emit_success; exit 0 ;;
+    esac
     # Escape test: edit the worktree AND the main checkout it was cut from
     # (what OpenCode 2.x did when its project dir came from a stale $PWD).
     main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)

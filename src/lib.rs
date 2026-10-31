@@ -47,6 +47,7 @@ pub mod retry;
 pub mod review;
 pub mod runner;
 pub mod scheduler;
+pub mod scratch;
 pub mod service;
 pub mod shadow;
 pub mod skill;

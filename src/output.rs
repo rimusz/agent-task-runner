@@ -329,6 +329,24 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
+/// Insert a "Dropped scratch files" note before the PR body footer.
+pub fn with_dropped_note(body: String, dropped: &[String]) -> String {
+    if dropped.is_empty() {
+        return body;
+    }
+    let mut note = String::from("\n## Dropped scratch files\natr removed these new files before committing (the task did not ask for them):\n");
+    for p in dropped.iter().take(30) {
+        note.push_str(&format!("- `{}`\n", p.replace('`', "")));
+    }
+    if dropped.len() > 30 {
+        note.push_str(&format!("- … and {} more\n", dropped.len() - 30));
+    }
+    match body.rfind("\n---\n") {
+        Some(i) => format!("{}{}{}", &body[..i], note, &body[i..]),
+        None => body + &note,
+    }
+}
+
 /// A non-empty PR description built from the task, the diff summary, and
 /// the model's own summary (sanitized).
 pub fn pr_body(task: &Task, brief: &str, diffstat: &str, model_text: &str) -> String {
@@ -484,6 +502,12 @@ fn open_pr(shared: &Shared, task: &Task, payload: &Value) -> Result<()> {
     let Some(wt) = task.worktree.as_deref().map(Path::new) else {
         return Ok(());
     };
+    if cfg.scratch.drop {
+        let dropped = crate::scratch::drop_for_task(&cfg, &shared.db, &task.key, &task.title, wt);
+        if !dropped.is_empty() {
+            tracing::info!(task = %task.key, "dropped scratch before commit: {}", dropped.join(", "));
+        }
+    }
     if let Err(e) = commit_pending(wt, task) {
         tracing::warn!(task = %task.key, "commit before PR: {e:#}");
     }
@@ -500,7 +524,8 @@ fn open_pr(shared: &Shared, task: &Task, payload: &Value) -> Result<()> {
     };
     let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
     let diffstat = git_out(wt, &["diff", "--stat", &format!("{base}...HEAD")]).unwrap_or_default();
-    let body = pr_body(task, &task_brief(shared, task), &diffstat, text);
+    let mut body = pr_body(task, &task_brief(shared, task), &diffstat, text);
+    body = with_dropped_note(body, &crate::scratch::recorded(wt));
     let gh = crate::shadow::resolve_github_cli(&cfg.github.cli)
         .unwrap_or_else(|_| PathBuf::from(&cfg.github.cli));
     let mut args: Vec<String> = vec![

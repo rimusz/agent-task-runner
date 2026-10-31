@@ -282,6 +282,7 @@ fn reset_pool_slot(dest: &Path, branch: &str, main: &str) -> Result<()> {
     // `.atr/` is git-excluded, so `clean -fd` keeps it: drop the previous
     // task's checklist so it never leaks into the next task's prompt.
     let _ = std::fs::remove_file(dest.join(crate::checklist::REL_PATH));
+    let _ = std::fs::remove_file(dest.join(crate::scratch::REL_PATH));
     Ok(())
 }
 

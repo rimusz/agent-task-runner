@@ -50,6 +50,8 @@ pub struct RawConfig {
     #[serde(default)]
     pub checklist: RawChecklist,
     #[serde(default)]
+    pub scratch: RawScratch,
+    #[serde(default)]
     pub lessons: RawLessons,
     #[serde(default)]
     pub log: RawLog,
@@ -663,6 +665,7 @@ pub struct Config {
     pub shadow: ShadowConfig,
     pub verify: VerifyConfig,
     pub checklist: ChecklistConfig,
+    pub scratch: ScratchConfig,
     pub lessons: LessonsConfig,
     pub log: LogConfig,
     pub gc: GcConfig,
@@ -1536,6 +1539,26 @@ pub struct VerifyRepo {
     pub enabled: bool,
     pub commands: Vec<String>,
     pub test_globs: Vec<String>,
+}
+
+/// `[scratch]`: drop new untracked scratch files (root-level files and
+/// `debug*`/`run_test*`/`verify_*`-style names the task never named) from a
+/// worktree before atr verifies or commits it. On by default.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawScratch {
+    #[serde(default = "default_true")]
+    pub drop: bool,
+}
+
+impl Default for RawScratch {
+    fn default() -> Self {
+        Self { drop: true }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScratchConfig {
+    pub drop: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2529,6 +2552,9 @@ impl Config {
             checklist: ChecklistConfig {
                 enabled: raw.checklist.enabled,
                 max_bytes: raw.checklist.max_bytes.max(256),
+            },
+            scratch: ScratchConfig {
+                drop: raw.scratch.drop,
             },
             lessons: LessonsConfig {
                 enabled: raw.lessons.enabled,
