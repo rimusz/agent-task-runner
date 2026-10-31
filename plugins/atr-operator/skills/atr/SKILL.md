@@ -132,6 +132,8 @@ Vendor coding CLIs (Kimi Code, Qwen Code, ZCode, MiMo Code, …) are interactive
 | Cursor CLI | `atr providers add cursor --kind cursor` |
 | Codex | `atr providers add codex --kind codex` |
 
+Codex gets atr's instructions as `-c model_instructions_file=<worktree>/.atr/system.md`, which replaces Codex's built-in base prompt (codex-cli 0.166 checked; the old `instructions_file` key is ignored by codex). An operator `--override 'model_instructions_file="…"'` wins. If Codex ignores atr's rules (commits or pushes itself, wrong answer format), check `codex --version` and the run's argv.
+
 ### Chinese providers (via OpenCode)
 
 | Name | Sign-in / key | Example model | Shortcut |

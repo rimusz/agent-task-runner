@@ -197,6 +197,17 @@ pub fn apply_dir_confinement(p: &Provider, spec: &mut CommandSpec, dir: &Path) {
     }
 }
 
+/// codex-cli config key that replaces the model's base instructions.
+pub const CODEX_INSTRUCTIONS_KEY: &str = "model_instructions_file";
+
+/// True when a `-c` override already sets Codex's base instructions.
+fn codex_overrides_instructions(overrides: &[String]) -> bool {
+    overrides.iter().any(|ov| {
+        ov.split_once('=')
+            .is_some_and(|(k, _)| k.trim() == CODEX_INSTRUCTIONS_KEY)
+    })
+}
+
 fn build_codex(
     p: &Provider,
     worktree: &Path,
@@ -244,9 +255,16 @@ fn build_codex(
         args.push("-c".into());
         args.push(ov.clone());
     }
+    // `model_instructions_file` replaces Codex's built-in base prompt with
+    // atr's stable prefix (codex-cli renamed `experimental_instructions_file`
+    // to this in openai/codex#9555 and dropped the old name in #22724; the
+    // older `instructions_file` was never read and is silently ignored).
+    // An operator's own `model_instructions_file` override wins.
     if let Some(sys) = system_prompt {
-        args.push("-c".into());
-        args.push(format!("instructions_file=\"{}\"", sys.display()));
+        if !codex_overrides_instructions(&p.config_overrides) {
+            args.push("-c".into());
+            args.push(format!("{CODEX_INSTRUCTIONS_KEY}=\"{}\"", sys.display()));
+        }
     }
     let _ = prompt_path;
     CommandSpec {
@@ -1952,7 +1970,7 @@ pub(crate) mod tests {
         assert!(
             x.args
                 .iter()
-                .any(|a| a.contains("instructions_file=") && a.contains("system.md")),
+                .any(|a| a.starts_with("model_instructions_file=") && a.contains("system.md")),
             "{:?}",
             x.args
         );
@@ -1972,6 +1990,66 @@ pub(crate) mod tests {
             .args
             .iter()
             .any(|a| a.contains("append-system-prompt") || a == "--rules"));
+    }
+
+    #[test]
+    fn codex_base_prompt_is_replaced_via_model_instructions_file() {
+        let sys = Path::new("/wt/.atr/system.md");
+        let mut cx = stub("codex");
+        cx.kind = "codex".into();
+        let x = build_command_opts(
+            &cx,
+            Path::new("/wt"),
+            Path::new("/wt/.atr/prompt.md"),
+            "var",
+            None,
+            true,
+            None,
+            Some(sys),
+        );
+        // `-c model_instructions_file="…"` as one pair; never the ignored
+        // legacy `instructions_file` key.
+        let at = x
+            .args
+            .iter()
+            .position(|a| a == "model_instructions_file=\"/wt/.atr/system.md\"")
+            .unwrap_or_else(|| panic!("{:?}", x.args));
+        assert_eq!(x.args[at - 1], "-c");
+        assert!(!x.args.iter().any(|a| a.starts_with("instructions_file=")));
+
+        // No system file (resume delta): no key; codex keeps the base
+        // instructions stored in the session.
+        let r = build_command_opts(
+            &cx,
+            Path::new("/wt"),
+            Path::new("/wt/.atr/prompt.md"),
+            "delta",
+            Some("sid"),
+            false,
+            None,
+            None,
+        );
+        assert!(!r.args.iter().any(|a| a.contains("instructions_file")));
+
+        // An operator override wins; atr does not add a second one.
+        cx.config_overrides = vec!["model_instructions_file = \"/mine.md\"".into()];
+        let o = build_command_opts(
+            &cx,
+            Path::new("/wt"),
+            Path::new("/wt/.atr/prompt.md"),
+            "var",
+            None,
+            true,
+            None,
+            Some(sys),
+        );
+        let n = o
+            .args
+            .iter()
+            .filter(|a| a.contains("model_instructions_file"))
+            .count();
+        assert_eq!(n, 1, "{:?}", o.args);
+        assert!(!o.args.iter().any(|a| a.contains("system.md")));
     }
 
     #[test]

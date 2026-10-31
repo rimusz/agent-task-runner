@@ -229,7 +229,8 @@ Grok/Cursor cache server-side; OpenCode/Ollama via a stable prefix +
    (`{worktree}/.atr/system.md`, never argv/`ps`):
    - Claude: `--append-system-prompt-file`
    - Grok: `--rules` (override with `system_prompt_flag`)
-   - Codex: `-c instructions_file="…"`
+   - Codex: `-c model_instructions_file="…"` (replaces Codex's built-in base
+     prompt; an operator `model_instructions_file` override wins)
    - OpenCode: first `--file` (OpenCode 2.x has no `--system`)
    - Cursor: no slot; prefix stays in the prompt file
    - **Stable, hashed, must be byte-identical for every task on a provider:**

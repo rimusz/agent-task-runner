@@ -63,6 +63,20 @@ Per provider: `cache_window` (Claude default `5m`, others `60m`),
 `system_prompt_flag`, `keep_alive` (Ollama default `24h`). See
 [HOW-IT-WORKS.md](HOW-IT-WORKS.md#token-caching).
 
+**Codex instructions.** For `kind = "codex"` providers atr passes its stable
+prefix (system prompt, repo `AGENTS.md`, provider contract) as
+`-c model_instructions_file="<worktree>/.atr/system.md"`. This **replaces**
+Codex's built-in base prompt, so Codex follows atr's rules (atr owns commits,
+pushes and PRs; answer format; shadow limits). Needs a codex-cli that reads
+`model_instructions_file` (renamed from `experimental_instructions_file` in
+early 2026; checked on codex-cli 0.166). The key is sent on the first run of a
+session; Codex stores the instructions in the session, so resumed turns keep
+them. To use your own file instead, set it as a provider override
+(`atr providers add codex --kind codex --override
+'model_instructions_file="/path/to/file.md"'`); atr then doesn't add its own.
+atr v0.1.35 and earlier sent `instructions_file`, which codex-cli ignores, so
+Codex ran on its own base prompt without atr's instructions.
+
 OpenCode providers only: `allow_shell` (default `false`). When false, atr
 denies the model's `shell`/`execute` tools (plus `subagent`, `question`,
 `webfetch`, `websearch`, `external_directory`, and `skill`, so a worker never

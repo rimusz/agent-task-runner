@@ -164,6 +164,8 @@ Any other `/…` line (for example `/compact`) goes to the provider as a turn. P
 
 Claude Code, Grok Build, Cursor, Codex and OpenCode. OpenCode also opens the door to DeepSeek, Kimi, Qwen, local Ollama, self-hosted vLLM and more. See [docs/USAGE.md](docs/USAGE.md#providers-and-opencode).
 
+Each CLI gets atr's instructions in its own system-prompt slot. For Codex that is `-c model_instructions_file`, which replaces Codex's built-in base prompt with atr's (details in [docs/CONFIG.md](docs/CONFIG.md#cache)).
+
 ### Local models (OpenCode 2.x + Ollama)
 
 atr can run worker tasks on a model on your own machine through OpenCode and Ollama. Tested setup: OpenCode 2.0.28, Ollama with `qwen3-coder:30b` (30B-A3B, 32k context), Apple M4 Pro with 48 GB.
