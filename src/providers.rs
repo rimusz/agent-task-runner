@@ -330,13 +330,15 @@ fn build_opencode(
 /// Tools atr denies on every OpenCode worker run. OpenCode 2.x names its
 /// permission actions `shell` (was `bash`), `execute` (Code Mode scripts),
 /// `subagent` (was `task`), `question`, `webfetch`, `websearch`, and
-/// `external_directory`; 1.x uses a `permission` map with `bash`,
-/// `webfetch`, and `external_directory`.
+/// `external_directory`, and `skill`; 1.x uses a `permission` map with
+/// `bash`, `webfetch`, `external_directory`, and `skill`.
 ///
 /// Why: the model must never run shell commands (atr commits, pushes, opens
 /// PRs, and posts comments itself through argv/stdin, never a shell string),
 /// and must never touch files outside its worktree (the main checkout is
-/// read-only to it). `allow_shell = true` on the provider keeps `shell`.
+/// read-only to it). `skill` is denied because a worker loading skills
+/// (e.g. the atr operator skill) gets instructions to run commands it cannot
+/// run. `allow_shell = true` on the provider keeps `shell`.
 pub const OPENCODE_V2_DENY: &[&str] = &[
     "shell",
     "execute",
@@ -345,6 +347,7 @@ pub const OPENCODE_V2_DENY: &[&str] = &[
     "webfetch",
     "websearch",
     "external_directory",
+    "skill",
 ];
 
 /// JSON for `OPENCODE_CONFIG_CONTENT`, which OpenCode loads last (it wins
@@ -391,6 +394,7 @@ pub fn opencode_config_content(
         }
         map.insert("webfetch".into(), Value::from("deny"));
         map.insert("external_directory".into(), Value::from("deny"));
+        map.insert("skill".into(), Value::from("deny"));
         obj.insert("permission".into(), Value::Object(map));
     }
     root.to_string()
@@ -1422,12 +1426,19 @@ pub(crate) mod tests {
             .filter(|r| r["effect"] == "deny")
             .map(|r| r["action"].as_str().unwrap())
             .collect();
-        for a in ["shell", "execute", "external_directory", "subagent"] {
+        for a in [
+            "shell",
+            "execute",
+            "external_directory",
+            "subagent",
+            "skill",
+        ] {
             assert!(denied.contains(&a), "{a} not denied: {v}");
         }
         // Unknown version (missing binary): the 1.x map is written too.
         assert_eq!(j["permission"]["bash"], "deny", "{v}");
         assert_eq!(j["permission"]["external_directory"], "deny", "{v}");
+        assert_eq!(j["permission"]["skill"], "deny", "{v}");
         // Other CLIs get no extra env.
         let c = build_command(
             &stub("claude"),

@@ -1309,11 +1309,12 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     shared.db.finish_turn(turn_id, &result.outcome)?;
 
     // Drop scratch files the agent left (test_*.py, run_tests.py, verify_*.md
-    // at the root, …) before the no-op check, verify, and commit, so they
+    // at the root, …) and restore tracked docs it rewrote unasked (README.md
+    // in sandbox PR #32) before the no-op check, verify, and commit, so they
     // never reach the PR or get collected by the verify command.
     // Only after a successful run: a stalled or failed run's files are what
     // the next provider's handoff describes. Shadow runs only measure.
-    if cfg.scratch.drop
+    if (cfg.scratch.drop || cfg.scratch.revert_docs)
         && result.outcome == "success"
         && ws_kind == crate::task::WorkspaceKind::Git
         && !assistant
@@ -1328,14 +1329,23 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             .flatten()
             .map(|t| t.title)
             .unwrap_or_else(|| task.title.clone());
-        let dropped = crate::scratch::drop_for_task(&cfg, &shared.db, &key, &title, &wt);
-        if !dropped.is_empty() {
+        let c = crate::scratch::clean_for_task(&cfg, &shared.db, &key, &title, &wt);
+        if !c.dropped.is_empty() {
             tracing::info!(
                 task = %key,
                 run = run_id,
                 "dropped {} scratch file(s) the task did not ask for: {}",
-                dropped.len(),
-                dropped.join(", ")
+                c.dropped.len(),
+                c.dropped.join(", ")
+            );
+        }
+        if !c.reverted.is_empty() {
+            tracing::info!(
+                task = %key,
+                run = run_id,
+                "reverted {} tracked docs file(s) the task did not ask for: {}",
+                c.reverted.len(),
+                c.reverted.join(", ")
             );
         }
     }
@@ -1496,7 +1506,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                     .get_task(&key)?
                     .map(|t| t.verify_retries)
                     .unwrap_or(0);
-                if retry && used < i64::from(cfg.verify.max_retries) {
+                if retry && used < i64::from(cfg.verify.retries_for(&provider)) {
                     shared.db.set_verify_retries(&key, used + 1)?;
                     let body = v.failure_followup(cfg.verify.max_output_bytes);
                     shared.db.enqueue_message(&key, &body, "verify")?;

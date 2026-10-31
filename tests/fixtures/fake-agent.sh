@@ -423,6 +423,18 @@ PY
     emit_success
     exit 0
     ;;
+  edit_docs_unasked)
+    # Only inside the harness worktree (side calls run from the test cwd).
+    case "$(pwd -P)/" in
+      "$(cd "$SELF_DIR/.." && pwd -P)/work/"*) ;;
+      *) emit_success; exit 0 ;;
+    esac
+    # Sandbox PR #32's shape: the real fix plus a rewritten README.
+    printf 'def slugify(s):\n    return s.strip("-")\n' > textkit/slug.py
+    printf '# atr-local-sandbox\n' > README.md
+    emit_success
+    exit 0
+    ;;
   edit_main)
     # Only inside the harness worktree (side calls run from the test cwd).
     case "$(pwd -P)/" in

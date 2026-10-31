@@ -942,6 +942,12 @@ pub struct Provider {
 }
 
 impl Provider {
+    /// False for a provider whose shell atr denies (OpenCode without
+    /// `allow_shell`): the model cannot run tests or commands itself.
+    pub fn has_shell(&self) -> bool {
+        !(self.kind == "opencode" && !self.allow_shell)
+    }
+
     pub fn is_ollama(&self) -> bool {
         is_ollama_model(&self.preset, &self.model)
     }
@@ -1319,6 +1325,9 @@ fn default_verify_timeout() -> String {
 fn default_verify_retries() -> u32 {
     1
 }
+fn default_no_shell_extra_retries() -> u32 {
+    1
+}
 fn default_verify_output() -> usize {
     4000
 }
@@ -1472,6 +1481,11 @@ pub struct RawVerify {
     pub timeout: String,
     #[serde(default = "default_verify_retries")]
     pub max_retries: u32,
+    /// Extra verify follow-ups for a provider with no shell (OpenCode with
+    /// `allow_shell = false`): it cannot run the tests itself, so the verify
+    /// follow-up is its only test loop.
+    #[serde(default = "default_no_shell_extra_retries")]
+    pub no_shell_extra_retries: u32,
     #[serde(default)]
     pub commands: Vec<String>,
     #[serde(default = "default_verify_output")]
@@ -1496,6 +1510,7 @@ impl Default for RawVerify {
             enabled: false,
             timeout: default_verify_timeout(),
             max_retries: default_verify_retries(),
+            no_shell_extra_retries: default_no_shell_extra_retries(),
             commands: Vec::new(),
             max_output_bytes: default_verify_output(),
             only_listed_repos: true,
@@ -1524,6 +1539,7 @@ pub struct VerifyConfig {
     pub enabled: bool,
     pub timeout: Duration,
     pub max_retries: u32,
+    pub no_shell_extra_retries: u32,
     pub commands: Vec<String>,
     pub max_output_bytes: usize,
     pub only_listed_repos: bool,
@@ -1531,6 +1547,18 @@ pub struct VerifyConfig {
     pub protect_tests_skip_label: String,
     pub test_globs: Vec<String>,
     pub repos: Vec<VerifyRepo>,
+}
+
+impl VerifyConfig {
+    /// Verify follow-ups allowed for a task on `p`: `max_retries`, plus
+    /// `no_shell_extra_retries` when the provider has no shell.
+    pub fn retries_for(&self, p: &Provider) -> u32 {
+        if p.has_shell() {
+            self.max_retries
+        } else {
+            self.max_retries.saturating_add(self.no_shell_extra_retries)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1543,22 +1571,30 @@ pub struct VerifyRepo {
 
 /// `[scratch]`: drop new untracked scratch files (root-level files and
 /// `debug*`/`run_test*`/`verify_*`-style names the task never named) from a
-/// worktree before atr verifies or commits it. On by default.
+/// worktree before atr verifies or commits it, and restore tracked docs
+/// files (README, CHANGELOG, `*.md`, `docs/`) the task never asked about.
+/// Both on by default.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawScratch {
     #[serde(default = "default_true")]
     pub drop: bool,
+    #[serde(default = "default_true")]
+    pub revert_docs: bool,
 }
 
 impl Default for RawScratch {
     fn default() -> Self {
-        Self { drop: true }
+        Self {
+            drop: true,
+            revert_docs: true,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ScratchConfig {
     pub drop: bool,
+    pub revert_docs: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2523,6 +2559,7 @@ impl Config {
                 enabled: raw.verify.enabled,
                 timeout: parse_duration(&raw.verify.timeout)?,
                 max_retries: raw.verify.max_retries,
+                no_shell_extra_retries: raw.verify.no_shell_extra_retries,
                 commands: raw.verify.commands,
                 max_output_bytes: raw.verify.max_output_bytes.max(256),
                 only_listed_repos: raw.verify.only_listed_repos,
@@ -2555,6 +2592,7 @@ impl Config {
             },
             scratch: ScratchConfig {
                 drop: raw.scratch.drop,
+                revert_docs: raw.scratch.revert_docs,
             },
             lessons: LessonsConfig {
                 enabled: raw.lessons.enabled,
@@ -3030,6 +3068,32 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_shell_providers_get_one_more_verify_retry() {
+        const P: &str = "[[provider]]\nname = \"claude\"\nkind = \"claude\"\ncli = \"/bin/true\"\n";
+        let v = parse_config_toml(P).unwrap().verify;
+        assert_eq!((v.max_retries, v.no_shell_extra_retries), (1, 1));
+        let mut oc = Provider::test_stub("opencode");
+        assert!(!oc.has_shell());
+        assert_eq!(v.retries_for(&oc), 2);
+        oc.allow_shell = true;
+        assert!(oc.has_shell());
+        assert_eq!(v.retries_for(&oc), 1);
+        assert_eq!(v.retries_for(&Provider::test_stub("claude")), 1);
+        let v = parse_config_toml(&format!(
+            "[verify]\nmax_retries = 3\nno_shell_extra_retries = 0\n{P}"
+        ))
+        .unwrap()
+        .verify;
+        assert_eq!(v.retries_for(&Provider::test_stub("opencode")), 3);
+        let s = parse_config_toml(P).unwrap().scratch;
+        assert!(s.drop && s.revert_docs);
+        let s = parse_config_toml(&format!("[scratch]\nrevert_docs = false\n{P}"))
+            .unwrap()
+            .scratch;
+        assert!(s.drop && !s.revert_docs);
+    }
 
     #[test]
     fn example_config_parses() {

@@ -331,15 +331,34 @@ fn clip(s: &str, max: usize) -> String {
 
 /// Insert a "Dropped scratch files" note before the PR body footer.
 pub fn with_dropped_note(body: String, dropped: &[String]) -> String {
-    if dropped.is_empty() {
+    note_before_footer(
+        body,
+        "Dropped scratch files",
+        "atr removed these new files before committing (the task did not ask for them):",
+        dropped,
+    )
+}
+
+/// Insert a "Reverted unrequested edits" note before the PR body footer.
+pub fn with_reverted_note(body: String, reverted: &[String]) -> String {
+    note_before_footer(
+        body,
+        "Reverted unrequested edits",
+        "atr restored these tracked files to the base version (the task did not ask for docs changes):",
+        reverted,
+    )
+}
+
+fn note_before_footer(body: String, heading: &str, intro: &str, paths: &[String]) -> String {
+    if paths.is_empty() {
         return body;
     }
-    let mut note = String::from("\n## Dropped scratch files\natr removed these new files before committing (the task did not ask for them):\n");
-    for p in dropped.iter().take(30) {
+    let mut note = format!("\n## {heading}\n{intro}\n");
+    for p in paths.iter().take(30) {
         note.push_str(&format!("- `{}`\n", p.replace('`', "")));
     }
-    if dropped.len() > 30 {
-        note.push_str(&format!("- … and {} more\n", dropped.len() - 30));
+    if paths.len() > 30 {
+        note.push_str(&format!("- … and {} more\n", paths.len() - 30));
     }
     match body.rfind("\n---\n") {
         Some(i) => format!("{}{}{}", &body[..i], note, &body[i..]),
@@ -502,11 +521,12 @@ fn open_pr(shared: &Shared, task: &Task, payload: &Value) -> Result<()> {
     let Some(wt) = task.worktree.as_deref().map(Path::new) else {
         return Ok(());
     };
-    if cfg.scratch.drop {
-        let dropped = crate::scratch::drop_for_task(&cfg, &shared.db, &task.key, &task.title, wt);
-        if !dropped.is_empty() {
-            tracing::info!(task = %task.key, "dropped scratch before commit: {}", dropped.join(", "));
-        }
+    let c = crate::scratch::clean_for_task(&cfg, &shared.db, &task.key, &task.title, wt);
+    if !c.dropped.is_empty() {
+        tracing::info!(task = %task.key, "dropped scratch before commit: {}", c.dropped.join(", "));
+    }
+    if !c.reverted.is_empty() {
+        tracing::info!(task = %task.key, "reverted tracked docs before commit: {}", c.reverted.join(", "));
     }
     if let Err(e) = commit_pending(wt, task) {
         tracing::warn!(task = %task.key, "commit before PR: {e:#}");
@@ -526,6 +546,7 @@ fn open_pr(shared: &Shared, task: &Task, payload: &Value) -> Result<()> {
     let diffstat = git_out(wt, &["diff", "--stat", &format!("{base}...HEAD")]).unwrap_or_default();
     let mut body = pr_body(task, &task_brief(shared, task), &diffstat, text);
     body = with_dropped_note(body, &crate::scratch::recorded(wt));
+    body = with_reverted_note(body, &crate::scratch::recorded_reverts(wt));
     let gh = crate::shadow::resolve_github_cli(&cfg.github.cli)
         .unwrap_or_else(|_| PathBuf::from(&cfg.github.cli));
     let mut args: Vec<String> = vec![

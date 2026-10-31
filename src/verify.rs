@@ -163,6 +163,11 @@ pub async fn run(
     if task.workspace_kind == "none" {
         return Ok(VerifyRun::default());
     }
+    // Triage is suggest-only: its deliverable is a label suggestion, never
+    // the worktree, so repo checks would only push the model into editing.
+    if task.output_kind == "triage" {
+        return Ok(VerifyRun::default());
+    }
     // A plain-folder task only matches `[[verify.repo]]` by its own folder,
     // never by the fallback repo it was filed under.
     let repo = workspace_repo(task, repo, worktree);
@@ -774,6 +779,33 @@ cli = "/bin/true"
     }
 
     #[tokio::test]
+    async fn triage_task_skips_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("atr-scratch");
+        std::fs::create_dir_all(&repo).unwrap();
+        let script = repo.join("verify.sh");
+        std::fs::write(&script, "#!/bin/sh\necho checks-ran\nexit 1\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cfg = scratch_cfg(dir.path(), &repo);
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        let mut task = ws_task("git");
+        // A pr task in this repo would run ./verify.sh (which fails) ...
+        assert_eq!(
+            commands_for(&cfg, workspace_repo(&task, &repo, &repo), &repo),
+            vec!["./verify.sh".to_string()]
+        );
+        // ... but triage is suggest-only: the same failing checks never run.
+        task.output_kind = "triage".into();
+        let v = run(&cfg, &db, "scratch-x", &repo, &repo, 1, &task)
+            .await
+            .unwrap();
+        assert!(v.skipped && v.passed && v.checks.is_empty(), "{v:?}");
+    }
+
+    #[tokio::test]
     async fn dir_task_matches_verify_repo_by_its_own_folder_only() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("atr-scratch");
@@ -825,6 +857,7 @@ cli = "/bin/true"
             enabled: true,
             timeout: Duration::from_secs(1),
             max_retries: 1,
+            no_shell_extra_retries: 1,
             commands: Vec::new(),
             max_output_bytes: 256,
             only_listed_repos: true,

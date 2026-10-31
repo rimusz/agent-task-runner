@@ -65,7 +65,8 @@ Per provider: `cache_window` (Claude default `5m`, others `60m`),
 
 OpenCode providers only: `allow_shell` (default `false`). When false, atr
 denies the model's `shell`/`execute` tools (plus `subagent`, `question`,
-`webfetch`, `websearch`, `external_directory`) through
+`webfetch`, `websearch`, `external_directory`, and `skill`, so a worker never
+loads skills that tell it to run commands it can't run) through
 `OPENCODE_CONFIG_CONTENT`, and atr does every commit, push, PR and comment
 itself. `allow_shell = true` keeps the shell for a trusted model; leaving the
 worktree stays denied.
@@ -74,7 +75,8 @@ worktree stays denied.
 
 ```toml
 [scratch]
-drop = true   # default
+drop = true          # default
+revert_docs = true   # default
 ```
 
 After a successful run in a git worktree (and again right before atr commits
@@ -88,6 +90,33 @@ Dropped paths are logged, kept in `.atr/dropped-scratch.txt`, and listed in the
 PR body under "Dropped scratch files". This runs before verify, so a stray root
 `test_*.py` can't be collected by pytest. Shadow runs are not pruned. Set
 `drop = false` to keep everything the agent wrote.
+
+`revert_docs` covers edits to **tracked** files, conservatively. A modified or
+deleted tracked docs file (`README*`, `CHANGELOG*`, `CHANGES*`, `HISTORY*`,
+`CONTRIBUTING*`, `LICENSE*`, `NOTICE*`, `AUTHORS*`, any `*.md`/`*.rst`/`*.adoc`,
+anything under `docs/` or `doc/`) is restored from `HEAD` when the task never
+names it and never mentions docs at all (README, docs, documentation,
+changelog, …), and only if the run changed something else too, so a docs-only
+task is never emptied. Code, tests and config files are never reverted, so a
+legitimate fix is never broken. Restored paths are logged, kept in
+`.atr/reverted-tracked.txt`, and listed in the PR body under "Reverted
+unrequested edits", next to "Dropped scratch files". (Seen in practice: an
+issue about `slugify` came back with `README.md` rewritten.)
+
+### Verify retries
+
+```toml
+[verify]
+max_retries = 1              # default: follow-ups after a failed check
+no_shell_extra_retries = 1   # default: extra follow-ups for a no-shell provider
+```
+
+A provider with no shell (OpenCode with `allow_shell = false`) can't run the
+tests itself, so atr's verify follow-up is its only test loop. It gets
+`max_retries + no_shell_extra_retries` follow-ups (2 by default); every other
+provider gets `max_retries`. Set `no_shell_extra_retries = 0` for the same
+budget everywhere. Triage tasks never run verify: they are suggest-only and the
+worktree is not their deliverable.
 
 ### MCP
 

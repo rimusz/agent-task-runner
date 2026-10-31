@@ -364,7 +364,9 @@ when missing.
 
 **Verify before done** (`[verify]`): after success, run configured (or
 optionally detected) checks in the worktree; one same-session follow-up on
-failure (`max_retries`, default 1); otherwise `needs_attention`.
+failure (`max_retries`, default 1; a no-shell provider gets
+`no_shell_extra_retries` more, default 1); otherwise `needs_attention`.
+Triage tasks skip verify (suggest-only).
 `[verify] protect_tests` restores base test files before checks.
 Opt-out: `atr:tests-ok` or `--tests-ok`. `[checklist]` keeps
 `.atr/checklist.md` in the variable prompt (prefix unchanged).

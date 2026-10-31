@@ -283,6 +283,7 @@ fn reset_pool_slot(dest: &Path, branch: &str, main: &str) -> Result<()> {
     // task's checklist so it never leaks into the next task's prompt.
     let _ = std::fs::remove_file(dest.join(crate::checklist::REL_PATH));
     let _ = std::fs::remove_file(dest.join(crate::scratch::REL_PATH));
+    let _ = std::fs::remove_file(dest.join(crate::scratch::REVERTED_REL_PATH));
     Ok(())
 }
 
