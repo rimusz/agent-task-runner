@@ -291,7 +291,7 @@ impl Shared {
         self.db.clear_retry(key)?;
         // Fresh session for a provider without a shell: a resumed local-model
         // session tends to say "already done" and stop. Providers with a shell
-        // resume their session as before 0.1.35. The worktree is kept.
+        // resume their session as in v0.1.34. The worktree is kept.
         let no_shell = self
             .config
             .read()

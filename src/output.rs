@@ -649,7 +649,7 @@ fn issue_comment(shared: &Shared, task: &Task, payload: &Value) -> Result<()> {
         .filter(|g| !g.is_empty());
     // Sanitized text on stdin (`--body-file -`); never a shell string.
     // GitHub's limit, not the 4,000-char triage cap: an answer comment is
-    // posted whole, as before 0.1.35.
+    // posted whole, as in v0.1.34.
     if let Err(e) = crate::triage::post_comment_max(
         &gh,
         repo.as_deref(),

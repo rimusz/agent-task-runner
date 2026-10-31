@@ -22,7 +22,7 @@ pub const DEFAULT_LABELS: &[&str] = &["bug", "duplicate", "needs-info", "already
 pub const MAX_COMMENT_CHARS: usize = 4000;
 
 /// Cap for a task's `issue_comment` output: GitHub's own comment limit is
-/// 65,536 characters; atr keeps a small margin. Before 0.1.35 the body was
+/// 65,536 characters; atr keeps a small margin. In v0.1.34 the body was
 /// posted whole, so only the suggest-only triage comment uses the 4,000 cap.
 pub const GITHUB_COMMENT_MAX_CHARS: usize = 65_000;
 

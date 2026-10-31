@@ -77,7 +77,7 @@ atr add "fix the README typo" --repo ~/src/my-repo --output pr   # git worktree,
 atr add "deploy" --after build,test                     # wait until those keys succeed
 ```
 
-**MCP.** Run `atr mcp` as an MCP server in your agent. `add_task` needs `body` (`title` is optional and defaults to the first prompt line). With neither `dir` nor `repo`, workspace is `none`, matching CLI and HTTP. Optional `dir`, `repo`, `workspace`, `output`, `provider`, `after` (task keys that must succeed first). Optional `idempotency_key`: a retry with the same key and the same request returns the existing task (`replayed: true`); the same key with a different body, workspace, output, or files is a conflict. Optional `files`: `[{name, content_base64}]` or `[{name, text}]` — each file is written into the task worktree under that filename when the worktree is ready. Returns a task key. `wait_task` waits for that key to finish (`timeout_seconds`, default 120, max 3600). `get_result` returns the answer text, diff, and PR URL.
+**MCP.** Run `atr mcp` as an MCP server in your agent. `add_task` needs `body` (`title` is optional and defaults to the first prompt line). With neither `dir` nor `repo`, workspace is `none`, matching CLI and HTTP. Optional `dir`, `repo`, `workspace`, `output`, `issue` (GitHub issue number, needed for `output: issue_comment`), `provider`, `after` (task keys that must succeed first). Optional `idempotency_key`: a retry with the same key and the same request returns the existing task (`replayed: true`); the same key with a different body, workspace, output, or files is a conflict. Optional `files`: `[{name, content_base64}]` or `[{name, text}]` — each file is written into the task worktree under that filename when the worktree is ready. Returns a task key. `wait_task` waits for that key to finish (`timeout_seconds`, default 120, max 3600). `get_result` returns the answer text, diff, and PR URL.
 
 **HTTP.** While atr is running, POST JSON to the local API (default `127.0.0.1:7420`). It returns the new task `key`; read the result from `GET /tasks/{key}/result`. Writes need `Authorization: Bearer` (same token as `/mcp`). Optional header `Idempotency-Key` (JSON field `idempotency_key` is a fallback): a retry with the same key and the same request returns the existing task (`replayed: true`); the same key with a different body, workspace, output, or files is HTTP 409. Optional `files` (alias `attachments`): `[{name, content_base64}]` or `[{name, text}]` — each file lands in the worktree under that filename when the worktree is ready.
 
@@ -300,6 +300,20 @@ More, including self-hosted vLLM: [HOW-IT-WORKS.md](HOW-IT-WORKS.md#providers).
 
 **No shell for OpenCode models.** Every OpenCode run gets `OPENCODE_CONFIG_CONTENT` (loaded last, so it wins over your own `opencode.json`) that denies `shell`, `execute`, `subagent`, `question`, `webfetch`, `websearch`, `external_directory` and `skill` (2.x `permissions`; 1.x gets the `permission` map with `bash`/`webfetch`/`external_directory`/`skill` denied; unknown versions get both). Because the model can't run tests, a no-shell provider gets one extra verify follow-up (`[verify] no_shell_extra_retries`, default 1). The model only reads and edits files inside its worktree; atr commits, pushes, opens PRs and posts comments itself through `gh` argv/stdin, never a shell string. The prompt's `Repo:` line shows `owner/name (read-only reference…)`, not the main checkout path. Set `allow_shell = true` on a `[[provider]]` to give a trusted model its shell back (outside-worktree access stays denied). OpenCode 2.x is supported (no `--dir`; standing instructions go in as an extra `--file`).
 
+Only no-shell providers get the extra guards: `[scratch]` cleanup of new scratch files and unrequested docs edits (`scope = "no_shell"`; `"all"` for every provider), a main-checkout guard that withholds the result (other providers only log a warning), and a fresh session on `atr retry` (other providers resume theirs). See [CONFIG.md](CONFIG.md#guards-no-shell-providers-vs-every-provider).
+
+**Running a local model safely (checklist).**
+
+1. Use OpenCode 2.x and a local server bound to `127.0.0.1` (Ollama `http://127.0.0.1:11434/v1`). Don't expose it on the LAN.
+2. `atr providers add ollama --model ollama/qwen3-coder:30b --url http://127.0.0.1:11434/v1`, then `atr doctor`.
+3. Leave `allow_shell` unset. The deny list (`shell`, `execute`, `subagent`, `question`, `webfetch`, `websearch`, `external_directory`, `skill`) is injected on every run, so you don't need to copy it into `opencode.json`. A matching `permissions` deny list there is fine as a second layer.
+4. Set `[[verify.repo]]` commands for each repo. Verify is the model's only test loop.
+5. Use `--output pr` or `branch` for fixes, and `atr triage run` for labels and comments. Triage is suggest-only and posts nothing until `atr triage approve`.
+6. Keep `[scratch]` at its defaults, and review the PR's "Dropped scratch files" and "Reverted unrequested edits" notes.
+7. Keep secrets out of the model's reach. A normal (non-shadow) run inherits `atr serve`'s environment. Only shadow runs strip `GH_TOKEN`/`GITHUB_TOKEN`. With the shell and `external_directory` denied, the model can only read files inside its worktree. Still, never put tokens in the repo or in task text. atr itself does every GitHub write.
+
+Tested on an Apple M4 Pro with 48 GB: 8 of 10 sandbox issues fixed, then 9 of 10 after the hardening. Misses failed verify and were not delivered. Triage label accuracy is still weak.
+
 ### Suggest-only triage
 
 ```bash
@@ -310,7 +324,7 @@ atr triage approve <id> [--label L] [--comment "…"] [--no-comment]
 atr triage reject <id>
 ```
 
-`atr triage run` fetches the issue, the other issues and recent commits itself (read-only `gh`/`git`) and asks for a JSON reply with one of the allowed labels (`--labels`, default `bug,duplicate,needs-info,already-fixed`). The suggestion is stored under the state directory (`triage/<id>.json`); **nothing is posted** until `atr triage approve`, which adds the label and posts the sanitized comment (ANSI, control characters and tool-call markup stripped, 4000-char cap) with `gh issue comment --body-file -`. Approve only works for a repo configured as `[[repo]]`.
+`atr triage run` fetches the issue, the other issues and recent commits itself (read-only `gh`/`git`) and asks for a JSON reply with one of the allowed labels (`--labels`, default `bug,duplicate,needs-info,already-fixed`). The suggestion is stored under the state directory (`triage/<id>.json`); **nothing is posted** until `atr triage approve`, which adds the label and posts the sanitized comment (ANSI, control characters and tool-call markup stripped, 4000-char cap) with `gh issue comment --body-file -`. A task's own `--output issue_comment` answer is sanitized the same way, but capped at GitHub's limit (65,000 characters). Approve only works for a repo configured as `[[repo]]`.
 
 ### Grok Build as the main provider
 

@@ -77,7 +77,15 @@ worktree stays denied.
 [scratch]
 drop = true          # default
 revert_docs = true   # default
+scope = "no_shell"   # default; "all" = every provider
 ```
+
+**Scope.** By default this cleanup only runs for providers without a shell
+(OpenCode without `allow_shell`, typically a local model). Claude, Codex,
+Cursor, Grok and OpenCode with `allow_shell = true` keep every file they
+create and every docs edit they make, as in v0.1.34. A frontier agent that
+adds a root `pyproject.toml` or updates the README alongside a feature is
+doing real work. Set `scope = "all"` to clean up after every provider.
 
 After a successful run in a git worktree (and again right before atr commits
 for a PR), atr deletes **new untracked** files the task never named (by path or
@@ -117,6 +125,35 @@ tests itself, so atr's verify follow-up is its only test loop. It gets
 provider gets `max_retries`. Set `no_shell_extra_retries = 0` for the same
 budget everywhere. Triage tasks never run verify: they are suggest-only and the
 worktree is not their deliverable.
+
+### Guards: no-shell providers vs. every provider
+
+Only for providers **without a shell** (OpenCode without `allow_shell`):
+
+- `[scratch]` cleanup (default `scope = "no_shell"`);
+- the **main-checkout guard**: if the main checkout's `git status` or `HEAD`
+  changes during the run, the result is withheld (`BLOCKED <key>: …`, outcome
+  `main_checkout_edit`, `needs_attention`). For a provider with a shell atr
+  only logs a warning, because a person or another tool may be editing that
+  checkout at the same time;
+- `atr retry` drops the stored session so the retry starts fresh. A provider
+  with a shell resumes its session, as in v0.1.34.
+
+For **every** provider (Git worktree tasks; never shadow or the Telegram
+assistant):
+
+- the agent runs with `PWD` set to its worktree, and the prompt's `Repo:` line
+  shows `owner/name (read-only reference…)` instead of the main checkout path;
+- `--output pr`: atr commits any uncommitted edits, pushes, and opens the PR
+  with `--base`/`--head` and a body it writes (Summary, Task, Changes, Agent
+  notes). An agent that already pushed or opened the PR itself is fine. A run
+  with no commits past the base branch opens no PR;
+- a run that changed nothing for a `pr`/`branch`/`patch` task, or returned no
+  text for an `issue_comment` task, is an honest **no-op**: `needs_attention`
+  with `NO-OP <key>: …`, never success;
+- `issue_comment` output is posted with `gh issue comment --body-file -`,
+  sanitized (ANSI, control characters and tool-call markup removed) and capped
+  at GitHub's limit (65,000 characters). Triage approvals keep a 4,000-character cap.
 
 ### MCP
 

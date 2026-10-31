@@ -3,7 +3,7 @@
 //! commit, keeps the real change, and names what it dropped in the PR body.
 //! By default (`[scratch] scope = "no_shell"`) only providers without a shell
 //! (OpenCode without `allow_shell`) are cleaned up; frontier agents keep their
-//! new files and docs edits as before 0.1.35.
+//! new files and docs edits as in v0.1.34.
 #[allow(dead_code)]
 mod common;
 

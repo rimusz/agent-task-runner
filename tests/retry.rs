@@ -193,7 +193,7 @@ async fn retried_compare_arm_keeps_its_strict_pin() {
 
 #[tokio::test]
 async fn retry_keeps_the_session_of_a_shell_provider() {
-    // As before 0.1.35: `atr retry` on a claude/grok/cursor/codex task resumes
+    // As in v0.1.34: `atr retry` on a claude/grok/cursor/codex task resumes
     // its session. Only no-shell (local-model) providers start fresh.
     let h = Harness::with_providers(&[("grok", true, "success")], "127.0.0.1:0").await;
     h.submit("demo-r9", "first attempt");

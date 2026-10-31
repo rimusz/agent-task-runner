@@ -91,7 +91,7 @@ async fn run_that_edits_the_main_checkout_is_blocked_not_delivered() {
 
 #[tokio::test]
 async fn shell_provider_main_checkout_change_only_warns() {
-    // A provider with a shell is trusted as before 0.1.35: a change in the
+    // A provider with a shell is trusted as in v0.1.34: a change in the
     // main checkout (maybe a human editing it) is logged, not a block.
     let h = Harness::with_providers(&[("grok", true, "edit_main")], "127.0.0.1:0").await;
     h.install_gh_stub();

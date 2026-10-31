@@ -1576,7 +1576,7 @@ pub struct VerifyRepo {
 /// Both on by default, but only for providers without a shell (OpenCode
 /// without `allow_shell`) unless `scope = "all"`: frontier agents that run
 /// their own tests keep the files they create (e.g. a new `pyproject.toml`)
-/// and the docs they update, as before 0.1.35.
+/// and the docs they update, as in v0.1.34.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawScratch {
     #[serde(default = "default_true")]

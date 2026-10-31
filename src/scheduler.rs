@@ -1374,7 +1374,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             None
         } else if provider.has_shell() {
             // Agents with a shell (claude, codex, cursor, grok, OpenCode with
-            // allow_shell) are trusted as before 0.1.35: a human or another
+            // allow_shell) are trusted as in v0.1.34: a human or another
             // tool may be editing the main checkout at the same time, so
             // only warn instead of withholding the result.
             tracing::warn!(
