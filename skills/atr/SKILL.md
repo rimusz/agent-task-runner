@@ -260,6 +260,7 @@ With lessons on, atr reflects after informative failures (verify failed, stalled
 | Queued with retry time | Transient provider error (overloaded / 429 / 5xx). Wait, or `atr retry <key>`. `[retry]` in CONFIG.md. |
 | Status `host: … waiting` | CPU load or free RAM past `[host]`. Wait or `atr config set host.enabled false`. |
 | Usage `not reported` | Expected for OpenCode, Cursor, Codex. |
+| Codex on macOS: "timed out negotiating with the code-mode host", every command times out, NO-OP | Not atr. The Homebrew cask's `codex-code-mode-host` still has `com.apple.quarantine` and hangs at launch (Gatekeeper), so Codex's 30 s handshake fails. Check `xattr -p com.apple.quarantine "$(dirname "$(readlink -f "$(command -v codex)")")/codex-code-mode-host"`; with the owner's OK, clear it on that file (`xattr -d com.apple.quarantine …`) and run the check again after every codex upgrade. |
 | Wanted a vendor CLI (`kimi`, `qwen`, …) | No kind. Drive the model through OpenCode. |
 
 ## Where files live
