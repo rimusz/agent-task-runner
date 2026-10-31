@@ -213,6 +213,18 @@ pub fn test_output_from_events(events: &[EventRow]) -> Option<String> {
 }
 
 fn assistant_text(value: &Value) -> Option<String> {
+    // Codex `exec --json`: `{"type":"item.completed","item":{"type":
+    // "agent_message","text":"…"}}` (errors are `item.type == "error"`).
+    if let Some(item) = value.get("item") {
+        if item.get("type").and_then(|v| v.as_str()) == Some("agent_message") {
+            if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                if !t.is_empty() {
+                    return Some(t.to_string());
+                }
+            }
+        }
+        return None;
+    }
     if let Some(arr) = value.pointer("/message/content").and_then(|v| v.as_array()) {
         let mut parts = Vec::new();
         for item in arr {
@@ -969,6 +981,30 @@ mod grok_stream_tests {
             kind: String::new(),
             raw: raw.to_string(),
         }
+    }
+
+    #[test]
+    fn codex_agent_message_is_the_answer() {
+        let events = vec![
+            ev(r#"{"type":"thread.started","thread_id":"t1"}"#),
+            ev(
+                r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Codex is ignoring 1 unrecognized configuration setting."}}"#,
+            ),
+            ev(
+                r#"{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"I'll check the repo first."}}"#,
+            ),
+            ev(
+                r#"{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"pytest -q","aggregated_output":"ok"}}"#,
+            ),
+            ev(
+                r#"{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Thanks for reporting this."}}"#,
+            ),
+            ev(r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}"#),
+        ];
+        assert_eq!(
+            last_assistant_text(&events).as_deref(),
+            Some("Thanks for reporting this.")
+        );
     }
 
     #[test]

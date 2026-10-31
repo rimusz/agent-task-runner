@@ -46,7 +46,7 @@ async fn pr_task_with_no_changes_is_a_noop_not_success() {
 
 #[tokio::test]
 async fn run_that_edits_the_main_checkout_is_blocked_not_delivered() {
-    let h = Harness::with_providers(&[("grok", true, "edit_main")], "127.0.0.1:0").await;
+    let h = Harness::with_providers(&[("opencode", true, "edit_main")], "127.0.0.1:0").await;
     h.install_gh_stub();
     let repo = h.repo.display().to_string();
     h.shared
@@ -87,4 +87,37 @@ async fn run_that_edits_the_main_checkout_is_blocked_not_delivered() {
         !h.fake_dir.join("gh-pr.log").exists(),
         "an escaped run must not open a PR"
     );
+}
+
+#[tokio::test]
+async fn shell_provider_main_checkout_change_only_warns() {
+    // A provider with a shell is trusted as in v0.1.34: a change in the
+    // main checkout (maybe a human editing it) is logged, not a block.
+    let h = Harness::with_providers(&[("grok", true, "edit_main")], "127.0.0.1:0").await;
+    h.install_gh_stub();
+    let repo = h.repo.display().to_string();
+    h.shared
+        .submit_with(
+            "demo-m2",
+            "# Fix the readme\n\nadd a line",
+            "test",
+            Some(&repo),
+            None,
+            false,
+            false,
+            atr::SubmitOpts {
+                workspace_kind: Some("git".into()),
+                output_kind: Some("branch".into()),
+                source_kind: Some("cli".into()),
+                title: Some("Fix the readme".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    h.wait_status("demo-m2", &["needs_attention", "waiting"], 15000)
+        .await;
+    let t = h.shared.db.get_task("demo-m2").unwrap().unwrap();
+    assert_eq!(t.status, "waiting", "{}", t.result_text);
+    let runs = h.shared.db.list_runs(Some("demo-m2")).unwrap();
+    assert_eq!(runs.last().unwrap().outcome.as_deref(), Some("success"));
 }

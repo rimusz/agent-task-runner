@@ -138,6 +138,14 @@ test_globs = ["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "tests/**"]
 # enabled = true
 # commands = ["npm test"]
 
+# Drop new scratch files and restore unrequested docs edits before verify and
+# commit. scope = "no_shell" (default): only providers without a shell
+# (OpenCode without allow_shell); "all": every provider.
+[scratch]
+drop = true
+revert_docs = true
+scope = "no_shell"
+
 [checklist]
 enabled = true
 max_bytes = 4096

@@ -363,6 +363,7 @@ fn tool_schema(name: &str) -> Value {
                 "dir": {"type": "string", "description": "Local directory workspace (edit in place, stay inside)"},
                 "workspace": {"type": "string", "description": "git, dir, or none"},
                 "output": {"type": "string", "description": "reply, pr, issue_comment, branch, patch, text, webhook"},
+                "issue": {"type": "integer", "description": "GitHub issue number (needed for output issue_comment)"},
                 "webhook": {"type": "string"},
                 "patch": {"type": "string"},
                 "key": {"type": "string"},
@@ -570,6 +571,27 @@ fn arg_after(args: &Value) -> Result<Vec<String>, String> {
     Ok(items)
 }
 
+/// `issue`: a positive number (or numeric string), like HTTP `POST /tasks`.
+fn arg_issue(args: &Value) -> Result<Option<i64>, String> {
+    match args.get("issue") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .filter(|n| *n > 0)
+            .map(Some)
+            .ok_or_else(|| "issue must be a positive integer".into()),
+        Some(Value::String(s)) => s
+            .trim()
+            .trim_start_matches('#')
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .map(Some)
+            .ok_or_else(|| "issue must be a positive integer".into()),
+        Some(_) => Err("issue must be a positive integer".into()),
+    }
+}
+
 fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
     let body = arg_str(args, &["body", "prompt", "text", "message"]).ok_or("missing body")?;
     let cfg = shared.config.read().unwrap().clone();
@@ -592,7 +614,7 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
             after: crate::deps::parse_after(&arg_after(args)?),
             source: "mcp".into(),
             source_kind: "mcp".into(),
-            issue: None,
+            issue: arg_issue(args)?,
             shadow: false,
             tests_ok: false,
             files,
@@ -969,6 +991,33 @@ cli = "/bin/true"
         let t = s.db.get_task("task-hinted").unwrap().unwrap();
         assert_eq!(t.provider_hint, "grok");
         assert_eq!(t.status, "queued");
+    }
+
+    #[tokio::test]
+    async fn add_task_saves_issue_number() {
+        // Like HTTP POST /tasks: `issue` is what issue_comment output posts to.
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path());
+        let add = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_task","arguments":{"title":"Ask","body":"x","issue":3}}}"#,
+        )
+        .await;
+        assert_eq!(add[0]["result"]["isError"], false, "{}", add[0]);
+        assert_eq!(s.db.get_task("task-ask").unwrap().unwrap().issue, Some(3));
+        let add = handle_raw(
+            &s,
+            r##"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add_task","arguments":{"title":"Ask2","body":"x","issue":"#7"}}}"##,
+        )
+        .await;
+        assert_eq!(add[0]["result"]["isError"], false, "{}", add[0]);
+        assert_eq!(s.db.get_task("task-ask2").unwrap().unwrap().issue, Some(7));
+        let bad = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add_task","arguments":{"title":"Bad","body":"x","issue":-1}}}"#,
+        )
+        .await;
+        assert_eq!(bad[0]["result"]["isError"], true, "{}", bad[0]);
     }
 
     #[tokio::test]

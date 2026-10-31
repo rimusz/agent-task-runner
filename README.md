@@ -164,6 +164,36 @@ Any other `/…` line (for example `/compact`) goes to the provider as a turn. P
 
 Claude Code, Grok Build, Cursor, Codex and OpenCode. OpenCode also opens the door to DeepSeek, Kimi, Qwen, local Ollama, self-hosted vLLM and more. See [docs/USAGE.md](docs/USAGE.md#providers-and-opencode).
 
+### Local models (OpenCode 2.x + Ollama)
+
+atr can run worker tasks on a model on your own machine through OpenCode and Ollama. Tested setup: OpenCode 2.0.28, Ollama with `qwen3-coder:30b` (30B-A3B, 32k context), Apple M4 Pro with 48 GB.
+
+```bash
+ollama pull qwen3-coder:30b && ollama serve          # http://127.0.0.1:11434
+atr providers add ollama --model ollama/qwen3-coder:30b --url http://127.0.0.1:11434/v1
+                                                      # also writes the provider into ~/.config/opencode/opencode.json
+atr doctor                                            # checks the CLI, the URL and the model
+```
+
+- **The model has no shell.** Every OpenCode run gets an `OPENCODE_CONFIG_CONTENT` deny list, loaded last so it beats your `opencode.json`. It denies `shell`, `execute`, `subagent`, `question`, `webfetch`, `websearch`, `external_directory` and `skill`. The model only reads and edits files in its worktree.
+  - atr runs your `[verify]` commands, commits, pushes, opens the PR and posts comments itself.
+  - Because the model can't run tests, it gets one extra verify follow-up (`[verify] no_shell_extra_retries`).
+  - `allow_shell = true` on the provider gives the shell back, but only for a model you trust.
+- **Extra guards for no-shell models only.** These don't apply to Claude, Codex, Cursor or Grok:
+  - new scratch files and unrequested README/docs edits are dropped (`[scratch]`);
+  - an edit to the main checkout withholds the result;
+  - `atr retry` starts a fresh session.
+- **Triage is suggest-only.** `atr triage run` stores a label and comment suggestion. Nothing is posted until `atr triage approve`.
+- **Hardware.** `qwen3-coder:30b` is an 18.6 GB download and needs about 20 GB of free RAM or VRAM with a 32k context, so 32 GB or more is comfortable. Give the model a context limit of at least 32k in `opencode.json` (`provider.ollama.models.<id>.limit.context`). atr runs one task at a time per Ollama model and keeps the model loaded (`keepAlive` 24h).
+- **Results so far.** On the 10 sandbox issues the local model fixed 8 out of 10 at first, and 9 out of 10 after the follow-up hardening. The misses failed verify and were not delivered.
+- **Known limits.**
+  - Small-model quality varies from run to run.
+  - Triage label accuracy is weak.
+  - The model sometimes still writes files during triage; they are dropped, never verified or posted.
+  - Docs revert only covers docs-style files.
+
+Setup, config and safety details: [docs/USAGE.md](docs/USAGE.md#providers-and-opencode), [docs/CONFIG.md](docs/CONFIG.md#scratch-files).
+
 **Why Grok Build:** it's the recommended main provider. atr uses it by default to plan and review, and it adds live progress on the dashboard and Telegram, per-run cost and token data, and session resume. Everything else works with any provider. See [docs/USAGE.md](docs/USAGE.md#grok-build-as-the-main-provider).
 
 ## More docs

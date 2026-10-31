@@ -147,6 +147,26 @@ Vendor coding CLIs (Kimi Code, Qwen Code, ZCode, MiMo Code, …) are interactive
 
 No API key. `ollama serve` at `http://127.0.0.1:11434`. `atr providers add ollama` writes `opencode.json` with a long `keepAlive` (default `24h`). Model id `ollama/llama3.2`. atr runs at most one task per Ollama model at a time.
 
+### Local models: set up and run safely
+
+Tested: OpenCode 2.0.28 + Ollama `qwen3-coder:30b` (18.6 GB, 32k context) on an M4 Pro with 48 GB. It fixed 8/10 sandbox issues, then 9/10 after hardening; the misses failed verify and were not delivered. Plan for about 20 GB of free RAM/VRAM for a 30B model.
+
+```bash
+ollama pull qwen3-coder:30b                       # server bound to 127.0.0.1 only
+atr providers add ollama --model ollama/qwen3-coder:30b --url http://127.0.0.1:11434/v1
+atr doctor
+atr add --repo R --output pr --provider ollama "fix issue #N …"   # needs [[verify.repo]] commands for R
+atr triage run --repo R --issue N                 # suggest-only; nothing posted until `atr triage approve <id>`
+```
+
+Rules for agents:
+- **Never set `allow_shell = true`** on a local model unless the user explicitly asks. atr injects a deny list on every OpenCode run: `shell`, `execute`, `subagent`, `question`, `webfetch`, `websearch`, `external_directory`, `skill`. The model only edits files in its worktree; atr runs verify, commits, pushes, opens the PR and posts comments itself.
+- **Configure `[[verify.repo]]` commands first.** Verify is the model's only test loop (it gets `no_shell_extra_retries`, default 1, extra follow-ups).
+- **Use triage for labels and comments, and never auto-approve.** Show the suggestion (`atr triage show <id>`) and let the user approve.
+- **Read the PR notes.** "Dropped scratch files" and "Reverted unrequested edits" list what atr removed. A `NO-OP <key>` or `BLOCKED <key>` result means nothing was delivered; report it, don't retry in a loop.
+- **Guards that apply only to no-shell providers:** `[scratch]` cleanup (`scope = "no_shell"`), a main-checkout guard that withholds the result, and a fresh session on `atr retry`. Claude, Codex, Cursor and Grok keep their files and docs edits, get only a warning for a main-checkout change, and resume their session on retry.
+- **Known limits:** run-to-run quality varies, triage label accuracy is weak, and docs revert only covers docs-style files.
+
 ### spark (local)
 
 Custom OpenCode provider at `http://127.0.0.1:8091/v1`. `atr providers add spark`. Default model `spark/deepseek-v4-flash-0731`. Older Spark-via-Codex: `atr providers add spark --kind codex --override 'model_provider="openai"'`.
@@ -166,7 +186,7 @@ Every change or destructive action still needs inline **Confirm** (old → new).
 
 ## Other agents (MCP)
 
-`atr mcp` is stdio. HTTP is `POST /mcp` on `listen` with `Authorization: Bearer $ATR_MCP_TOKEN` (or the 0600 token file). atr never prints the token. Tools: `add_task` (`body` required; `title` optional from the first prompt line; workspace `none` when neither `dir` nor `repo`; output; optional `after` (task keys that must succeed first); optional `idempotency_key` replays the same create, conflicts if the body/files differ; optional `files` `[{name, content_base64|text}]` land in the worktree by filename), `wait_task`, `get_result` (text, diff, PR URL), list/steer/cancel, status, repos, providers, usage, doctor, read-only config. `POST /tasks` takes the same `files` JSON and header `Idempotency-Key`. GitHub-label method still works without MCP (`for:atr`). `atr add "prompt"` / `--dir` / `--repo` / `--after key1,key2` enqueue a task without an issue. Prompts, inbox files, and each attached file are capped at 256 KiB by default. `[retry]` backs off transient provider errors (default 1/2/4/8m); `[host]` keeps work queued when CPU load or free RAM is past the limit (CONFIG.md).
+`atr mcp` is stdio. HTTP is `POST /mcp` on `listen` with `Authorization: Bearer $ATR_MCP_TOKEN` (or the 0600 token file). atr never prints the token. Tools: `add_task` (`body` required; `title` optional from the first prompt line; workspace `none` when neither `dir` nor `repo`; output; `issue` for `issue_comment`; optional `after` (task keys that must succeed first); optional `idempotency_key` replays the same create, conflicts if the body/files differ; optional `files` `[{name, content_base64|text}]` land in the worktree by filename), `wait_task`, `get_result` (text, diff, PR URL), list/steer/cancel, status, repos, providers, usage, doctor, read-only config. `POST /tasks` takes the same `files` JSON and header `Idempotency-Key`. GitHub-label method still works without MCP (`for:atr`). `atr add "prompt"` / `--dir` / `--repo` / `--after key1,key2` enqueue a task without an issue. Prompts, inbox files, and each attached file are capped at 256 KiB by default. `[retry]` backs off transient provider errors (default 1/2/4/8m); `[host]` keeps work queued when CPU load or free RAM is past the limit (CONFIG.md).
 
 ```bash
 atr mcp
@@ -220,7 +240,7 @@ With lessons on, atr reflects after informative failures (verify failed, stalled
 
 `atr add --repo R --output pr --compare grok,claude "…"` runs the task on both providers (arms `K-a`, `K-b`, each pinned to its provider, no failover, no pushes). The arm that passes verify with the smallest diff wins; its branch becomes `atr/K` and the PR comes from `K`. Neither passes → `K` is `needs_attention`, no PR. Needs verify commands for the repo; refused when a provider is disabled or over quota. About 2x tokens. `atr compare show K [--json]` shows arms, verify, diff sizes, decision and PR URL. No Telegram command yet.
 
-`atr triage run --repo R --issue N` is suggest-only: the suggestion (label + comment) is stored locally and nothing is posted until `atr triage approve <id>` (`list`, `show`, `reject` too). With `--output pr` atr commits, pushes and opens the PR (with a description) itself; a run with no diff is a no-op (`needs_attention`, result `NO-OP <key>: …`), never success. New untracked scratch files the task didn't name (root-level helpers, `debug*`/`run_test*`/`verify_*` names) are dropped before verify and commit and listed in the PR body (`[scratch] drop = false` keeps them). Tracked docs files (README, CHANGELOG, `*.md`, `docs/`) the task never mentions are restored when the run also changed code, listed under "Reverted unrequested edits" (`[scratch] revert_docs = false` keeps them). Triage tasks skip verify. OpenCode workers have no shell and no `skill` tool (`allow_shell = true` on the provider gives the shell back); a no-shell provider gets `[verify] no_shell_extra_retries` (default 1) extra verify follow-ups.
+`atr triage run --repo R --issue N` is suggest-only: the suggestion (label + comment) is stored locally and nothing is posted until `atr triage approve <id>` (`list`, `show`, `reject` too). With `--output pr` atr commits, pushes and opens the PR (with a description) itself; a run with no diff is a no-op (`needs_attention`, result `NO-OP <key>: …`), never success. For no-shell providers (default `[scratch] scope = "no_shell"`; `"all"` for every provider), new untracked scratch files the task didn't name (root-level helpers, `debug*`/`run_test*`/`verify_*` names) are dropped before verify and commit and listed in the PR body (`[scratch] drop = false` keeps them), and tracked docs files (README, CHANGELOG, `*.md`, `docs/`) the task never mentions are restored when the run also changed code, listed under "Reverted unrequested edits" (`[scratch] revert_docs = false` keeps them). `--output issue_comment` posts the whole answer (sanitized, capped at GitHub's 65,000 characters); MCP `add_task` takes `issue` for it. Triage tasks skip verify. OpenCode workers have no shell and no `skill` tool (`allow_shell = true` on the provider gives the shell back); a no-shell provider gets `[verify] no_shell_extra_retries` (default 1) extra verify follow-ups.
 
 ## Troubleshooting
 

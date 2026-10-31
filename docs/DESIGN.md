@@ -367,6 +367,12 @@ optionally detected) checks in the worktree; one same-session follow-up on
 failure (`max_retries`, default 1; a no-shell provider gets
 `no_shell_extra_retries` more, default 1); otherwise `needs_attention`.
 Triage tasks skip verify (suggest-only).
+No-shell providers (`Provider::has_shell() == false`: OpenCode without
+`allow_shell`) also get `[scratch]` cleanup (`scope = "no_shell"` by default),
+a blocking main-checkout guard (other providers: warning only) and a fresh
+session on `atr retry` (other providers resume). Every provider gets `PWD` =
+worktree, atr-owned commit/push/PR, honest no-ops, and sanitized
+`issue_comment` output capped at GitHub's 65,000-character limit.
 `[verify] protect_tests` restores base test files before checks.
 Opt-out: `atr:tests-ok` or `--tests-ok`. `[checklist]` keeps
 `.atr/checklist.md` in the variable prompt (prefix unchanged).

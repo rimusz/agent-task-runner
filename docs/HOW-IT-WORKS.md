@@ -141,7 +141,15 @@ Shortcut: `atr providers add kimi` asks for `MOONSHOT_API_KEY` only (stored in
 Older Spark-via-Codex: `atr providers add spark --kind codex --override 'model_provider="openai"'`.
 
 `atr providers add ollama` / `atr providers add spark` write the custom
-provider into `~/.config/opencode/opencode.json`. Usage for OpenCode, Cursor,
+provider into `~/.config/opencode/opencode.json`.
+
+**Local models.** OpenCode 2.x with Ollama is tested (OpenCode 2.0.28,
+`ollama/qwen3-coder:30b`, 32k context). atr denies the model's shell and other
+risky tools on every OpenCode run (`OPENCODE_CONFIG_CONTENT`, see
+[USAGE.md](USAGE.md#providers-and-opencode)), runs verify, commits and opens PRs
+itself, and applies the no-shell guards (scratch cleanup, main-checkout guard,
+fresh session on retry; [CONFIG.md](CONFIG.md#guards-no-shell-providers-vs-every-provider)).
+One run at a time per Ollama model. Usage for OpenCode, Cursor,
 and Codex shows `not reported`.
 
 ## Token caching
@@ -388,7 +396,8 @@ token_file = "~/.config/atr/mcp.token"
 
 Tools: `add_task` (`body` required; `title` optional, derived from the prompt;
 workspace defaults to `none` when neither `dir` nor `repo` is set; optional
-`workspace` git/dir/none, `dir`, `repo`, `output`,
+`workspace` git/dir/none, `dir`, `repo`, `output`, `issue` (GitHub issue
+number for `output: issue_comment`),
 `webhook`, `patch`, `idempotency_key`, `files`), `wait_task` (block until waiting/done/failed or
 `timeout_seconds`), `get_result` (text, diff, PR URL), `list_tasks`,
 `task_status` (timeline + last output), `steer_task` (`interrupt: true` stops the

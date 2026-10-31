@@ -1573,13 +1573,18 @@ pub struct VerifyRepo {
 /// `debug*`/`run_test*`/`verify_*`-style names the task never named) from a
 /// worktree before atr verifies or commits it, and restore tracked docs
 /// files (README, CHANGELOG, `*.md`, `docs/`) the task never asked about.
-/// Both on by default.
+/// Both on by default, but only for providers without a shell (OpenCode
+/// without `allow_shell`) unless `scope = "all"`: frontier agents that run
+/// their own tests keep the files they create (e.g. a new `pyproject.toml`)
+/// and the docs they update, as in v0.1.34.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawScratch {
     #[serde(default = "default_true")]
     pub drop: bool,
     #[serde(default = "default_true")]
     pub revert_docs: bool,
+    #[serde(default)]
+    pub scope: ScratchScope,
 }
 
 impl Default for RawScratch {
@@ -1587,14 +1592,41 @@ impl Default for RawScratch {
         Self {
             drop: true,
             revert_docs: true,
+            scope: ScratchScope::default(),
         }
     }
+}
+
+/// Which providers `[scratch]` cleanup applies to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScratchScope {
+    /// Only providers without a shell (`Provider::has_shell() == false`).
+    #[default]
+    NoShell,
+    /// Every provider.
+    All,
 }
 
 #[derive(Debug, Clone)]
 pub struct ScratchConfig {
     pub drop: bool,
     pub revert_docs: bool,
+    pub scope: ScratchScope,
+}
+
+impl ScratchConfig {
+    /// Whether cleanup runs for this provider (`None`: unknown provider,
+    /// treated as having a shell).
+    pub fn applies_to(&self, provider: Option<&Provider>) -> bool {
+        if !(self.drop || self.revert_docs) {
+            return false;
+        }
+        match self.scope {
+            ScratchScope::All => true,
+            ScratchScope::NoShell => provider.is_some_and(|p| !p.has_shell()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2593,6 +2625,7 @@ impl Config {
             scratch: ScratchConfig {
                 drop: raw.scratch.drop,
                 revert_docs: raw.scratch.revert_docs,
+                scope: raw.scratch.scope,
             },
             lessons: LessonsConfig {
                 enabled: raw.lessons.enabled,
@@ -3093,6 +3126,23 @@ mod tests {
             .unwrap()
             .scratch;
         assert!(s.drop && !s.revert_docs);
+        // Default scope: only no-shell providers get cleaned up.
+        let s = parse_config_toml(P).unwrap().scratch;
+        assert_eq!(s.scope, ScratchScope::NoShell);
+        assert!(s.applies_to(Some(&Provider::test_stub("opencode"))));
+        for kind in ["claude", "grok", "cursor", "codex"] {
+            assert!(!s.applies_to(Some(&Provider::test_stub(kind))), "{kind}");
+        }
+        let mut oc = Provider::test_stub("opencode");
+        oc.allow_shell = true;
+        assert!(!s.applies_to(Some(&oc)));
+        assert!(!s.applies_to(None));
+        let s = parse_config_toml(&format!("[scratch]\nscope = \"all\"\n{P}"))
+            .unwrap()
+            .scratch;
+        assert_eq!(s.scope, ScratchScope::All);
+        assert!(s.applies_to(Some(&Provider::test_stub("claude"))));
+        assert!(parse_config_toml(&format!("[scratch]\nscope = \"bogus\"\n{P}")).is_err());
     }
 
     #[test]

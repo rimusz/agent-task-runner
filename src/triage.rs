@@ -21,6 +21,11 @@ pub const DEFAULT_LABELS: &[&str] = &["bug", "duplicate", "needs-info", "already
 /// Longest comment atr will post (GitHub allows 65 536).
 pub const MAX_COMMENT_CHARS: usize = 4000;
 
+/// Cap for a task's `issue_comment` output: GitHub's own comment limit is
+/// 65,536 characters; atr keeps a small margin. In v0.1.34 the body was
+/// posted whole, so only the suggest-only triage comment uses the 4,000 cap.
+pub const GITHUB_COMMENT_MAX_CHARS: usize = 65_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spec {
     pub repo: String,
@@ -216,6 +221,12 @@ fn json_objects(text: &str) -> Vec<serde_json::Map<String, Value>> {
 /// control characters, drop tool-call markup a model printed as text, and
 /// cap the length. The result is only ever passed to `gh` on stdin.
 pub fn sanitize_comment(text: &str) -> String {
+    sanitize_comment_max(text, MAX_COMMENT_CHARS)
+}
+
+/// [`sanitize_comment`] with an explicit length cap (in characters).
+pub fn sanitize_comment_max(text: &str, max_chars: usize) -> String {
+    let max_chars = max_chars.max(2);
     let no_calls = strip_tool_markup(text);
     let mut out = String::with_capacity(no_calls.len());
     let mut chars = no_calls.chars().peekable();
@@ -239,8 +250,8 @@ pub fn sanitize_comment(text: &str) -> String {
         }
     }
     let trimmed = out.trim();
-    if trimmed.chars().count() > MAX_COMMENT_CHARS {
-        let mut s: String = trimmed.chars().take(MAX_COMMENT_CHARS - 1).collect();
+    if trimmed.chars().count() > max_chars {
+        let mut s: String = trimmed.chars().take(max_chars - 1).collect();
         s.push('…');
         s
     } else {
@@ -463,7 +474,8 @@ pub fn run_gh(gh: &Path, args: &[String], stdin: Option<&str>) -> Result<String>
 }
 
 /// Post a comment on an issue or PR through `gh … comment --body-file -`.
-/// The body is sanitized first and goes in on stdin.
+/// The body is sanitized first (capped at [`MAX_COMMENT_CHARS`]) and goes in
+/// on stdin.
 pub fn post_comment(
     gh: &Path,
     repo: Option<&str>,
@@ -471,7 +483,19 @@ pub fn post_comment(
     kind: &str,
     body: &str,
 ) -> Result<String> {
-    let body = sanitize_comment(body);
+    post_comment_max(gh, repo, number, kind, body, MAX_COMMENT_CHARS)
+}
+
+/// [`post_comment`] with an explicit length cap.
+pub fn post_comment_max(
+    gh: &Path,
+    repo: Option<&str>,
+    number: i64,
+    kind: &str,
+    body: &str,
+    max_chars: usize,
+) -> Result<String> {
+    let body = sanitize_comment_max(body, max_chars);
     if body.is_empty() {
         bail!("refusing to post an empty comment");
     }
@@ -748,6 +772,15 @@ mod tests {
         assert_eq!(sanitize_comment(t), "ok red\n end");
         let long = "x".repeat(MAX_COMMENT_CHARS + 50);
         assert_eq!(sanitize_comment(&long).chars().count(), MAX_COMMENT_CHARS);
+        // A task's issue_comment output keeps a long answer whole.
+        assert_eq!(sanitize_comment_max(&long, GITHUB_COMMENT_MAX_CHARS), long);
+        let huge = "y".repeat(GITHUB_COMMENT_MAX_CHARS + 10);
+        assert_eq!(
+            sanitize_comment_max(&huge, GITHUB_COMMENT_MAX_CHARS)
+                .chars()
+                .count(),
+            GITHUB_COMMENT_MAX_CHARS
+        );
         // Backticks and $() stay literal text: nothing here is ever a shell.
         assert_eq!(sanitize_comment("`limit` $(id)"), "`limit` $(id)");
     }
