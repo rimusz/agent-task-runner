@@ -1147,7 +1147,8 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         std::fs::write(&sys_path, &prefix)?;
     }
     // Snapshot the main checkout so a run that escapes its worktree is
-    // caught (and never delivered), whatever the agent's own sandboxing did.
+    // caught, whatever the agent's own sandboxing did. A no-shell provider's
+    // result is then withheld; a provider with a shell only gets a warning.
     let main_guard =
         if ws_kind == crate::task::WorkspaceKind::Git && !assistant && !task.shadow && repo != wt {
             crate::output::main_checkout_snapshot(&repo)
@@ -1314,7 +1315,8 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     // never reach the PR or get collected by the verify command.
     // Only after a successful run: a stalled or failed run's files are what
     // the next provider's handoff describes. Shadow runs only measure.
-    if (cfg.scratch.drop || cfg.scratch.revert_docs)
+    // Scoped by `[scratch] scope` (default: no-shell providers only).
+    if cfg.scratch.applies_to(Some(&provider))
         && result.outcome == "success"
         && ws_kind == crate::task::WorkspaceKind::Git
         && !assistant
@@ -1369,6 +1371,20 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         let after = crate::output::main_checkout_snapshot(&repo)?;
         let changed = crate::output::main_checkout_changes(before, &after);
         if changed.is_empty() {
+            None
+        } else if provider.has_shell() {
+            // Agents with a shell (claude, codex, cursor, grok, OpenCode with
+            // allow_shell) are trusted as before 0.1.35: a human or another
+            // tool may be editing the main checkout at the same time, so
+            // only warn instead of withholding the result.
+            tracing::warn!(
+                task = %key,
+                run = run_id,
+                "main checkout {} changed during the run (not blocking: provider {} has a shell): {}",
+                repo.display(),
+                provider.name,
+                changed.join(", ")
+            );
             None
         } else {
             let task_now = shared

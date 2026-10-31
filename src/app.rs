@@ -289,9 +289,16 @@ impl Shared {
         // from the current config instead of sticking to the last one.
         self.db.restart_task_clock(key)?;
         self.db.clear_retry(key)?;
-        // Fresh session: a resumed session tends to say "already done" and
-        // stop. The worktree (and its edits) is kept.
-        if !crate::telegram::is_assistant_key(key) {
+        // Fresh session for a provider without a shell: a resumed local-model
+        // session tends to say "already done" and stop. Providers with a shell
+        // resume their session as before 0.1.35. The worktree is kept.
+        let no_shell = self
+            .config
+            .read()
+            .unwrap()
+            .provider(t.provider.as_deref().unwrap_or_default())
+            .is_some_and(|p| !p.has_shell());
+        if no_shell && !crate::telegram::is_assistant_key(key) {
             self.db.clear_task_sessions(key)?;
         }
         if t.status == "held" {
@@ -1623,13 +1630,19 @@ cli = "/bin/true"
 
         shared
             .db
-            .set_provider_session("real-1", Some("opencode"), Some("ses_old"))
+            .set_provider_session("real-1", Some("claude"), Some("ses_old"))
             .unwrap();
         shared.retry("real-1").unwrap();
+        // A provider with a shell resumes its session (no-shell providers
+        // start fresh: tests/retry.rs).
         assert_eq!(
-            shared.db.task_session("real-1", "opencode").unwrap(),
-            None,
-            "retry must start a fresh session"
+            shared
+                .db
+                .task_session("real-1", "claude")
+                .unwrap()
+                .as_deref(),
+            Some("ses_old"),
+            "retry keeps a shell provider's session"
         );
         assert_eq!(
             shared.db.get_task("real-1").unwrap().unwrap().status,

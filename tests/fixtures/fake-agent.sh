@@ -224,6 +224,7 @@ EOF
       ;;
     codex)
       echo "{\"type\":\"thread.started\",\"thread_id\":\"${sid}\"}"
+      echo '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"done"}}'
       echo '{"type":"item.completed","usage":{"input_tokens":200,"cached_input_tokens":160,"cache_write_input_tokens":10,"output_tokens":30,"reasoning_output_tokens":8}}'
       echo '{"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":160,"cache_write_input_tokens":10,"output_tokens":30,"reasoning_output_tokens":8}}'
       ;;

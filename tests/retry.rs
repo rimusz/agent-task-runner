@@ -190,3 +190,38 @@ async fn retried_compare_arm_keeps_its_strict_pin() {
     assert_eq!(t.provider.as_deref(), Some("claude"));
     assert!(t.pin_strict);
 }
+
+#[tokio::test]
+async fn retry_keeps_the_session_of_a_shell_provider() {
+    // As before 0.1.35: `atr retry` on a claude/grok/cursor/codex task resumes
+    // its session. Only no-shell (local-model) providers start fresh.
+    let h = Harness::with_providers(&[("grok", true, "success")], "127.0.0.1:0").await;
+    h.submit("demo-r9", "first attempt");
+    h.wait_status("demo-r9", &["waiting"], 10000).await;
+    let before = h.shared.db.task_session("demo-r9", "grok").unwrap();
+    assert!(before.is_some(), "grok run stored a session");
+    h.shared.db.set_status("demo-r9", "failed").unwrap();
+    // current_thread runtime: nothing dispatches between retry() and the read.
+    h.shared.retry("demo-r9").unwrap();
+    assert_eq!(h.shared.db.task_session("demo-r9", "grok").unwrap(), before);
+}
+
+#[tokio::test]
+async fn retry_starts_a_fresh_session_for_a_no_shell_provider() {
+    let h = Harness::with_providers(&[("opencode", true, "success")], "127.0.0.1:0").await;
+    h.submit("demo-r10", "first attempt");
+    h.wait_status("demo-r10", &["waiting", "needs_attention"], 10000)
+        .await;
+    assert!(h
+        .shared
+        .db
+        .task_session("demo-r10", "opencode")
+        .unwrap()
+        .is_some());
+    h.shared.db.set_status("demo-r10", "failed").unwrap();
+    h.shared.retry("demo-r10").unwrap();
+    assert_eq!(
+        h.shared.db.task_session("demo-r10", "opencode").unwrap(),
+        None
+    );
+}

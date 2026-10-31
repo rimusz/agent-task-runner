@@ -1,6 +1,9 @@
 //! atr drops scratch files the agent left (root-level helpers such as
 //! `test_fix.py`, `run_tests.py`; `debug*` names anywhere) before verify and
 //! commit, keeps the real change, and names what it dropped in the PR body.
+//! By default (`[scratch] scope = "no_shell"`) only providers without a shell
+//! (OpenCode without `allow_shell`) are cleaned up; frontier agents keep their
+//! new files and docs edits as before 0.1.35.
 #[allow(dead_code)]
 mod common;
 
@@ -17,7 +20,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> String {
 
 #[tokio::test]
 async fn scratch_files_are_dropped_before_verify_and_commit() {
-    let h = Harness::with_providers(&[("grok", true, "edit_scratch")], "127.0.0.1:0").await;
+    let h = Harness::with_providers(&[("opencode", true, "edit_scratch")], "127.0.0.1:0").await;
     h.install_gh_stub();
     let origin = h.dir.path().join("origin.git");
     git(
@@ -87,7 +90,7 @@ async fn scratch_files_are_dropped_before_verify_and_commit() {
 
 #[tokio::test]
 async fn scratch_drop_can_be_turned_off() {
-    let h = Harness::with_providers(&[("grok", true, "edit_scratch")], "127.0.0.1:0").await;
+    let h = Harness::with_providers(&[("opencode", true, "edit_scratch")], "127.0.0.1:0").await;
     h.install_gh_stub();
     h.shared.config.write().unwrap().scratch.drop = false;
     let repo = h.repo.display().to_string();
@@ -119,7 +122,8 @@ async fn scratch_drop_can_be_turned_off() {
 
 #[tokio::test]
 async fn unrequested_docs_edits_are_reverted_and_listed() {
-    let h = Harness::with_providers(&[("grok", true, "edit_docs_unasked")], "127.0.0.1:0").await;
+    let h =
+        Harness::with_providers(&[("opencode", true, "edit_docs_unasked")], "127.0.0.1:0").await;
     h.install_gh_stub();
     let origin = h.dir.path().join("origin.git");
     git(
@@ -204,7 +208,8 @@ async fn unrequested_docs_edits_are_reverted_and_listed() {
 
 #[tokio::test]
 async fn docs_edits_are_kept_when_revert_is_off() {
-    let h = Harness::with_providers(&[("grok", true, "edit_docs_unasked")], "127.0.0.1:0").await;
+    let h =
+        Harness::with_providers(&[("opencode", true, "edit_docs_unasked")], "127.0.0.1:0").await;
     h.install_gh_stub();
     std::fs::create_dir_all(h.repo.join("textkit")).unwrap();
     std::fs::write(h.repo.join("textkit/slug.py"), "x\n").unwrap();
@@ -250,5 +255,52 @@ async fn docs_edits_are_kept_when_revert_is_off() {
     assert!(
         readme.contains("atr-local-sandbox") || log.contains("atr-local-sandbox"),
         "README edit kept: {readme}"
+    );
+}
+
+#[tokio::test]
+async fn shell_providers_keep_new_files_and_docs_by_default() {
+    // PR70 regression (sandbox PR #43): claude's new root `pyproject.toml`
+    // was dropped and its README line reverted. A provider with a shell keeps
+    // both unless `[scratch] scope = "all"`.
+    let h = Harness::with_providers(&[("grok", true, "edit_scratch")], "127.0.0.1:0").await;
+    h.install_gh_stub();
+    let repo = h.repo.display().to_string();
+    h.shared
+        .submit_with(
+            "demo-s5",
+            "# Package it\n\nmake it installable",
+            "test",
+            Some(&repo),
+            None,
+            false,
+            false,
+            atr::SubmitOpts {
+                workspace_kind: Some("git".into()),
+                output_kind: Some("branch".into()),
+                source_kind: Some("cli".into()),
+                title: Some("Package it".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    h.wait_status("demo-s5", &["waiting", "needs_attention"], 15000)
+        .await;
+    let t = h.shared.db.get_task("demo-s5").unwrap().unwrap();
+    assert_eq!(t.status, "waiting", "{}", t.result_text);
+    let wt = std::path::PathBuf::from(t.worktree.unwrap());
+    let tracked = git(&wt, &["ls-files"]);
+    let status = git(&wt, &["status", "--porcelain", "--untracked-files=all"]);
+    let log = git(&wt, &["log", "-p", "-3"]);
+    for f in ["test_fix.py", "run_tests.py", "docs/debug_notes.md"] {
+        assert!(
+            wt.join(f).exists() || tracked.contains(f),
+            "{f} was dropped for a shell provider: {status}"
+        );
+    }
+    let readme = std::fs::read_to_string(wt.join("README.md")).unwrap_or_default();
+    assert!(
+        readme.contains("scratch-test fix") || log.contains("scratch-test fix"),
+        "README edit reverted for a shell provider: {readme}"
     );
 }

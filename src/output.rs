@@ -521,12 +521,18 @@ fn open_pr(shared: &Shared, task: &Task, payload: &Value) -> Result<()> {
     let Some(wt) = task.worktree.as_deref().map(Path::new) else {
         return Ok(());
     };
-    let c = crate::scratch::clean_for_task(&cfg, &shared.db, &task.key, &task.title, wt);
-    if !c.dropped.is_empty() {
-        tracing::info!(task = %task.key, "dropped scratch before commit: {}", c.dropped.join(", "));
-    }
-    if !c.reverted.is_empty() {
-        tracing::info!(task = %task.key, "reverted tracked docs before commit: {}", c.reverted.join(", "));
+    // Same scope as the post-run cleanup (`[scratch] scope`).
+    if cfg
+        .scratch
+        .applies_to(task.provider.as_deref().and_then(|p| cfg.provider(p)))
+    {
+        let c = crate::scratch::clean_for_task(&cfg, &shared.db, &task.key, &task.title, wt);
+        if !c.dropped.is_empty() {
+            tracing::info!(task = %task.key, "dropped scratch before commit: {}", c.dropped.join(", "));
+        }
+        if !c.reverted.is_empty() {
+            tracing::info!(task = %task.key, "reverted tracked docs before commit: {}", c.reverted.join(", "));
+        }
     }
     if let Err(e) = commit_pending(wt, task) {
         tracing::warn!(task = %task.key, "commit before PR: {e:#}");
@@ -642,7 +648,16 @@ fn issue_comment(shared: &Shared, task: &Task, payload: &Value) -> Result<()> {
         .map(|e| e.github)
         .filter(|g| !g.is_empty());
     // Sanitized text on stdin (`--body-file -`); never a shell string.
-    if let Err(e) = crate::triage::post_comment(&gh, repo.as_deref(), issue, "issue", body) {
+    // GitHub's limit, not the 4,000-char triage cap: an answer comment is
+    // posted whole, as before 0.1.35.
+    if let Err(e) = crate::triage::post_comment_max(
+        &gh,
+        repo.as_deref(),
+        issue,
+        "issue",
+        body,
+        crate::triage::GITHUB_COMMENT_MAX_CHARS,
+    ) {
         tracing::warn!(task = %task.key, "gh issue comment: {e:#}");
     }
     Ok(())
@@ -1011,6 +1026,23 @@ cli = "/bin/true"
             "{calls}"
         );
         assert!(calls.contains("the answer"), "{calls}");
+    }
+
+    #[test]
+    fn issue_comment_output_is_not_cut_to_the_triage_cap() {
+        let e = env();
+        let long = format!(
+            "{}\nEND-OF-LONG-ANSWER",
+            "step ".repeat(crate::triage::MAX_COMMENT_CHARS)
+        );
+        task(&e, "o-ic-long", "issue_comment", "", "cli", "x");
+        let t = e.shared.db.get_task("o-ic-long").unwrap().unwrap();
+        issue_comment(&e.shared, &t, &json!({ "text": long })).unwrap();
+        let calls = gh_calls(&e);
+        assert!(
+            calls.contains("END-OF-LONG-ANSWER"),
+            "comment was truncated"
+        );
     }
 
     #[test]
