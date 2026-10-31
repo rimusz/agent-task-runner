@@ -132,6 +132,8 @@ Vendor coding CLIs (Kimi Code, Qwen Code, ZCode, MiMo Code, …) are interactive
 | Cursor CLI | `atr providers add cursor --kind cursor` |
 | Codex | `atr providers add codex --kind codex` |
 
+Codex gets atr's instructions as `-c model_instructions_file=<worktree>/.atr/system.md`, which replaces Codex's built-in base prompt (codex-cli 0.166 checked; the old `instructions_file` key is ignored by codex). An operator `--override 'model_instructions_file="…"'` wins. If Codex ignores atr's rules (commits or pushes itself, wrong answer format), check `codex --version` and the run's argv.
+
 ### Chinese providers (via OpenCode)
 
 | Name | Sign-in / key | Example model | Shortcut |
@@ -258,6 +260,7 @@ With lessons on, atr reflects after informative failures (verify failed, stalled
 | Queued with retry time | Transient provider error (overloaded / 429 / 5xx). Wait, or `atr retry <key>`. `[retry]` in CONFIG.md. |
 | Status `host: … waiting` | CPU load or free RAM past `[host]`. Wait or `atr config set host.enabled false`. |
 | Usage `not reported` | Expected for OpenCode, Cursor, Codex. |
+| Codex on macOS: "timed out negotiating with the code-mode host", every command times out, NO-OP | Not atr. The Homebrew cask's `codex-code-mode-host` still has `com.apple.quarantine` and hangs at launch (Gatekeeper), so Codex's 30 s handshake fails. Check `xattr -p com.apple.quarantine "$(dirname "$(readlink -f "$(command -v codex)")")/codex-code-mode-host"`; with the owner's OK, clear it on that file (`xattr -d com.apple.quarantine …`) and run the check again after every codex upgrade. |
 | Wanted a vendor CLI (`kimi`, `qwen`, …) | No kind. Drive the model through OpenCode. |
 
 ## Where files live

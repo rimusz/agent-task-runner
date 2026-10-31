@@ -162,7 +162,7 @@ The goal is high prompt-cache hit rates on first runs and resumes.
 | Lever | Behaviour |
 |---|---|
 | Worktree pool | Reuses `.atr/wt/<provider>-<n>` per repo+provider so cwd/git in the CLI system prompt stay byte-stable. Reset (`checkout -B`, `reset --hard`, `clean -fd`) between different tasks. `[cache] worktree_pool = false` restores one folder per task key. |
-| CLI system-prompt slot | Stable prefix (system prompt + `AGENTS.md` + provider contract) goes in a *file*, never argv/`ps`: Claude `--append-system-prompt-file`, Grok `--rules`, Codex `instructions_file`, OpenCode a first `--file` attach (2.x has no `--system`). Cursor has no slot; the prefix stays in the prompt file. |
+| CLI system-prompt slot | Stable prefix (system prompt + `AGENTS.md` + provider contract) goes in a *file*, never argv/`ps`: Claude `--append-system-prompt-file`, Grok `--rules`, Codex `-c model_instructions_file` (replaces Codex's base prompt), OpenCode a first `--file` attach (2.x has no `--system`). Cursor has no slot; the prefix stays in the prompt file. |
 | Resume delta | Follow-ups send only the new messages (and optional handoff). The stable prefix is not re-sent. |
 | Variable tail | Per-task text (task header, workspace note, `## Repo lessons (atr)` when `[lessons]` is on, handoff, messages) goes after `----- atr variable -----`, so it never changes the prefix hash. |
 | Provider affinity | Retries and follow-ups stay on the same provider and session. Work still inside `cache_window` (Claude ~5m, others 60m) is scheduled first; remaining queued tasks for that provider are batched next. |
