@@ -58,6 +58,55 @@ pub fn event_kind(value: &Value) -> String {
 /// Grok `streaming-json` sends the answer as `{"type":"text","data":"…"}`
 /// deltas. Join the last run of deltas (thoughts/usage/end in between are
 /// skipped; a tool call ends the run).
+/// OpenCode `run --format json` prints `{"type":"text","part":{"type":"text",
+/// "text":…,"messageID":…}}`. The answer is the last message's text parts
+/// (latest version of each part id), joined in order.
+fn opencode_text(events: &[EventRow]) -> Option<String> {
+    let parsed: Vec<Value> = events
+        .iter()
+        .filter_map(|e| serde_json::from_str::<Value>(&e.raw).ok())
+        .filter(|v| {
+            v.get("type").and_then(|t| t.as_str()) == Some("text")
+                && v.pointer("/part/type").and_then(|t| t.as_str()) == Some("text")
+                && v.pointer("/part/text").and_then(|t| t.as_str()).is_some()
+        })
+        .collect();
+    let last = parsed.last()?;
+    let msg = last.pointer("/part/messageID").and_then(|m| m.as_str());
+    let mut order: Vec<String> = Vec::new();
+    let mut by_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for v in &parsed {
+        if v.pointer("/part/messageID").and_then(|m| m.as_str()) != msg {
+            continue;
+        }
+        let id = v
+            .pointer("/part/id")
+            .and_then(|i| i.as_str())
+            .unwrap_or("")
+            .to_string();
+        let text = v
+            .pointer("/part/text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        if !by_id.contains_key(&id) {
+            order.push(id.clone());
+        }
+        by_id.insert(id, text.to_string());
+    }
+    let joined = order
+        .iter()
+        .filter_map(|id| by_id.get(id))
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
 fn grok_stream_text(events: &[EventRow]) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     for ev in events.iter().rev() {
@@ -94,6 +143,9 @@ fn grok_stream_text(events: &[EventRow]) -> Option<String> {
 
 pub fn last_assistant_text(events: &[EventRow]) -> Option<String> {
     if let Some(t) = grok_stream_text(events) {
+        return Some(t);
+    }
+    if let Some(t) = opencode_text(events) {
         return Some(t);
     }
     for ev in events.iter().rev() {
@@ -561,6 +613,32 @@ pub fn needs_handoff(pending: Option<&str>, switching: bool, cannot_resume: bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_answer_is_last_message_text_parts() {
+        let ev = |raw: &str| EventRow {
+            run_id: 1,
+            kind: "x".into(),
+            raw: raw.into(),
+        };
+        let events = vec![
+            ev(
+                r#"{"type":"text","part":{"id":"p1","messageID":"m1","type":"text","text":"Let me run the tests:"}}"#,
+            ),
+            ev(r#"{"type":"tool_use","part":{"messageID":"m1","type":"tool","tool":"read"}}"#),
+            ev(
+                r#"{"type":"text","part":{"id":"p2","messageID":"m2","type":"text","text":"Summary:"}}"#,
+            ),
+            ev(
+                r#"{"type":"text","part":{"id":"p3","messageID":"m2","type":"text","text":"Added days."}}"#,
+            ),
+            ev(r#"{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}"#),
+        ];
+        assert_eq!(
+            last_assistant_text(&events).as_deref(),
+            Some("Summary:\nAdded days.")
+        );
+    }
     use crate::db::EventRow;
 
     fn ev(kind: &str, raw: &str) -> EventRow {

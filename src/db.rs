@@ -1229,6 +1229,21 @@ impl Db {
     }
 
     /// Session previously recorded for this task on this provider only.
+    /// Forget every provider session for `key` so the next run starts fresh
+    /// (`atr retry`: resuming made models answer "already done" and stop).
+    pub fn clear_task_sessions(&self, key: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM task_sessions WHERE task_key = ?1",
+            params![key],
+        )?;
+        conn.execute(
+            "UPDATE tasks SET session_id = NULL, updated = ?1 WHERE key = ?2",
+            params![now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
     pub fn task_session(&self, key: &str, provider: &str) -> Result<Option<String>> {
         let conn = self.lock();
         let v = conn

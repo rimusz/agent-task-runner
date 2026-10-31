@@ -230,7 +230,7 @@ Grok/Cursor cache server-side; OpenCode/Ollama via a stable prefix +
    - Claude: `--append-system-prompt-file`
    - Grok: `--rules` (override with `system_prompt_flag`)
    - Codex: `-c instructions_file="…"`
-   - OpenCode: `--system`
+   - OpenCode: first `--file` (OpenCode 2.x has no `--system`)
    - Cursor: no slot; prefix stays in the prompt file
    - **Stable, hashed, must be byte-identical for every task on a provider:**
      system/append-prompt file + repo `AGENTS.md` + the provider contract
@@ -364,7 +364,9 @@ when missing.
 
 **Verify before done** (`[verify]`): after success, run configured (or
 optionally detected) checks in the worktree; one same-session follow-up on
-failure (`max_retries`, default 1); otherwise `needs_attention`.
+failure (`max_retries`, default 1; a no-shell provider gets
+`no_shell_extra_retries` more, default 1); otherwise `needs_attention`.
+Triage tasks skip verify (suggest-only).
 `[verify] protect_tests` restores base test files before checks.
 Opt-out: `atr:tests-ok` or `--tests-ok`. `[checklist]` keeps
 `.atr/checklist.md` in the variable prompt (prefix unchanged).

@@ -279,6 +279,11 @@ fn reset_pool_slot(dest: &Path, branch: &str, main: &str) -> Result<()> {
     run(&["checkout", "-B", branch, main])?;
     run(&["reset", "--hard", main])?;
     run(&["clean", "-fd"])?;
+    // `.atr/` is git-excluded, so `clean -fd` keeps it: drop the previous
+    // task's checklist so it never leaks into the next task's prompt.
+    let _ = std::fs::remove_file(dest.join(crate::checklist::REL_PATH));
+    let _ = std::fs::remove_file(dest.join(crate::scratch::REL_PATH));
+    let _ = std::fs::remove_file(dest.join(crate::scratch::REVERTED_REL_PATH));
     Ok(())
 }
 
@@ -640,12 +645,18 @@ mod tests {
         assert!(is_pool_worktree(&a));
         assert_eq!(slot_from_pool_path(&a, "claude"), Some(0));
         std::fs::write(a.join("leftover.txt"), "old\n").unwrap();
+        std::fs::create_dir_all(a.join(".atr")).unwrap();
+        std::fs::write(a.join(crate::checklist::REL_PATH), "- [x] task-a step\n").unwrap();
         let b = acquire_pool_worktree(&repo, &root, "claude", 0, "task-b", "atr", "main", true)
             .unwrap();
         assert_eq!(a, b);
         assert!(
             !b.join("leftover.txt").exists(),
             "reset must clean leftovers"
+        );
+        assert!(
+            !b.join(crate::checklist::REL_PATH).exists(),
+            "a new task must not inherit the last task's checklist"
         );
         assert_eq!(current_branch(&b).as_deref(), Some("atr/task-b"));
         let same = acquire_pool_worktree(&repo, &root, "claude", 0, "task-b", "atr", "main", false)

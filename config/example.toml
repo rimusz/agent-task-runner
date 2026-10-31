@@ -127,6 +127,8 @@ enabled = false
 only_listed_repos = true
 timeout = "15m"
 max_retries = 1
+# Extra follow-ups for a provider with no shell (OpenCode without allow_shell).
+no_shell_extra_retries = 1
 commands = []
 protect_tests = true
 protect_tests_skip_label = "atr:tests-ok"

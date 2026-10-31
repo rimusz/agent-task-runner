@@ -28,6 +28,8 @@ case "$cmd $sub" in
 esac
 if [[ "$cmd $sub" == "pr create" && -f "$DIR/gh-allow-pr" ]]; then
   printf '%s\n' "$@" >> "$DIR/gh-pr.log"
+  # atr sends the PR description on stdin (`--body-file -`).
+  case " $* " in *" --body-file - "*) cat >> "$DIR/gh-pr.log" ;; esac
   echo "https://github.com/example/repo/pull/7"
   exit 0
 fi

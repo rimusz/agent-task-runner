@@ -67,6 +67,8 @@ pub struct CommandSpec {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub stdin_text: Option<String>,
+    /// Extra environment for the child (e.g. OpenCode's permission overlay).
+    pub env: Vec<(String, String)>,
 }
 
 pub fn build_command(
@@ -169,13 +171,14 @@ pub fn build_command_opts(
         args,
         cwd: worktree.to_path_buf(),
         stdin_text,
+        env: Vec::new(),
     }
 }
 
 /// Best-effort confinement for `--dir` workspaces. Codex already sandboxes
 /// with `-s`; Claude gets `--add-dir` so the folder is an explicit allowlist
-/// even if the CLI would otherwise walk up to a git root. Grok/OpenCode
-/// already pass `--cwd` / `--dir`. This is not a hard jail.
+/// even if the CLI would otherwise walk up to a git root. Grok passes
+/// `--cwd`; OpenCode runs with the folder as its cwd. This is not a hard jail.
 pub fn apply_dir_confinement(p: &Provider, spec: &mut CommandSpec, dir: &Path) {
     match p.kind.as_str() {
         "claude" if !spec.args.iter().any(|a| a == "--add-dir") => {
@@ -251,6 +254,7 @@ fn build_codex(
         args,
         cwd: worktree.to_path_buf(),
         stdin_text: Some(prompt.to_string()),
+        env: Vec::new(),
     }
 }
 
@@ -262,13 +266,14 @@ fn build_opencode(
     new_session: bool,
     system_prompt: Option<&Path>,
 ) -> CommandSpec {
+    // No `--dir`: OpenCode 2.x rejects it ("Unrecognized flag: --dir") and
+    // exits 1 after printing help. The worktree is already the spawn cwd
+    // (`CommandSpec.cwd`), which every OpenCode release uses as the project.
     let mut args = vec![
         "run".into(),
         "--format".into(),
         "json".into(),
         "--auto".into(),
-        "--dir".into(),
-        worktree.display().to_string(),
     ];
     if !p.model.is_empty() {
         let flag = if p.model_flag.is_empty() {
@@ -292,17 +297,142 @@ fn build_opencode(
     }
     args.extend(p.args.iter().cloned());
     args.extend(p.extra_args.iter().cloned());
+    // The stable prefix is attached first (default flag `--file`; OpenCode
+    // 2.x has no `--system`), so its bytes lead the request and stay cacheable.
+    let has_system = system_prompt.is_some() && !p.system_prompt_flag.trim().is_empty();
     attach_system_prompt(p, &mut args, system_prompt);
     // Prompt is a file attach, never argv/`ps`.
     args.push("--file".into());
     args.push(prompt_path.display().to_string());
-    args.push("Follow the attached prompt.".into());
+    args.push(if has_system {
+        "Follow the attached files: the first is your standing instructions, the second is the task.".into()
+    } else {
+        "Follow the attached prompt.".into()
+    });
+    let major = opencode_major(&p.cli);
+    let env = vec![(
+        "OPENCODE_CONFIG_CONTENT".to_string(),
+        opencode_config_content(
+            major,
+            p.allow_shell,
+            std::env::var("OPENCODE_CONFIG_CONTENT").ok().as_deref(),
+        ),
+    )];
     CommandSpec {
         program: p.cli.clone(),
         args,
         cwd: worktree.to_path_buf(),
         stdin_text: None,
+        env,
     }
+}
+
+/// Tools atr denies on every OpenCode worker run. OpenCode 2.x names its
+/// permission actions `shell` (was `bash`), `execute` (Code Mode scripts),
+/// `subagent` (was `task`), `question`, `webfetch`, `websearch`, and
+/// `external_directory`, and `skill`; 1.x uses a `permission` map with
+/// `bash`, `webfetch`, `external_directory`, and `skill`.
+///
+/// Why: the model must never run shell commands (atr commits, pushes, opens
+/// PRs, and posts comments itself through argv/stdin, never a shell string),
+/// and must never touch files outside its worktree (the main checkout is
+/// read-only to it). `skill` is denied because a worker loading skills
+/// (e.g. the atr operator skill) gets instructions to run commands it cannot
+/// run. `allow_shell = true` on the provider keeps `shell`.
+pub const OPENCODE_V2_DENY: &[&str] = &[
+    "shell",
+    "execute",
+    "subagent",
+    "question",
+    "webfetch",
+    "websearch",
+    "external_directory",
+    "skill",
+];
+
+/// JSON for `OPENCODE_CONFIG_CONTENT`, which OpenCode loads last (it wins
+/// over global and project config). `major` is the CLI's major version when
+/// known; unknown emits both the 2.x `permissions` list and the 1.x
+/// `permission` map (2.x ignores the map). An existing object in the
+/// caller's own `OPENCODE_CONFIG_CONTENT` is kept, with atr's denies last.
+pub fn opencode_config_content(
+    major: Option<u32>,
+    allow_shell: bool,
+    existing: Option<&str>,
+) -> String {
+    let mut root = existing
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let obj = root.as_object_mut().expect("object");
+    let want_v2 = major.is_none_or(|m| m >= 2);
+    let want_v1 = major.is_none_or(|m| m < 2);
+    if want_v2 {
+        let mut rules = obj
+            .get("permissions")
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        for action in OPENCODE_V2_DENY {
+            if allow_shell && *action == "shell" {
+                continue;
+            }
+            rules.push(serde_json::json!({
+                "action": action,
+                "resource": "*",
+                "effect": "deny",
+            }));
+        }
+        obj.insert("permissions".into(), Value::Array(rules));
+    }
+    if want_v1 {
+        let mut map = obj
+            .get("permission")
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        if !allow_shell {
+            map.insert("bash".into(), Value::from("deny"));
+        }
+        map.insert("webfetch".into(), Value::from("deny"));
+        map.insert("external_directory".into(), Value::from("deny"));
+        map.insert("skill".into(), Value::from("deny"));
+        obj.insert("permission".into(), Value::Object(map));
+    }
+    root.to_string()
+}
+
+/// Major version of an OpenCode CLI (`opencode --version` prints
+/// `opencode v2.0.28` on 2.x and `1.2.3` on 1.x). Cached per path; `None`
+/// when the binary is missing or the output does not parse.
+pub fn opencode_major(cli: &Path) -> Option<u32> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<u32>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(v) = cache.lock().unwrap().get(cli) {
+        return *v;
+    }
+    let v = std::process::Command::new(cli)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| parse_opencode_major(&String::from_utf8_lossy(&o.stdout)));
+    cache.lock().unwrap().insert(cli.to_path_buf(), v);
+    v
+}
+
+pub fn parse_opencode_major(text: &str) -> Option<u32> {
+    text.split_whitespace().find_map(|w| {
+        let w = w.trim_start_matches('v');
+        let major = w.split('.').next()?;
+        if w.contains('.') {
+            major.parse().ok()
+        } else {
+            None
+        }
+    })
 }
 
 fn attach_system_prompt(p: &Provider, args: &mut Vec<String>, path: Option<&Path>) {
@@ -1081,6 +1211,7 @@ pub(crate) mod tests {
             system_prompt_flag: crate::config::default_system_prompt_flag(kind).into(),
             keep_alive: String::new(),
             capabilities: Vec::new(),
+            allow_shell: false,
         }
     }
 
@@ -1258,8 +1389,113 @@ pub(crate) mod tests {
             .args
             .windows(2)
             .any(|w| w == ["--file", "/wt/.atr/prompt.md"]));
+        // OpenCode 2.x rejects both flags ("Unrecognized flag") and exits 1.
+        assert!(!spec.args.iter().any(|a| a == "--dir"), "{:?}", spec.args);
+        assert!(
+            !spec.args.iter().any(|a| a == "--system"),
+            "{:?}",
+            spec.args
+        );
+        assert_eq!(spec.cwd, PathBuf::from("/wt"));
         assert!(!spec.args.iter().any(|a| a.contains("SECRET-PROMPT")));
         assert!(spec.stdin_text.is_none());
+    }
+
+    #[test]
+    fn opencode_run_denies_shell_via_config_content() {
+        let mut p = stub("opencode");
+        p.cli = PathBuf::from("/nonexistent/opencode");
+        let spec = build_command(
+            &p,
+            Path::new("/wt"),
+            Path::new("/wt/.atr/prompt.md"),
+            "x",
+            None,
+            true,
+        );
+        let (_, v) = spec
+            .env
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+            .expect("OPENCODE_CONFIG_CONTENT set");
+        let j: Value = serde_json::from_str(v).unwrap();
+        let denied: Vec<&str> = j["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["effect"] == "deny")
+            .map(|r| r["action"].as_str().unwrap())
+            .collect();
+        for a in [
+            "shell",
+            "execute",
+            "external_directory",
+            "subagent",
+            "skill",
+        ] {
+            assert!(denied.contains(&a), "{a} not denied: {v}");
+        }
+        // Unknown version (missing binary): the 1.x map is written too.
+        assert_eq!(j["permission"]["bash"], "deny", "{v}");
+        assert_eq!(j["permission"]["external_directory"], "deny", "{v}");
+        assert_eq!(j["permission"]["skill"], "deny", "{v}");
+        // Other CLIs get no extra env.
+        let c = build_command(
+            &stub("claude"),
+            Path::new("/wt"),
+            Path::new("/p"),
+            "x",
+            None,
+            true,
+        );
+        assert!(c.env.is_empty());
+    }
+
+    #[test]
+    fn opencode_config_content_by_version_and_opt_in() {
+        let v2: Value =
+            serde_json::from_str(&opencode_config_content(Some(2), false, None)).unwrap();
+        assert!(v2.get("permission").is_none(), "{v2}");
+        assert!(v2["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["action"] == "shell"));
+        let v1: Value =
+            serde_json::from_str(&opencode_config_content(Some(1), false, None)).unwrap();
+        assert!(v1.get("permissions").is_none(), "{v1}");
+        assert_eq!(v1["permission"]["bash"], "deny");
+        // allow_shell keeps the shell but still denies leaving the worktree.
+        let ok: Value =
+            serde_json::from_str(&opencode_config_content(Some(2), true, None)).unwrap();
+        let acts: Vec<_> = ok["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["action"].clone())
+            .collect();
+        assert!(!acts.contains(&Value::from("shell")), "{ok}");
+        assert!(acts.contains(&Value::from("external_directory")), "{ok}");
+        // The caller's own config content is kept; atr's denies come last.
+        let mine =
+            r#"{"model":"x/y","permissions":[{"action":"read","resource":"*","effect":"allow"}]}"#;
+        let m: Value =
+            serde_json::from_str(&opencode_config_content(Some(2), false, Some(mine))).unwrap();
+        assert_eq!(m["model"], "x/y");
+        let rules = m["permissions"].as_array().unwrap();
+        assert_eq!(rules[0]["action"], "read");
+        assert_eq!(rules.last().unwrap()["effect"], "deny");
+        // Junk is ignored, not an error.
+        assert!(opencode_config_content(None, false, Some("not json")).contains("permissions"));
+    }
+
+    #[test]
+    fn parses_opencode_versions() {
+        assert_eq!(parse_opencode_major("opencode v2.0.28\n"), Some(2));
+        assert_eq!(parse_opencode_major("1.0.132"), Some(1));
+        assert_eq!(parse_opencode_major("opencode 1.0.132"), Some(1));
+        assert_eq!(parse_opencode_major("garbage"), None);
+        assert_eq!(opencode_major(Path::new("/nonexistent/opencode")), None);
     }
 
     #[test]
@@ -1681,8 +1917,23 @@ pub(crate) mod tests {
         assert!(
             o.args
                 .windows(2)
-                .any(|w| w == ["--system", "/wt/.atr/system.md"]),
+                .any(|w| w == ["--file", "/wt/.atr/system.md"]),
             "{:?}",
+            o.args
+        );
+        let sys_at = o
+            .args
+            .iter()
+            .position(|a| a == "/wt/.atr/system.md")
+            .unwrap();
+        let prompt_at = o
+            .args
+            .iter()
+            .position(|a| a == "/wt/.atr/prompt.md")
+            .unwrap();
+        assert!(
+            sys_at < prompt_at,
+            "stable prefix must be attached first: {:?}",
             o.args
         );
 

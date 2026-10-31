@@ -1045,6 +1045,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         None
     };
     let resume_delta = !new_session && session.is_some() && !switching && !cannot_resume;
+    let repo_label = prompt::repo_label(entry.as_ref().map(|e| e.github.as_str()), &repo, &wt);
     let has_slot = provider.kind == "codex" || !provider.system_prompt_flag.is_empty();
     let mut rendered = if resume_delta {
         prompt::render_resume(&bodies, handoff_text.as_deref())
@@ -1052,7 +1053,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         prompt::render_variable(
             &key,
             &wt,
-            &repo.display().to_string(),
+            &repo_label,
             task.issue,
             &cfg.shell_command_timeout_raw,
             handoff_text.as_deref(),
@@ -1066,7 +1067,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             &prefix,
             &key,
             &wt,
-            &repo.display().to_string(),
+            &repo_label,
             task.issue,
             &cfg.shell_command_timeout_raw,
             handoff_text.as_deref(),
@@ -1145,6 +1146,14 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         std::fs::create_dir_all(sys_path.parent().unwrap())?;
         std::fs::write(&sys_path, &prefix)?;
     }
+    // Snapshot the main checkout so a run that escapes its worktree is
+    // caught (and never delivered), whatever the agent's own sandboxing did.
+    let main_guard =
+        if ws_kind == crate::task::WorkspaceKind::Git && !assistant && !task.shadow && repo != wt {
+            crate::output::main_checkout_snapshot(&repo)
+        } else {
+            None
+        };
     let result = runner::run_cli(
         &shared.db,
         &cfg,
@@ -1299,7 +1308,94 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         .finish_run(run_id, &result.outcome, result.exit_code)?;
     shared.db.finish_turn(turn_id, &result.outcome)?;
 
-    let verify = if result.outcome == "success" && !assistant {
+    // Drop scratch files the agent left (test_*.py, run_tests.py, verify_*.md
+    // at the root, …) and restore tracked docs it rewrote unasked (README.md
+    // in sandbox PR #32) before the no-op check, verify, and commit, so they
+    // never reach the PR or get collected by the verify command.
+    // Only after a successful run: a stalled or failed run's files are what
+    // the next provider's handoff describes. Shadow runs only measure.
+    if (cfg.scratch.drop || cfg.scratch.revert_docs)
+        && result.outcome == "success"
+        && ws_kind == crate::task::WorkspaceKind::Git
+        && !assistant
+        && !task.shadow
+        && repo != wt
+        && crate::worktree::is_git_repo(&wt)
+    {
+        let title = shared
+            .db
+            .get_task(&key)
+            .ok()
+            .flatten()
+            .map(|t| t.title)
+            .unwrap_or_else(|| task.title.clone());
+        let c = crate::scratch::clean_for_task(&cfg, &shared.db, &key, &title, &wt);
+        if !c.dropped.is_empty() {
+            tracing::info!(
+                task = %key,
+                run = run_id,
+                "dropped {} scratch file(s) the task did not ask for: {}",
+                c.dropped.len(),
+                c.dropped.join(", ")
+            );
+        }
+        if !c.reverted.is_empty() {
+            tracing::info!(
+                task = %key,
+                run = run_id,
+                "reverted {} tracked docs file(s) the task did not ask for: {}",
+                c.reverted.len(),
+                c.reverted.join(", ")
+            );
+        }
+    }
+
+    // A worker run that "succeeded" but changed nothing (empty diff, no
+    // usable suggestion, no answer) is a no-op, never reported as success.
+    let noop: Option<String> = if result.outcome == "success"
+        && !assistant
+        && !task.shadow
+        && task.role != "plan"
+        && task.role != crate::compare::ARM_ROLE
+    {
+        let task_now = shared.db.get_task(&key)?.unwrap_or_else(|| task.clone());
+        let text = crate::output::last_text(&shared, &key);
+        crate::output::noop_reason(&cfg, &task_now, &text)
+            .map(|why| crate::output::noop_report(&task_now, &why, &text))
+    } else {
+        None
+    };
+    let escaped: Option<String> = main_guard.as_deref().and_then(|before| {
+        let after = crate::output::main_checkout_snapshot(&repo)?;
+        let changed = crate::output::main_checkout_changes(before, &after);
+        if changed.is_empty() {
+            None
+        } else {
+            let task_now = shared
+                .db
+                .get_task(&key)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| task.clone());
+            Some(crate::output::main_checkout_report(
+                &task_now, &repo, &changed,
+            ))
+        }
+    });
+    // Both are "stop here, deliver nothing, needs attention"; an escape from
+    // the worktree wins over a plain no-op.
+    let halt_outcome = if escaped.is_some() {
+        "main_checkout_edit"
+    } else {
+        "no_op"
+    };
+    let noop = escaped.or(noop);
+    if noop.is_some() {
+        shared.db.set_run_outcome(run_id, halt_outcome)?;
+        shared.db.finish_turn(turn_id, halt_outcome)?;
+    }
+
+    let verify = if result.outcome == "success" && !assistant && noop.is_none() {
         let task_now = shared.db.get_task(&key)?.unwrap_or_else(|| task.clone());
         Some(
             crate::verify::run(&cfg, &shared.db, &key, &repo, &wt, run_id, &task_now)
@@ -1327,7 +1423,9 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     };
 
     let mut final_outcome = result.outcome.clone();
-    if result.outcome == "success" {
+    if noop.is_some() {
+        final_outcome = halt_outcome.into();
+    } else if result.outcome == "success" {
         let v = verify.as_ref().cloned().unwrap_or_default();
         if v.reason.as_deref() == Some("tests_modified") {
             final_outcome = "tests_modified".into();
@@ -1367,7 +1465,27 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         );
     }
 
-    match result.outcome.as_str() {
+    let match_on = if noop.is_some() {
+        "no_op"
+    } else {
+        result.outcome.as_str()
+    };
+    match match_on {
+        "no_op" => {
+            let report = noop.clone().unwrap_or_default();
+            shared.db.set_stall_retries(&key, 0)?;
+            shared.db.clear_retry(&key)?;
+            shared.db.set_tried(&key, None)?;
+            let diff = shared
+                .db
+                .get_task(&key)?
+                .map(|t| t.result_diff)
+                .unwrap_or_default();
+            shared.db.set_task_result(&key, &report, &diff, None)?;
+            shared.db.set_status(&key, "needs_attention")?;
+            tracing::warn!(task = %key, "{report}");
+            notify_run(&cfg.telegram, &report, task.shadow);
+        }
         "success" => {
             shared.db.set_stall_retries(&key, 0)?;
             shared.db.clear_retry(&key)?;
@@ -1388,7 +1506,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                     .get_task(&key)?
                     .map(|t| t.verify_retries)
                     .unwrap_or(0);
-                if retry && used < i64::from(cfg.verify.max_retries) {
+                if retry && used < i64::from(cfg.verify.retries_for(&provider)) {
                     shared.db.set_verify_retries(&key, used + 1)?;
                     let body = v.failure_followup(cfg.verify.max_output_bytes);
                     shared.db.enqueue_message(&key, &body, "verify")?;
@@ -1568,7 +1686,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     if assistant {
         crate::telegram::deliver_assistant_result(&shared, &key, run_id, &final_outcome);
     }
-    if final_outcome != "success" {
+    if final_outcome != "success" && noop.is_none() {
         let _ = crate::output::capture(&shared, &key);
     }
     if !assistant && cfg.lessons_enabled_for(&task) {
@@ -2607,6 +2725,7 @@ mod tests {
             system_prompt_flag: String::new(),
             keep_alive: String::new(),
             capabilities: Vec::new(),
+            allow_shell: false,
         }
     }
 

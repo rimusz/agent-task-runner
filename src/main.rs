@@ -85,7 +85,7 @@ enum Cmd {
         /// Git repository workspace (worktree / branch). Name, owner/name, or path.
         #[arg(long)]
         repo: Option<String>,
-        /// reply (default), pr, issue-comment, branch, patch, text, webhook
+        /// reply (default), pr, issue-comment, branch, patch, text, webhook, triage
         #[arg(long)]
         output: Option<String>,
         #[arg(long)]
@@ -316,6 +316,55 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CompareCmd,
     },
+    /// Suggest-only issue triage: suggestions are stored locally and nothing
+    /// is posted to GitHub until `atr triage approve`.
+    Triage {
+        #[command(subcommand)]
+        cmd: TriageCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TriageCmd {
+    /// Queue a triage task for one issue (the model only suggests).
+    Run {
+        /// Configured repo (name or owner/name).
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        issue: i64,
+        /// Allowed labels (comma-separated; default bug,duplicate,needs-info,already-fixed).
+        #[arg(long, value_delimiter = ',')]
+        labels: Vec<String>,
+        #[arg(long)]
+        key: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// List suggestions (pending only unless --all).
+    List {
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one suggestion in full.
+    Show { id: String },
+    /// Approve a suggestion: atr adds the label and posts the sanitized comment.
+    Approve {
+        id: String,
+        /// Use this label instead of the suggested one.
+        #[arg(long)]
+        label: Option<String>,
+        /// Use this comment text instead of the suggested one.
+        #[arg(long)]
+        comment: Option<String>,
+        /// Add the label only; post no comment.
+        #[arg(long)]
+        no_comment: bool,
+    },
+    /// Reject a suggestion (nothing is posted).
+    Reject { id: String },
 }
 
 #[derive(Args, Debug)]
@@ -832,6 +881,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 SubmitOutcome::Queued => Ok(ExitCode::from(EX_TEMPFAIL as u8)),
             }
         }
+        Cmd::Triage { cmd } => run_triage_cmd(path, cmd).await,
         Cmd::Ask { prompt, sess } => {
             let shared = open_after_init(path, "atr ask").await?;
             {
@@ -1417,6 +1467,8 @@ fn http_create(
             payload["webhook"] = serde_json::Value::String(spec.into());
         } else if output == "patch" {
             payload["patch"] = serde_json::Value::String(spec.into());
+        } else if output == "triage" {
+            payload["triage"] = serde_json::Value::String(spec.into());
         }
     }
     let mut req = ureq::post(&url).set("User-Agent", "atr");
@@ -1480,6 +1532,140 @@ fn http_cancel(listen: &str, auth: Option<&str>, key: &str, force: bool) -> Resu
         bail!("{msg}");
     }
     Ok(())
+}
+
+async fn run_triage_cmd(path: PathBuf, cmd: TriageCmd) -> anyhow::Result<ExitCode> {
+    use atr::triage;
+    match cmd {
+        TriageCmd::Run {
+            repo,
+            issue,
+            labels,
+            key,
+            provider,
+        } => {
+            let shared = open_after_init(path, "atr triage run").await?;
+            let cfg = shared.config.read().unwrap().clone();
+            let entry = cfg
+                .resolve_repo_filter(&repo)
+                .ok_or_else(|| anyhow::anyhow!("unknown repo {repo}"))?;
+            if entry.github.is_empty() {
+                anyhow::bail!("repo {repo} has no github owner/name");
+            }
+            let labels: Vec<String> = if labels.is_empty() {
+                triage::DEFAULT_LABELS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            } else {
+                labels
+            };
+            let (text, title) = triage::build_prompt(&cfg, &repo, issue, &labels)?;
+            let spec = triage::format_spec(&entry.github, issue, &labels);
+            let key = match key {
+                Some(k) => k,
+                None => atr::task::allocate_key(&shared.db, &cfg.task_key_prefix, &title)?,
+            };
+            let repo_path = entry.path.display().to_string();
+            let auth = atr::mcp::auth_header(&cfg.mcp);
+            if let Ok(status) = http_create(
+                &cfg.listen,
+                auth.as_deref(),
+                &key,
+                &text,
+                Some(&repo_path),
+                atr::task::WorkspaceKind::Git.as_str(),
+                atr::task::OutputKind::Triage.as_str(),
+                Some(&spec),
+                title.as_str(),
+                provider.as_deref(),
+                false,
+                &[],
+                &[],
+            ) {
+                println!("{key}");
+                return Ok(match status {
+                    200 => ExitCode::SUCCESS,
+                    202 => ExitCode::from(EX_TEMPFAIL as u8),
+                    _ => ExitCode::from(1),
+                });
+            }
+            drop(cfg);
+            let body = format!("# {title}\n\n{text}");
+            shared.submit_with(
+                &key,
+                &body,
+                "cli",
+                Some(&repo_path),
+                None,
+                false,
+                false,
+                atr::SubmitOpts {
+                    workspace_kind: Some(atr::task::WorkspaceKind::Git.as_str().into()),
+                    output_kind: Some(atr::task::OutputKind::Triage.as_str().into()),
+                    output_spec: Some(spec),
+                    source_kind: Some("cli".into()),
+                    title: Some(title),
+                    allow_empty_repo: false,
+                    provider_hint: provider,
+                    needs: Vec::new(),
+                    after: Vec::new(),
+                },
+            )?;
+            println!("{key}");
+            Ok(ExitCode::SUCCESS)
+        }
+        TriageCmd::List { all, json } => {
+            let cfg = load_config(&path)?;
+            let items: Vec<_> = triage::list(&triage::store_dir(&cfg))?
+                .into_iter()
+                .filter(|s| all || s.status == "pending")
+                .collect();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&items)?);
+            } else if items.is_empty() {
+                println!("no {}triage suggestions", if all { "" } else { "pending " });
+            } else {
+                for s in &items {
+                    println!("{}", triage::render_line(s));
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        TriageCmd::Show { id } => {
+            let cfg = load_config(&path)?;
+            print!(
+                "{}",
+                triage::render_full(&triage::load(&triage::store_dir(&cfg), &id)?)
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        TriageCmd::Approve {
+            id,
+            label,
+            comment,
+            no_comment,
+        } => {
+            let cfg = load_config(&path)?;
+            let s = triage::approve(
+                &cfg,
+                &id,
+                &triage::ApproveOpts {
+                    label,
+                    comment,
+                    no_comment,
+                },
+            )?;
+            println!("approved {}", triage::render_line(&s));
+            Ok(ExitCode::SUCCESS)
+        }
+        TriageCmd::Reject { id } => {
+            let cfg = load_config(&path)?;
+            let s = triage::reject(&cfg, &id)?;
+            println!("rejected {}", triage::render_line(&s));
+            Ok(ExitCode::SUCCESS)
+        }
+    }
 }
 
 #[cfg(test)]
