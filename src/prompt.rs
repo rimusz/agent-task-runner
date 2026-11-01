@@ -219,6 +219,26 @@ pub const INTERRUPT_PREAMBLE: &str = "Your previous turn was interrupted so you 
 could read the message below. Address it, then continue your unfinished task \
 from the current state of the workspace (edits you already made are still there).";
 
+/// First message of the turn after `atr serve` restarted mid-turn.
+/// The previous CLI process is gone; the worktree and session are kept.
+pub const RESTART_PREAMBLE: &str = "Your previous turn was cut off by an atr restart. \
+Before repeating any outside action (git push, PR/issue comments, API calls, \
+deploys, messages), check the worktree state, git log/history and the remote \
+to see what already happened, then continue the unfinished task.";
+
+/// Short queued body so a restart-resumed task has pending work to dispatch.
+/// The full recovery note is prepended via [`RESTART_PREAMBLE`].
+pub const RESTART_CONTINUE: &str = "Continue the unfinished task from the current workspace state.";
+
+/// Preamble inserted as the first body of a resumed turn, if any.
+pub fn turn_preamble(prior_outcome: Option<&str>) -> Option<&'static str> {
+    match prior_outcome {
+        Some("interrupted") => Some(INTERRUPT_PREAMBLE),
+        Some("restarted") => Some(RESTART_PREAMBLE),
+        _ => None,
+    }
+}
+
 pub fn render_resume(messages: &[String], handoff: Option<&str>) -> String {
     let mut out = String::new();
     if let Some(h) = handoff.filter(|s| !s.is_empty()) {
@@ -432,5 +452,21 @@ permission_mode = "bypassPermissions"
         let with_h = render_resume(&["next".into()], Some("note"));
         assert!(with_h.contains("Follow-up"));
         assert!(with_h.contains("next"));
+    }
+
+    #[test]
+    fn turn_preamble_for_interrupt_and_restart() {
+        assert_eq!(turn_preamble(Some("interrupted")), Some(INTERRUPT_PREAMBLE));
+        assert_eq!(turn_preamble(Some("restarted")), Some(RESTART_PREAMBLE));
+        assert_eq!(turn_preamble(Some("failed")), None);
+        assert_eq!(turn_preamble(None), None);
+        assert!(RESTART_PREAMBLE.contains("atr restart"));
+        assert!(RESTART_PREAMBLE.contains("git push"));
+        let delta = render_resume(
+            &[RESTART_PREAMBLE.to_string(), RESTART_CONTINUE.to_string()],
+            None,
+        );
+        assert!(delta.starts_with("Your previous turn was cut off by an atr restart"));
+        assert!(delta.contains("Continue the unfinished task"));
     }
 }

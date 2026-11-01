@@ -100,6 +100,9 @@ pub struct RawConfig {
     /// Transient provider-error retries (overloaded, 429 without reset, 5xx).
     #[serde(default)]
     pub retry: RawRetry,
+    /// Re-queue a turn cut off only because `atr serve` restarted.
+    #[serde(default)]
+    pub restart: RawRestart,
     /// Host CPU/memory gate before starting a new task.
     #[serde(default)]
     pub host: RawHost,
@@ -688,6 +691,8 @@ pub struct Config {
     pub max_prompt_bytes: u64,
     pub desktop_check: String,
     pub retry: RetryConfig,
+    /// Re-queue in-flight turns cut off only because `atr serve` restarted.
+    pub restart: RestartConfig,
     pub host: HostConfig,
     /// Keys in the file this binary does not know (ignored; `atr doctor` warns).
     /// Dotted paths such as `compare.enabled` or `provider.0.foo`.
@@ -844,6 +849,30 @@ impl Default for RetryConfig {
             ],
             backoff_raw: default_retry_backoff(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawRestart {
+    /// Re-queue a genuine in-flight turn after `atr serve` restarts.
+    #[serde(default = "default_true")]
+    pub resume: bool,
+}
+
+impl Default for RawRestart {
+    fn default() -> Self {
+        Self { resume: true }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RestartConfig {
+    pub resume: bool,
+}
+
+impl Default for RestartConfig {
+    fn default() -> Self {
+        Self { resume: true }
     }
 }
 
@@ -2074,6 +2103,7 @@ fn known_field_names() -> Vec<String> {
         introspect::fields::<RawUpdate>(),
         introspect::fields::<RawNotify>(),
         introspect::fields::<RawRetry>(),
+        introspect::fields::<RawRestart>(),
         introspect::fields::<RawHost>(),
         introspect::fields::<RawHandoff>(),
         introspect::fields::<RawShadow>(),
@@ -2689,6 +2719,9 @@ impl Config {
                 },
             },
             retry: parse_retry(raw.retry)?,
+            restart: RestartConfig {
+                resume: raw.restart.resume,
+            },
             host: parse_host(raw.host)?,
             repos: {
                 let mut seen = std::collections::BTreeSet::new();
@@ -3373,6 +3406,7 @@ future_knob = true
             "label",
             "backoff",
             "min_memory_mb",
+            "resume",
         ] {
             assert!(known.iter().any(|f| f == k), "{k} missing");
         }
@@ -3392,6 +3426,7 @@ kind = "claude"
         assert!(cfg.retry.enabled);
         assert_eq!(cfg.retry.max_attempts, 4);
         assert_eq!(cfg.retry.backoff_raw, ["1m", "2m", "4m", "8m"]);
+        assert!(cfg.restart.resume);
         assert!(cfg.host.enabled);
         assert!((cfg.host.max_load - 0.85).abs() < f64::EPSILON);
         assert_eq!(cfg.host.min_memory_mb, 512);

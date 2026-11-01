@@ -88,10 +88,18 @@ Wrong provider planning or answering? `atr driver` shows the driver; see
 [Choosing the driver provider and model](CONFIG.md#choosing-the-driver-provider-and-model).
 
 **Task stays `queued` with a retry time.** A transient provider error
-(overloaded, 429 without a parsed reset, 5xx, dropped stream) is waiting
+(overloaded, 429 without a parsed reset, 5xx, 408 / request timeout,
+dropped stream) is waiting
 out `[retry]` backoff. `atr status --json` shows `retry_reason` /
 `retry_next_at`. `atr retry <key>` starts now. Turn the feature off with
 `atr config set retry.enabled false`.
+
+**Task result says `interrupted by atr restart; resuming`.** Serve restarted
+while the turn was in flight. The task is queued again on the same
+worktree/session; the next turn starts with a recovery note. A second
+restart, a missing worktree, or a failure during workspace prepare still
+marks the task `failed` (`orphaned run (process gone)`). Turn this off
+with `atr config set restart.resume false`.
 
 **Task is `held`.** It declared `after:` and a dependency failed, was
 cancelled, or is gone. Status / notify show `hold_reason`. Fix or retry the

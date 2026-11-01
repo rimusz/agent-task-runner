@@ -634,6 +634,9 @@ impl Shared {
                 "max_attempts": cfg.retry.max_attempts,
                 "backoff": cfg.retry.backoff_raw,
             },
+            "restart": {
+                "resume": cfg.restart.resume,
+            },
             "driver": cfg.driver_name(),
             "planner": cfg.planner.mode.as_str(),
             "review": cfg.review.enabled,
@@ -646,6 +649,10 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
     let k = scheduler::reap_orphans_at_start(&shared)?;
     if k > 0 {
         tracing::warn!(k, "killed orphaned CLI runs from a previous serve");
+    }
+    let resumed = scheduler::recover_restart_orphans(&shared)?;
+    if resumed > 0 {
+        tracing::info!(resumed, "resumed tasks interrupted by atr restart");
     }
     let n = reconcile(&shared)?;
     if n > 0 {

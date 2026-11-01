@@ -1004,8 +1004,8 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         .into_iter()
         .filter(|r| r.id != run_id)
         .collect();
-    if prior.last().and_then(|r| r.outcome.as_deref()) == Some("interrupted") {
-        bodies.insert(0, prompt::INTERRUPT_PREAMBLE.to_string());
+    if let Some(preamble) = prompt::turn_preamble(prior.last().and_then(|r| r.outcome.as_deref())) {
+        bodies.insert(0, preamble.to_string());
     }
     let switching = prior
         .last()
@@ -2382,6 +2382,112 @@ pub(crate) fn fail_claimed(shared: &Shared, key: &str, err: &anyhow::Error) {
     let _ = shared.db.set_status(key, "failed");
 }
 
+/// Visible on the task while it waits to resume after an atr restart.
+const RESTART_RESULT: &str = "interrupted by atr restart; resuming";
+
+/// Startup only: re-queue a task whose in-flight turn died only because the
+/// previous `atr serve` exited. One resume per task; a second restart, a
+/// missing worktree, or a prepare/setup failure (no open run) still fails.
+pub fn recover_restart_orphans(shared: &Shared) -> Result<usize> {
+    let cfg = shared.config.read().unwrap().clone();
+    if !cfg.restart.resume {
+        return Ok(0);
+    }
+    let mut n = 0;
+    for r in shared.db.open_runs()? {
+        if try_resume_restart_orphan(shared, &r)? {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+fn try_resume_restart_orphan(shared: &Shared, run: &crate::db::RunRow) -> Result<bool> {
+    if shared.inflight.lock().unwrap().contains_key(&run.task_key) {
+        return Ok(false);
+    }
+    if !serve_dispatches(&run.task_key) {
+        return Ok(false);
+    }
+    if run.owner_alive() {
+        return Ok(false);
+    }
+    if run.pid.filter(|p| *p > 0).is_some_and(pid_alive) {
+        return Ok(false);
+    }
+    let Some(task) = shared.db.get_task(&run.task_key)? else {
+        return Ok(false);
+    };
+    if task.status == "held" || !task.hold_reason.is_empty() {
+        return Ok(false);
+    }
+    if last_finished_was_restarted(&shared.db, &run.task_key, run.id)? {
+        tracing::warn!(
+            task = %run.task_key,
+            run = run.id,
+            "restart resume already used; leaving orphan to fail"
+        );
+        // Drop the previous "resuming" note so reconcile's fail reason is visible.
+        if task.result_text == RESTART_RESULT {
+            let _ = shared.db.set_task_result(&run.task_key, "", "", None);
+        }
+        // A continue queued by the first resume must not requeue the task
+        // after this fail (window between start_run and mark_consumed).
+        drop_restart_continue(shared, &run.task_key)?;
+        return Ok(false);
+    }
+    if !worktree_present(&task) {
+        tracing::warn!(
+            task = %run.task_key,
+            run = run.id,
+            "restart resume skipped; worktree missing"
+        );
+        return Ok(false);
+    }
+    shared.db.finish_run(run.id, "restarted", Some(-2))?;
+    if shared.db.pending_messages(&run.task_key)?.is_empty() {
+        shared
+            .db
+            .enqueue_message(&run.task_key, prompt::RESTART_CONTINUE, "restart")?;
+    }
+    let _ = shared
+        .db
+        .set_task_result(&run.task_key, RESTART_RESULT, "", None);
+    shared.db.set_status(&run.task_key, "queued")?;
+    tracing::info!(
+        task = %run.task_key,
+        run = run.id,
+        worktree = %task.worktree.as_deref().unwrap_or(""),
+        "resuming task interrupted by atr restart"
+    );
+    Ok(true)
+}
+
+fn last_finished_was_restarted(db: &Db, key: &str, except_run_id: i64) -> Result<bool> {
+    let last = db
+        .list_runs(Some(key))?
+        .into_iter()
+        .rev()
+        .find(|r| r.id != except_run_id && r.outcome.is_some());
+    Ok(last.and_then(|r| r.outcome).as_deref() == Some("restarted"))
+}
+
+fn worktree_present(task: &crate::db::Task) -> bool {
+    match task.worktree.as_deref() {
+        Some(p) if !p.is_empty() => std::path::Path::new(p).exists(),
+        _ => false,
+    }
+}
+
+fn drop_restart_continue(shared: &Shared, key: &str) -> Result<()> {
+    for m in shared.db.pending_messages(key)? {
+        if m.source == "restart" {
+            shared.db.mark_consumed(&[m.id], 0)?;
+        }
+    }
+    Ok(())
+}
+
 /// Startup only: a run left open by a previous `atr serve` whose CLI is still
 /// alive (serve was SIGKILLed; the CLI runs in its own process group) would
 /// keep the task `running` forever with nobody reading its output. Kill it
@@ -3601,6 +3707,160 @@ cli = "{cli}"
             "{}",
             t.result_text
         );
+    }
+
+    fn orphaned_running_with_worktree(
+        shared: &Shared,
+        key: &str,
+        worktree: &std::path::Path,
+    ) -> i64 {
+        std::fs::create_dir_all(worktree).unwrap();
+        shared.db.upsert_task(key, "/etc", None).unwrap();
+        shared.db.set_status(key, "running").unwrap();
+        shared
+            .db
+            .set_worktree(key, &worktree.display().to_string())
+            .unwrap();
+        let run = shared.db.start_run(key, "claude", "").unwrap();
+        shared.db.set_run_pid(run, 1_999_999_999).unwrap();
+        shared.db.set_run_owner(run, None).unwrap();
+        shared.db.set_task_owner(key, None).unwrap();
+        run
+    }
+
+    #[test]
+    fn recover_restart_orphans_resumes_once_with_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_for_reconcile(dir.path());
+        let wt = dir.path().join("wt");
+        let run = orphaned_running_with_worktree(&shared, "task-resume", &wt);
+
+        assert_eq!(recover_restart_orphans(&shared).unwrap(), 1);
+        assert_eq!(reconcile(&shared).unwrap(), 0);
+        let t = shared.db.get_task("task-resume").unwrap().unwrap();
+        assert_eq!(t.status, "queued");
+        assert!(
+            t.result_text.contains("atr restart") && t.result_text.contains("resuming"),
+            "{}",
+            t.result_text
+        );
+        let pending = shared.db.pending_messages("task-resume").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].body, prompt::RESTART_CONTINUE);
+        assert_eq!(pending[0].source, "restart");
+        let runs = shared.db.list_runs(Some("task-resume")).unwrap();
+        let finished = runs.iter().find(|r| r.id == run).unwrap();
+        assert_eq!(finished.outcome.as_deref(), Some("restarted"));
+        assert_eq!(
+            prompt::turn_preamble(finished.outcome.as_deref()),
+            Some(prompt::RESTART_PREAMBLE)
+        );
+        assert!(prompt::RESTART_PREAMBLE.contains("atr restart"));
+        assert!(prompt::RESTART_PREAMBLE.contains("git push"));
+    }
+
+    #[test]
+    fn recover_restart_orphans_second_restart_or_missing_worktree_or_prepare_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_for_reconcile(dir.path());
+        let wt = dir.path().join("wt");
+        orphaned_running_with_worktree(&shared, "task-again", &wt);
+        assert_eq!(recover_restart_orphans(&shared).unwrap(), 1);
+
+        // The resumed turn is now in flight and serve dies again.
+        shared.db.set_status("task-again", "running").unwrap();
+        let run2 = shared.db.start_run("task-again", "claude", "").unwrap();
+        let ids: Vec<i64> = shared
+            .db
+            .pending_messages("task-again")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        shared.db.mark_consumed(&ids, run2).unwrap();
+        shared.db.set_run_pid(run2, 1_999_999_998).unwrap();
+        shared.db.set_run_owner(run2, None).unwrap();
+        shared.db.set_task_owner("task-again", None).unwrap();
+        assert_eq!(recover_restart_orphans(&shared).unwrap(), 0);
+        assert!(reconcile(&shared).unwrap() >= 1);
+        let t = shared.db.get_task("task-again").unwrap().unwrap();
+        assert_eq!(t.status, "failed");
+        assert!(
+            t.result_text.contains("orphaned") || t.result_text.contains("process gone"),
+            "{}",
+            t.result_text
+        );
+
+        let miss_dir = dir.path().join("miss");
+        std::fs::create_dir_all(&miss_dir).unwrap();
+        let missing = shared_for_reconcile(&miss_dir);
+        missing
+            .db
+            .upsert_task("task-gone-wt", "/etc", None)
+            .unwrap();
+        missing.db.set_status("task-gone-wt", "running").unwrap();
+        missing
+            .db
+            .set_worktree("task-gone-wt", "/no/such/worktree")
+            .unwrap();
+        let run = missing.db.start_run("task-gone-wt", "claude", "").unwrap();
+        missing.db.set_run_pid(run, 1_999_999_997).unwrap();
+        missing.db.set_run_owner(run, None).unwrap();
+        missing.db.set_task_owner("task-gone-wt", None).unwrap();
+        assert_eq!(recover_restart_orphans(&missing).unwrap(), 0);
+        assert!(reconcile(&missing).unwrap() >= 1);
+        let t = missing.db.get_task("task-gone-wt").unwrap().unwrap();
+        assert_eq!(t.status, "failed");
+
+        let prep_dir = dir.path().join("prep");
+        std::fs::create_dir_all(&prep_dir).unwrap();
+        let prep = shared_for_reconcile(&prep_dir);
+        let prep_wt = dir.path().join("prep-wt");
+        std::fs::create_dir_all(&prep_wt).unwrap();
+        prep.db.upsert_task("task-prep", "/etc", None).unwrap();
+        prep.db.set_status("task-prep", "running").unwrap();
+        prep.db
+            .set_worktree("task-prep", &prep_wt.display().to_string())
+            .unwrap();
+        prep.db.set_task_owner("task-prep", None).unwrap();
+        assert_eq!(recover_restart_orphans(&prep).unwrap(), 0);
+        assert!(reconcile(&prep).unwrap() >= 1);
+        let t = prep.db.get_task("task-prep").unwrap().unwrap();
+        assert_eq!(t.status, "failed");
+        assert!(
+            t.result_text.contains("orphaned") || t.result_text.contains("setup"),
+            "{}",
+            t.result_text
+        );
+    }
+
+    #[test]
+    fn recover_restart_orphans_respects_config_off_and_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_for_reconcile(dir.path());
+        shared.config.write().unwrap().restart.resume = false;
+        let wt = dir.path().join("wt");
+        orphaned_running_with_worktree(&shared, "task-off", &wt);
+        assert_eq!(recover_restart_orphans(&shared).unwrap(), 0);
+        assert!(reconcile(&shared).unwrap() >= 1);
+        assert_eq!(
+            shared.db.get_task("task-off").unwrap().unwrap().status,
+            "failed"
+        );
+
+        let held_dir = dir.path().join("held");
+        std::fs::create_dir_all(&held_dir).unwrap();
+        let held = shared_for_reconcile(&held_dir);
+        let held_wt = dir.path().join("held-wt");
+        orphaned_running_with_worktree(&held, "held-1", &held_wt);
+        held.db.set_status("held-1", "held").unwrap();
+        held.db.set_hold("held-1", "after b failed", true).unwrap();
+        assert_eq!(held.db.get_task("held-1").unwrap().unwrap().status, "held");
+        assert_eq!(recover_restart_orphans(&held).unwrap(), 0);
+        let _ = reconcile(&held).unwrap();
+        let t = held.db.get_task("held-1").unwrap().unwrap();
+        assert_eq!(t.status, "held");
+        assert_eq!(t.hold_reason, "after b failed");
     }
 
     #[test]

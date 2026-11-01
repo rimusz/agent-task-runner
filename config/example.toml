@@ -186,13 +186,21 @@ max_bytes = "5m"
 keep = 5
 
 # Transient provider errors (capacity, 429 without a parsed reset, 5xx,
-# dropped stream). Lasting errors (auth, invalid args, quota with a known
-# reset, task logic) are not retried here. Attempt count and next-at live
-# in state.db so a serve restart keeps the schedule.
+# 408 / request timeout, dropped stream). Lasting errors (auth, invalid
+# args, quota with a known reset, task logic) are not retried here.
+# Attempt count and next-at live in state.db so a serve restart keeps
+# the schedule.
 [retry]
 enabled = true
 max_attempts = 4
 backoff = ["1m", "2m", "4m", "8m"]
+
+# After `atr serve` restarts, re-queue a genuine in-flight turn (process
+# gone, worktree still there) once, with a recovery note. A second
+# restart, a missing worktree, or a prepare/setup failure still fails.
+# `resume = false` keeps the old fail-on-restart behaviour.
+[restart]
+resume = true
 
 # Host CPU/memory gate before starting a new task. While over the limit,
 # work stays queued. Starts are one at a time with `settle` between them.
