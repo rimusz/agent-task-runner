@@ -106,6 +106,17 @@ atr repos add owner/my-repo --path ~/src/my-repo
 gh issue edit 12 --add-label for:atr
 ```
 
+### Branch first, PR later
+
+For code work driven by bots or scripts, push a branch and open the pull request only once the work is reviewed and ready:
+
+```bash
+atr add "fix the README typo" --repo ~/src/my-repo --output branch   # commits on <prefix>/<task key>, pushes, no PR
+gh pr create --repo owner/my-repo --head <prefix>/<task key> --fill  # later, after review
+```
+
+When `--output` is omitted, `atr add`, MCP `add_task`, `POST /tasks` and inbox files default to `reply`, which pushes nothing. A branch push triggers GitHub Actions only for workflows with `on: push` for that branch.
+
 ## Interactive TUI
 
 A bare `atr` (same as `atr tui`) opens a chat in your terminal. It behaves like the provider CLI (Claude Code, Grok Build, Cursor, Codex or OpenCode) with atr in the middle as a proxy: atr keeps the session, reuses the prompt cache and shows tokens and cache use under the input. atr never writes the replies itself.

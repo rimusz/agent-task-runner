@@ -157,6 +157,7 @@ Tested: OpenCode 2.0.28 + Ollama `qwen3-coder:30b` (18.6 GB, 32k context) on an 
 ollama pull qwen3-coder:30b                       # server bound to 127.0.0.1 only
 atr providers add ollama --model ollama/qwen3-coder:30b --url http://127.0.0.1:11434/v1
 atr doctor
+atr add --repo R --output branch "fix issue #N …"   # branch first: push, no PR; review, then `gh pr create --head <prefix>/<key>`
 atr add --repo R --output pr --provider ollama "fix issue #N …"   # needs [[verify.repo]] commands for R
 atr triage run --repo R --issue N                 # suggest-only; nothing posted until `atr triage approve <id>`
 ```
