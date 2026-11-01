@@ -146,7 +146,10 @@ when `issue` is set, else `cli`. New retry/hold columns default to 0 / empty.
 Existing rows keep their keys and status. `held` means an `after` dependency
 failed or vanished; it is not started until a human `atr retry`s or sends a
 new message. Transient provider retries keep `status=queued` and persist
-`retry_next_at` so a serve restart still waits.
+`retry_next_at` so a serve restart still waits. A serve-owned in-flight
+run cut off only by `atr serve` exiting is finished as `restarted` and
+the task is re-queued once (`[restart] resume`); a second restart, a
+missing worktree, or a prepare/setup failure still fail as orphans.
 `task_sessions(task_key, provider, session_id, updated)` — resume id for this provider only.
 `shadow_results(...)` — local-only comparison rows (diff, diffstat of every changed/untracked file, tests, verify, tokens, cost, cache hit). Tasks have a `shadow` flag.
 `verify_results(run_id, command, passed, exit_code, output)` — post-success check commands from `[verify]`.

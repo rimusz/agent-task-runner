@@ -17,7 +17,12 @@ never auto-dispatches `cli-*` TUI sessions. TUI and serve share `state.db`:
 each process registers as an owner (pid + start token) and stamps the runs
 it starts. `reap_orphans_at_start` and `reconcile` skip a run whose owner
 is still alive (including a `held` or retry-waiting row); a dead owner is
-still reaped. New starts — after `[retry]` backoff, `after:` deps, and the
+still reaped. After a serve restart, `recover_restart_orphans` re-queues a
+task whose in-flight turn died only because serve exited (process gone,
+worktree still present, a run had started) and prepends a recovery note on
+the next resume; a second restart, a missing worktree, or a prepare/setup
+failure still fail as orphans. `[restart] resume = false` turns that off.
+New starts — after `[retry]` backoff, `after:` deps, and the
 `[host]` gate — go through `try_start_run` so `max_parallel` counts live
 owned open runs across processes in a `BEGIN IMMEDIATE` transaction
 (TUI turns share the cap and wait / show `provider at limit`). The TUI
@@ -239,7 +244,8 @@ stdio — not `grok auth status` (that command does not exist) and never
 
 A run that failed on something that often clears on its own (provider
 overloaded / at capacity, HTTP 429 without a parsed quota reset, 5xx,
-connection reset / timeout / dropped stream) is not failed over or marked
+HTTP 408 / request timeout, connection reset / timeout / dropped stream)
+is not failed over or marked
 `failed` on the first hit. `[retry]` (default on: 4 attempts, waits of 1, 2,
 4, then 8 minutes) keeps the task `queued` with `retry_attempt` /
 `retry_next_at` / `retry_reason` on the row so a `serve` restart still waits.

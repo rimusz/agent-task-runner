@@ -65,6 +65,15 @@ pub fn classify(
             reason: "provider server error".into(),
         };
     }
+    // HTTP 408 / request timeout: the request never finished; retry.
+    // Checked before dropped-stream so "request timeout" is not folded into
+    // the generic connection-dropped reason.
+    if looks_like_408(&t) {
+        return Class {
+            transient: true,
+            reason: "request timeout".into(),
+        };
+    }
     if matches!(classified, Some(ErrorClass::Unavailable))
         || outcome == "unavailable"
         || looks_like_dropped(&t)
@@ -210,6 +219,16 @@ fn looks_like_429(t: &str) -> bool {
     t.contains("too many requests") || t.contains(" 429") || t.contains("status 429")
 }
 
+fn looks_like_408(t: &str) -> bool {
+    let trimmed = t.trim();
+    trimmed == "408"
+        || trimmed.starts_with("408 ")
+        || t.contains("request timeout")
+        || t.contains(" 408")
+        || t.contains("status 408")
+        || t.contains("http 408")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +257,13 @@ mod tests {
         assert!(cls("failed", None, "connection reset by peer", false).transient);
         assert!(cls("failed", None, "stream disconnected", false).transient);
         assert!(cls("failed", None, "ETIMEDOUT", false).transient);
+        assert!(cls("failed", None, "HTTP 408", false).transient);
+        assert!(cls("failed", None, "status 408", false).transient);
+        assert_eq!(cls("failed", None, "408", false).reason, "request timeout");
+        assert_eq!(
+            cls("failed", None, "request timeout", false).reason,
+            "request timeout"
+        );
         assert_eq!(
             cls("failed", None, "model at capacity", false).reason,
             "model at capacity"
@@ -255,6 +281,10 @@ mod tests {
         assert!(!cls("failed", None, "unknown flag --foo", false).transient);
         assert!(!cls("failed", Some(ErrorClass::Other), "tests failed", false).transient);
         assert!(!cls("needs_attention", None, "", false).transient);
+        // Workspace prepare / setup errors are fail_claimed, not classify_result.
+        // A leftover setup phrase in run text must not look transient.
+        assert!(!cls("failed", None, "/etc is not a git repository", false).transient);
+        assert!(!cls("failed", None, "workspace setup failed", false).transient);
     }
 
     #[test]

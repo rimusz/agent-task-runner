@@ -47,7 +47,7 @@ reloaded with SIGHUP. `atr config migrate` converts shorthand
 `driver`, `[planner]`, `[review]`, `[plugin]`, `[github] enabled / repo / label`
 (default `for:atr`), `[dashboard] enabled / bind`, `[telegram]` and
 `[telegram.assistant]`, `[tui] providers`, `[[provider]]` order and `enabled`, `[mcp]`, `[cache]`,
-`[retry]`, `[host]`,
+`[retry]`, `[restart]`, `[host]`,
 `[[source]]`, `max_prompt_bytes` (default `256k`; CLI/HTTP/MCP prompts and
 inbox files).
 
@@ -309,9 +309,9 @@ backoff = ["1m", "2m", "4m", "8m"]
 ```
 
 After a run that looks like it will clear on its own (provider overloaded /
-at capacity, HTTP 429 without a parsed quota reset, 5xx, connection
-reset/timeout/dropped stream), atr keeps the task `queued` and waits the next
-backoff step. Attempt count and `retry_next_at` are stored on the task so a
+at capacity, HTTP 429 without a parsed quota reset, 5xx, HTTP 408 / request
+timeout, connection reset/timeout/dropped stream), atr keeps the task `queued`
+and waits the next backoff step. Attempt count and `retry_next_at` are stored on the task so a
 `serve` restart keeps the schedule. When the provider still has a session and
 supports resume, the next try sends a short “continue where you left off”
 prompt; otherwise the last prompt is rerun on a new session.
@@ -324,6 +324,28 @@ clears the schedule and starts again.
 
 `max_attempts` is retries after the first failure (4 → waits of 1, 2, 4, then
 8 minutes). `enabled = false` turns this off.
+
+### Serve restart recovery
+
+```toml
+[restart]
+resume = true
+```
+
+When `atr serve` starts, a task whose in-flight turn died only because the
+previous serve exited (CLI process gone, worktree still on disk, a run had
+already started) is re-queued on the same worktree/session. The first message
+of the resumed turn tells the worker the previous turn was cut off by an atr
+restart and to check the worktree, git history, and remote before repeating
+any outside action. The task status/result shows `interrupted by atr restart;
+resuming`.
+
+Resume happens at most once per task per restart: a second serve restart
+while that recovery turn is still in flight, a missing worktree, or a
+failure during workspace prepare (no run started yet) still fail as before
+(`orphaned run (process gone)` / `orphaned running task …`). `held` tasks
+and live TUI / ask owners are left alone. `resume = false` keeps the old
+fail-on-restart behaviour.
 
 ### Host resource gate
 
