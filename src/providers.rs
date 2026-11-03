@@ -642,6 +642,11 @@ pub fn parse_grok_usage_cli(value: &Value) -> Option<UsageNumbers> {
     })
 }
 
+/// The usage record atr writes after a grok run from `grok usage <sid>`.
+pub fn is_grok_usage_record(value: &Value) -> bool {
+    value.get("source").and_then(|v| v.as_str()) == Some("grok usage")
+}
+
 /// Whether atr can resume a stored session for this provider (resume flag,
 /// or a CLI with a built-in resume subcommand).
 pub fn supports_resume(p: &Provider) -> bool {
@@ -711,6 +716,14 @@ fn grab_f64(obj: &Value, keys: &[&str]) -> Option<f64> {
 }
 
 pub fn extract_usage(kind: &str, value: &Value) -> UsageNumbers {
+    // atr's own `grok usage` record (runner.rs) carries the CLI's camelCase
+    // fields with `inputTokens` *including* cache reads. Parse it the same way
+    // as the CLI output, or cache reads are dropped and input stays inclusive.
+    if is_grok_usage_record(value) {
+        if let Some(u) = value.get("usage").and_then(parse_grok_usage_cli) {
+            return u;
+        }
+    }
     let part_tokens = value.pointer("/part/tokens").cloned();
     let usage = value
         .get("usage")
@@ -1788,6 +1801,34 @@ pub(crate) mod tests {
         let r = parse_grok_usage_cli(&real).unwrap();
         assert!((r.cost_usd.unwrap() - 0.01268336).abs() < 1e-12);
         assert_eq!(r.input, 19090 - 1152);
+    }
+
+    #[test]
+    fn grok_usage_record_keeps_cache_reads() {
+        // Run 128 on the Mini (E-ATR-CACHE): `grok usage` reported 81792 of
+        // 117874 input tokens as cache reads (69.4%); atr stored cache_read 0.
+        let raw: Value = serde_json::from_str(
+            r#"{"sessionId":"0f5cd62a-4e84-4649-9e0b-4d9558d478f6","source":"grok usage","usage":{"cacheCreationTokens":0,"cachedReadTokens":81792,"cost_usd":0.03995612,"inputTokens":117874,"outputTokens":743}}"#,
+        )
+        .unwrap();
+        let u = extract_usage("grok", &raw);
+        assert_eq!(u.cache_read, 81792);
+        assert_eq!(u.input, 117874 - 81792, "input stored uncached");
+        assert_eq!(u.cache_write, 0);
+        assert_eq!(u.output, 743);
+        assert!((u.cost_usd.unwrap() - 0.03995612).abs() < 1e-12);
+        let hit = cache_hit_ratio("grok", &u).unwrap();
+        assert!((hit - 0.6939).abs() < 0.001, "hit {hit}");
+        // Same numbers as parsing the CLI's own output directly.
+        let cli: Value = serde_json::from_str(
+            r#"{"sessionId":"0f5cd62a-4e84-4649-9e0b-4d9558d478f6","session":{"inputTokens":117874,"outputTokens":743,"cachedReadTokens":81792,"cacheCreationTokens":0,"reasoningTokens":270,"totalTokens":118617,"modelCalls":6,"costUsdTicks":399561200,"turnCount":1,"primaryModelId":"grok-4.7-build"}}"#,
+        )
+        .unwrap();
+        let c = parse_grok_usage_cli(&cli).unwrap();
+        assert_eq!(
+            (c.input, c.cache_read, c.output),
+            (u.input, u.cache_read, u.output)
+        );
     }
 
     #[test]
