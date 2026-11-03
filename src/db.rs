@@ -657,6 +657,21 @@ impl Db {
             [],
         )?;
         recover_grok_cost_from_raw(&conn)?;
+        let grok_cache_done: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params!["usage_grok_cli_cache_read"],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if grok_cache_done.as_deref() != Some("1") {
+            recover_grok_cache_from_raw(&conn)?;
+            conn.execute(
+                r#"INSERT INTO meta (key, value) VALUES ('usage_grok_cli_cache_read', '1')
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value"#,
+                [],
+            )?;
+        }
         conn.execute(
             r#"UPDATE usage SET cost_kind = 'est'
                WHERE lower(provider) = 'grok'
@@ -2977,6 +2992,43 @@ fn dedupe_provider_usage_windows(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Grok rows written from atr's `grok usage` record were re-parsed with the
+/// generic extractor, which dropped `cachedReadTokens` and kept the inclusive
+/// `inputTokens`. Re-derive them once from `raw_json`.
+fn recover_grok_cache_from_raw(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        r#"SELECT id, raw_json FROM usage
+           WHERE lower(provider) = 'grok'
+             AND cache_read = 0
+             AND raw_json LIKE '%"source":"grok usage"%'"#,
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for (id, raw) in rows {
+        let Some(v) = raw.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()) else {
+            continue;
+        };
+        let u = crate::providers::extract_usage("grok", &v);
+        if u.cache_read == 0 {
+            continue;
+        }
+        conn.execute(
+            "UPDATE usage SET input = ?1, cache_read = ?2, cache_write = ?3 WHERE id = ?4",
+            params![
+                u.input as i64,
+                u.cache_read as i64,
+                u.cache_write as i64,
+                id
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 /// Old grok usage rows sometimes stored the dollar figure only in `raw_json`
 /// (progress last-wins or a backfill that saw `cost_usd` NULL).
 fn recover_grok_cost_from_raw(conn: &Connection) -> Result<()> {
@@ -3805,6 +3857,41 @@ mod tests {
             let c = runs.iter().find(|r| r.provider == "claude").unwrap();
             let row = db.list_usage_for_run(c.id).unwrap().remove(0);
             assert_eq!(row.cost_usd, Some(0.5));
+        }
+    }
+
+    #[test]
+    fn migrate_grok_usage_record_recovers_cache_read_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let raw = r#"{"sessionId":"0f5cd62a-4e84-4649-9e0b-4d9558d478f6","source":"grok usage","usage":{"cacheCreationTokens":0,"cachedReadTokens":81792,"cost_usd":0.03995612,"inputTokens":117874,"outputTokens":743}}"#;
+        {
+            let db = Db::open(&path).unwrap();
+            db.upsert_task("acme-gc", "/repo", None).unwrap();
+            let run = db.start_run("acme-gc", "grok", "m").unwrap();
+            db.finish_run(run, "success", Some(0)).unwrap();
+            db.insert_usage(
+                run,
+                None,
+                "grok",
+                117874,
+                743,
+                0,
+                0,
+                Some(0.03995612),
+                Some("est"),
+                raw,
+            )
+            .unwrap();
+            db.meta_set("usage_grok_cli_cache_read", "0").unwrap();
+        }
+        for _ in 0..2 {
+            let db = Db::open(&path).unwrap();
+            let runs = db.list_runs(Some("acme-gc")).unwrap();
+            let row = db.list_usage_for_run(runs[0].id).unwrap().remove(0);
+            assert_eq!(row.cache_read, 81792);
+            assert_eq!(row.input, 117874 - 81792, "subtracted once");
+            assert_eq!(row.output, 743);
         }
     }
 
