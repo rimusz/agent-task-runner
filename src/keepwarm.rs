@@ -214,6 +214,8 @@ pub fn ping_was_warm(u: &UsageNumbers) -> bool {
 }
 
 /// Usage from the ping's stdout (Claude `stream-json` or `json`).
+/// Tokens of the ping call. `cost_usd` is dropped: on `--resume` Claude's
+/// `total_cost_usd` covers the whole resumed session, not this one call.
 pub fn ping_usage(kind: &str, stdout: &str) -> Option<(UsageNumbers, bool)> {
     crate::providers::parse_blob(kind, stdout)
         .into_iter()
@@ -221,7 +223,13 @@ pub fn ping_usage(kind: &str, stdout: &str) -> Option<(UsageNumbers, bool)> {
         .find_map(|e| match e {
             ParsedEvent::Usage {
                 usage, is_error, ..
-            } => Some((usage, is_error)),
+            } => Some((
+                UsageNumbers {
+                    cost_usd: None,
+                    ..usage
+                },
+                is_error,
+            )),
             _ => None,
         })
 }
@@ -234,8 +242,18 @@ pub struct PingResult {
     pub note: String,
 }
 
+/// The provider as the real turn spawns it (scheduler::run_claimed drops an
+/// alias `--model` such as `opus`/`haiku`). A different model argv is a
+/// different cache, so the ping would only write.
+pub fn ping_provider(p: &Provider) -> Provider {
+    let mut p = p.clone();
+    crate::tui::sanitize_spawn_model(&mut p);
+    p
+}
+
 /// Run one ping. Never touches the task's runs, turns or usage rows.
 pub async fn run_ping(cfg: &Config, provider: &Provider, task: &Task, session: &str) -> PingResult {
+    let provider = &ping_provider(provider);
     let fail = |note: String| PingResult {
         note,
         ..Default::default()
@@ -612,6 +630,22 @@ mod tests {
     }
 
     #[test]
+    fn ping_uses_the_spawned_model_argv() {
+        // Found on the Mini: model = "haiku" was dropped for the real turn but
+        // passed to the ping, so the ping read 0 and wrote the whole prefix.
+        let mut p = claude();
+        p.model = "haiku".into();
+        let ping = build_ping(
+            &ping_provider(&p),
+            Path::new("/w"),
+            Path::new("/s/p.md"),
+            "s1",
+            false,
+        );
+        assert!(!ping.args.iter().any(|a| a == "--model" || a == "haiku"));
+    }
+
+    #[test]
     fn dir_workspace_ping_keeps_add_dir() {
         let p = claude();
         let wt = Path::new("/w/dir");
@@ -640,6 +674,7 @@ mod tests {
         let out = r#"{"type":"result","subtype":"success","is_error":false,"result":"warm","session_id":"f1","total_cost_usd":0.05,"usage":{"input_tokens":3,"cache_creation_input_tokens":25,"cache_read_input_tokens":80281,"output_tokens":5}}"#;
         let (u, err) = ping_usage("claude", out).unwrap();
         assert!(!err);
+        assert_eq!(u.cost_usd, None, "resume total_cost_usd is session-wide");
         assert_eq!(
             (u.input, u.cache_read, u.cache_write, u.output),
             (3, 80281, 25, 5)
