@@ -1239,6 +1239,7 @@ pub(crate) mod tests {
             plugin: false,
             max_turns: 0,
             cache_window: Duration::from_secs(3600),
+            keepwarm: None,
             system_prompt_flag: crate::config::default_system_prompt_flag(kind).into(),
             keep_alive: String::new(),
             capabilities: Vec::new(),

@@ -25,6 +25,7 @@ pub mod http;
 pub mod inbox;
 pub mod init;
 pub mod intake;
+pub mod keepwarm;
 pub mod lessons;
 pub mod logrotate;
 pub mod mcp;

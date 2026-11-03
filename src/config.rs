@@ -605,6 +605,19 @@ pub struct RawProvider {
     /// How long this provider's prompt cache stays warm (Claude ~5m).
     #[serde(default)]
     pub cache_window: String,
+    /// Claude only: ping a throwaway fork of an idle, resumable session after
+    /// this much idle time so its prompt cache stays warm. `off` (default).
+    #[serde(default)]
+    pub keepwarm: String,
+    /// Prompt-cache lifetime keep-warm assumes. Empty = 1h (Claude Code subscription).
+    #[serde(default)]
+    pub keepwarm_ttl: String,
+    /// Pings per idle stretch (reset by the next real run). Default 3.
+    #[serde(default)]
+    pub keepwarm_max_pings: Option<u32>,
+    /// Skip sessions whose last run had fewer prompt tokens. Default 50000.
+    #[serde(default)]
+    pub keepwarm_min_tokens: Option<u64>,
     /// CLI flag that takes a *file path* for the stable prefix. Empty = none.
     #[serde(default)]
     pub system_prompt_flag: String,
@@ -963,6 +976,8 @@ pub struct Provider {
     pub plugin: bool,
     pub max_turns: u32,
     pub cache_window: Duration,
+    /// Claude prompt-cache keep-warm; `None` = off (default).
+    pub keepwarm: Option<crate::keepwarm::KeepWarm>,
     pub system_prompt_flag: String,
     pub keep_alive: String,
     pub capabilities: Vec<String>,
@@ -1040,6 +1055,7 @@ impl Provider {
             plugin: false,
             max_turns: 0,
             cache_window: Duration::from_secs(3600),
+            keepwarm: None,
             system_prompt_flag: String::new(),
             keep_alive: String::new(),
             capabilities: Vec::new(),
@@ -2386,7 +2402,16 @@ impl Config {
             } else {
                 p.keep_alive.trim().to_string()
             };
+            let keepwarm = crate::keepwarm::KeepWarm::from_raw(
+                &p.kind,
+                &p.keepwarm,
+                &p.keepwarm_ttl,
+                p.keepwarm_max_pings,
+                p.keepwarm_min_tokens,
+            )
+            .with_context(|| format!("[[provider]] {}", p.name))?;
             providers.push(Provider {
+                keepwarm,
                 capabilities: p.capabilities.clone(),
                 allow_shell: p.allow_shell,
                 name: p.name,
@@ -3179,6 +3204,47 @@ mod tests {
     }
 
     #[test]
+    fn keepwarm_parses_and_is_claude_only() {
+        let text = std::fs::read_to_string("config/example.toml").unwrap();
+        let on = text.replacen(
+            "kind = \"claude\"\n",
+            "kind = \"claude\"\nkeepwarm = \"50m\"\nkeepwarm_max_pings = 2\n",
+            1,
+        );
+        let cfg = parse_config_toml(&on).unwrap();
+        let kw = cfg.provider("claude").unwrap().keepwarm.clone().unwrap();
+        assert_eq!(kw.interval, Duration::from_secs(50 * 60));
+        assert_eq!(kw.ttl, Duration::from_secs(3600));
+        assert_eq!(kw.max_pings, 2);
+        assert_eq!(cfg.provider("grok").unwrap().keepwarm, None);
+        let off = text.replacen(
+            "kind = \"claude\"\n",
+            "kind = \"claude\"\nkeepwarm = \"off\"\n",
+            1,
+        );
+        assert_eq!(
+            parse_config_toml(&off)
+                .unwrap()
+                .provider("claude")
+                .unwrap()
+                .keepwarm,
+            None
+        );
+        let grok = text.replacen(
+            "kind = \"grok\"\n",
+            "kind = \"grok\"\nkeepwarm = \"50m\"\n",
+            1,
+        );
+        assert!(parse_config_toml(&grok).is_err());
+        let too_long = text.replacen(
+            "kind = \"claude\"\n",
+            "kind = \"claude\"\nkeepwarm = \"2h\"\n",
+            1,
+        );
+        assert!(parse_config_toml(&too_long).is_err());
+    }
+
+    #[test]
     fn example_config_parses() {
         let text = std::fs::read_to_string("config/example.toml").unwrap();
         let cfg = parse_config_toml(&text).unwrap();
@@ -3204,6 +3270,7 @@ mod tests {
         assert_eq!(claude.permission_mode, "bypassPermissions");
         assert_eq!(claude.permission_mode_flag, "--permission-mode");
         assert_eq!(claude.cache_window, Duration::from_secs(5 * 60));
+        assert_eq!(claude.keepwarm, None, "keep-warm is off by default");
         assert_eq!(claude.system_prompt_flag, "--append-system-prompt-file");
         assert_eq!(grok.system_prompt_flag, "--rules");
         assert_eq!(grok.cache_window, Duration::from_secs(60 * 60));

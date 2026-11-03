@@ -240,6 +240,9 @@ enabled = true
 # cache_window = "5m"            # Claude default; others default 60m
 # system_prompt_flag = "--append-system-prompt-file"
 # keep_alive = "24h"             # Ollama/OpenCode only
+# keepwarm = "off"               # Claude only. "50m": ping a throwaway fork of an idle,
+#                                # resumable session before its 1h prompt cache expires
+# keepwarm_max_pings = 3         # per idle stretch; keepwarm_min_tokens = 50000
 
 [[provider]]
 name = "grok"
