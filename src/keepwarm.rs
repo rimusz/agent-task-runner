@@ -4,8 +4,8 @@
 //! (`cache_creation.ephemeral_1h_input_tokens`). When a task's Claude session
 //! sits idle (task `waiting` / `needs_attention`, session kept for a resume)
 //! longer than that, the next real resume re-writes the whole prefix at 2x the
-//! input price instead of reading it at 0.1x. Keep-warm sends one tiny prompt
-//! on a throwaway fork of the session shortly before the cache expires: the
+//! input price instead of reading it at 0.1x (0.05x on Opus 5.5). A ping
+//! (one tiny prompt) on a throwaway fork of the session shortly before the cache expires: the
 //! provider re-reads the cached prefix, which refreshes its lifetime, and the
 //! real session is not touched (`--fork-session --no-session-persistence`).
 //!
@@ -34,9 +34,12 @@ use std::time::Duration;
 pub const PING_PROMPT: &str = "Reply with the single word: warm";
 /// Wall-clock cap for one ping (a resume of a large session plus MCP startup).
 pub const PING_TIMEOUT: Duration = Duration::from_secs(120);
-/// Cache Tax's rule: a warm ping writes only its own few tokens. A ping that
-/// writes more than this share of what it read found the cache already gone.
-pub const MAX_WRITE_RATIO: f64 = 0.1;
+/// A ping that writes at least this share of what it read found the cache
+/// gone. Not OpenMausBot's 0.1: measured on the Mini (Claude Code 2.1.287), the
+/// first resume of a session rewrites its first turn (~8.9k of a 71k prefix,
+/// 12%) even when warm, while an expired 80k prefix reads only the ~10k shared
+/// tool/system block and writes ~70k (ratio ~7).
+pub const MAX_WRITE_RATIO: f64 = 0.5;
 /// How often the background loop looks for idle sessions.
 pub const LOOP_EVERY: Duration = Duration::from_secs(60);
 /// Default cache lifetime (Claude Code subscription writes 1 h entries).
@@ -670,6 +673,20 @@ mod tests {
         };
         assert!(ping_was_warm(&warm));
         assert!(!ping_was_warm(&cold));
+        // Mini, 2026-11-03: first resume 50m after a 1-turn run (warm) vs the
+        // same prefix resumed 62m later without a ping (expired).
+        let first_resume = UsageNumbers {
+            cache_read: 71_413,
+            cache_write: 8_883,
+            ..Default::default()
+        };
+        let expired = UsageNumbers {
+            cache_read: 10_238,
+            cache_write: 70_053,
+            ..Default::default()
+        };
+        assert!(ping_was_warm(&first_resume));
+        assert!(!ping_was_warm(&expired));
         assert!(!ping_was_warm(&UsageNumbers::default()));
         let out = r#"{"type":"result","subtype":"success","is_error":false,"result":"warm","session_id":"f1","total_cost_usd":0.05,"usage":{"input_tokens":3,"cache_creation_input_tokens":25,"cache_read_input_tokens":80281,"output_tokens":5}}"#;
         let (u, err) = ping_usage("claude", out).unwrap();
