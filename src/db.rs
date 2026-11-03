@@ -19,6 +19,15 @@ pub fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// Keep-warm pings for one session since its last real run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeepWarmSince {
+    pub count: u32,
+    pub last_at: Option<String>,
+    /// The latest ping failed or found the cache cold.
+    pub last_cold: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Task {
     pub key: String,
@@ -618,6 +627,22 @@ impl Db {
                 PRIMARY KEY (pid, started)
             );
             CREATE INDEX IF NOT EXISTS owners_kind ON owners(kind);
+            CREATE TABLE IF NOT EXISTS keepwarm_pings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_key TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                at TEXT NOT NULL,
+                ok INTEGER NOT NULL,
+                warm INTEGER NOT NULL,
+                input INTEGER NOT NULL DEFAULT 0,
+                output INTEGER NOT NULL DEFAULT 0,
+                cache_read INTEGER NOT NULL DEFAULT 0,
+                cache_write INTEGER NOT NULL DEFAULT 0,
+                cost_usd REAL,
+                note TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS keepwarm_task ON keepwarm_pings(task_key, provider);
             "#,
         )?;
         drop(conn);
@@ -1255,6 +1280,101 @@ impl Db {
         conn.execute(
             "UPDATE tasks SET session_id = NULL, updated = ?1 WHERE key = ?2",
             params![now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
+    /// Keep-warm: (provider, ended, input + cache_read + cache_write) of the
+    /// task's last finished run.
+    pub fn keepwarm_last_run(&self, key: &str) -> Result<Option<(String, String, u64)>> {
+        let conn = self.lock();
+        let row = conn
+            .query_row(
+                "SELECT r.provider, r.ended, COALESCE(u.input + u.cache_read + u.cache_write, 0)
+                 FROM runs r LEFT JOIN usage u ON u.run_id = r.id
+                 WHERE r.task_key = ?1 AND r.ended IS NOT NULL ORDER BY r.id DESC LIMIT 1",
+                params![key],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?.max(0) as u64,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Keep-warm pings for (task, provider, session) at or after `since`.
+    pub fn keepwarm_since(
+        &self,
+        key: &str,
+        provider: &str,
+        session: &str,
+        since: &str,
+    ) -> Result<KeepWarmSince> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT at, ok, warm FROM keepwarm_pings
+             WHERE task_key = ?1 AND provider = ?2 AND session_id = ?3
+             ORDER BY id",
+        )?;
+        let since_ts = chrono::DateTime::parse_from_rfc3339(since).ok();
+        let mut out = KeepWarmSince::default();
+        let rows = stmt.query_map(params![key, provider, session], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)? != 0,
+                r.get::<_, i64>(2)? != 0,
+            ))
+        })?;
+        for row in rows {
+            let (at, ok, warm) = row?;
+            let after = match (chrono::DateTime::parse_from_rfc3339(&at).ok(), since_ts) {
+                (Some(a), Some(s)) => a >= s,
+                _ => at.as_str() >= since,
+            };
+            if !after {
+                continue;
+            }
+            out.count += 1;
+            out.last_at = Some(at);
+            out.last_cold = !(ok && warm);
+        }
+        Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_keepwarm_ping(
+        &self,
+        key: &str,
+        provider: &str,
+        session: &str,
+        ok: bool,
+        warm: bool,
+        usage: &crate::providers::UsageNumbers,
+        note: &str,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO keepwarm_pings
+               (task_key, provider, session_id, at, ok, warm, input, output, cache_read, cache_write, cost_usd, note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                key,
+                provider,
+                session,
+                now_rfc3339(),
+                ok as i64,
+                warm as i64,
+                usage.input as i64,
+                usage.output as i64,
+                usage.cache_read as i64,
+                usage.cache_write as i64,
+                usage.cost_usd,
+                note
+            ],
         )?;
         Ok(())
     }

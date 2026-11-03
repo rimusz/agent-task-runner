@@ -723,6 +723,7 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
     let gc = shared.clone();
     let hup = shared.clone();
     let rec = shared.clone();
+    let kw = shared.clone();
 
     tokio::select! {
         r = axum::serve(listener, http::router(http)) => r?,
@@ -734,6 +735,7 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
         _ = crate::inbox::poll_loop(inbox) => {}
         _ = crate::gc::daily_loop(gc) => {}
         _ = sighup_loop(hup) => {}
+        _ = crate::keepwarm::keepwarm_loop(kw) => {}
     }
     Ok(())
 }

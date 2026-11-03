@@ -2844,6 +2844,7 @@ mod tests {
             plugin: false,
             max_turns: 0,
             cache_window: std::time::Duration::from_secs(3600),
+            keepwarm: None,
             system_prompt_flag: String::new(),
             keep_alive: String::new(),
             capabilities: Vec::new(),
