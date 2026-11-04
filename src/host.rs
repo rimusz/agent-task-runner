@@ -1,7 +1,10 @@
 //! Host CPU/memory gating before a new task starts.
 //!
 //! Decisions take a [`HostSnapshot`] so tests inject load and memory.
-//! Production sampling uses `sysinfo` (macOS and Linux).
+//! Production sampling uses `sysinfo` for load (macOS and Linux) and for
+//! memory on Linux. On macOS memory comes from `host_statistics64` directly:
+//! sysinfo 0.33 subtracts compressed pages from free+inactive+purgeable and
+//! clamps to 0 when the compressor is large, which held every queued task.
 
 use crate::config::HostConfig;
 use std::time::{Duration, Instant};
@@ -61,21 +64,35 @@ pub fn settle_ready(cfg: &HostConfig, last_start: Option<Instant>, now: Instant)
     }
 }
 
-/// Live sample. Fail-open (zeros) if sysinfo cannot read, so a probe
-/// failure does not stall the scheduler.
+/// Live sample. Fail-open (no limits hit) if the host cannot be read, so a
+/// probe failure does not stall the scheduler.
 pub fn sample() -> HostSnapshot {
     sample_with(read_sysinfo)
 }
 
+/// `available_memory_mb` value meaning "unknown"; never trips the memory gate.
+pub const MEMORY_UNKNOWN: u64 = u64::MAX;
+
 fn read_sysinfo() -> Option<HostSnapshot> {
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
     let load = sysinfo::System::load_average();
+    // sysinfo's cpu list is empty without a cpu refresh, so this was always
+    // available_parallelism() or 1.
     let cores = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
-        .unwrap_or(sys.cpus().len() as u32)
+        .unwrap_or(1)
         .max(1);
-    let available_memory_mb = sys.available_memory() / (1024 * 1024);
+    #[cfg(target_os = "macos")]
+    let available_memory_mb = macos::read_vm_pages().and_then(|p| macos_available_mb(&p));
+    #[cfg(not(target_os = "macos"))]
+    let available_memory_mb = {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        Some(sys.available_memory() / (1024 * 1024)).filter(|&mb| mb > 0)
+    };
+    let available_memory_mb = available_memory_mb.unwrap_or_else(|| {
+        tracing::debug!("host: available memory unreadable or 0; memory gate fails open");
+        MEMORY_UNKNOWN
+    });
     Some(HostSnapshot {
         load: load.one,
         cores,
@@ -83,20 +100,96 @@ fn read_sysinfo() -> Option<HostSnapshot> {
     })
 }
 
+/// Page counts from macOS `host_statistics64(HOST_VM_INFO64)` plus the page size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VmPages {
+    pub free: u64,
+    pub speculative: u64,
+    pub inactive: u64,
+    pub purgeable: u64,
+    /// Pages held by the compressor. Not subtracted: they are not part of
+    /// free/inactive/purgeable, so subtracting them double-counts.
+    pub compressor: u64,
+    pub page_size: u64,
+}
+
+/// macOS available memory in MiB: `(free - speculative) + inactive + purgeable`
+/// pages times the page size (the same pages `vm_stat` shows as free,
+/// inactive and purgeable). `None` when the sample adds up to 0, which a live
+/// host never reports, so callers treat it as unknown and fail open.
+pub fn macos_available_mb(p: &VmPages) -> Option<u64> {
+    let pages = p
+        .free
+        .saturating_sub(p.speculative)
+        .saturating_add(p.inactive)
+        .saturating_add(p.purgeable);
+    let mb = pages.saturating_mul(p.page_size) / (1024 * 1024);
+    (mb > 0).then_some(mb)
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::VmPages;
+    use std::sync::OnceLock;
+
+    /// `mach_host_self` adds a send-right reference on every call; take it once.
+    fn host_port() -> libc::mach_port_t {
+        static PORT: OnceLock<libc::mach_port_t> = OnceLock::new();
+        // SAFETY: no arguments; returns the host name port of this task.
+        #[allow(deprecated)]
+        *PORT.get_or_init(|| unsafe { libc::mach_host_self() })
+    }
+
+    pub(super) fn read_vm_pages() -> Option<VmPages> {
+        let host = host_port();
+        if host == 0 {
+            return None;
+        }
+        // SAFETY: zeroed POD struct passed with its own size in integer_t units,
+        // as host_statistics64(HOST_VM_INFO64) expects.
+        let mut stat: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+        let mut count = libc::HOST_VM_INFO64_COUNT;
+        let rc = unsafe {
+            libc::host_statistics64(
+                host,
+                libc::HOST_VM_INFO64,
+                &mut stat as *mut libc::vm_statistics64 as libc::host_info64_t,
+                &mut count,
+            )
+        };
+        if rc != libc::KERN_SUCCESS {
+            tracing::debug!("host: host_statistics64 failed: kern_return {rc}");
+            return None;
+        }
+        // SAFETY: vm_page_size is a read-only global set by libSystem at startup.
+        let page_size = unsafe { libc::vm_page_size } as u64;
+        Some(VmPages {
+            free: stat.free_count as u64,
+            speculative: stat.speculative_count as u64,
+            inactive: stat.inactive_count as u64,
+            purgeable: stat.purgeable_count as u64,
+            compressor: stat.compressor_page_count as u64,
+            page_size,
+        })
+    }
+}
+
 pub fn sample_with(take: impl FnOnce() -> Option<HostSnapshot>) -> HostSnapshot {
     take().unwrap_or(HostSnapshot {
         load: 0.0,
         cores: 1,
-        available_memory_mb: u64::MAX,
+        available_memory_mb: MEMORY_UNKNOWN,
     })
 }
 
 pub fn format_line(cfg: &HostConfig, snap: &HostSnapshot) -> String {
     let wait = decide(cfg, snap);
-    let mut s = format!(
-        "host: load {:.2} on {} cores, {} MiB free",
-        snap.load, snap.cores, snap.available_memory_mb
-    );
+    let mem = if snap.available_memory_mb == MEMORY_UNKNOWN {
+        "memory unknown".to_string()
+    } else {
+        format!("{} MiB free", snap.available_memory_mb)
+    };
+    let mut s = format!("host: load {:.2} on {} cores, {mem}", snap.load, snap.cores);
     if !cfg.enabled {
         s.push_str(" (gating off)");
     } else if let Some(w) = wait {
@@ -200,6 +293,80 @@ mod tests {
         });
         assert_eq!(snap.cores, 4);
         assert_eq!(snap.available_memory_mb, 900);
+    }
+
+    const PAGE: u64 = 16384;
+
+    fn pages(
+        free: u64,
+        speculative: u64,
+        inactive: u64,
+        purgeable: u64,
+        compressor: u64,
+    ) -> VmPages {
+        VmPages {
+            free,
+            speculative,
+            inactive,
+            purgeable,
+            compressor,
+            page_size: PAGE,
+        }
+    }
+
+    #[test]
+    fn macos_available_is_free_minus_speculative_plus_inactive_purgeable() {
+        // 1000 - 200 + 3000 + 296 = 4096 pages * 16 KiB = 64 MiB
+        let p = pages(1000, 200, 3000, 296, 0);
+        assert_eq!(macos_available_mb(&p), Some(64));
+    }
+
+    #[test]
+    fn macos_large_compressor_does_not_clamp_to_zero() {
+        // The sysinfo 0.33 bug: compressor pages > free+inactive+purgeable
+        // made (free+inactive+purgeable) - compressor saturate to 0 MiB.
+        let p = pages(20_000, 1_000, 40_000, 1_000, 500_000);
+        let old_sysinfo = (p.free + p.inactive + p.purgeable).saturating_sub(p.compressor);
+        assert_eq!(old_sysinfo, 0);
+        let mb = macos_available_mb(&p).expect("non-zero");
+        assert_eq!(mb, (60_000 * PAGE) / (1024 * 1024));
+        assert!(decide(
+            &cfg(),
+            &HostSnapshot {
+                load: 0.1,
+                cores: 8,
+                available_memory_mb: mb
+            }
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn macos_zero_or_bad_sample_is_unknown() {
+        assert_eq!(macos_available_mb(&VmPages::default()), None);
+        assert_eq!(macos_available_mb(&pages(0, 0, 0, 0, 9_999)), None);
+        // speculative larger than free does not underflow
+        assert_eq!(macos_available_mb(&pages(10, 50, 0, 0, 0)), None);
+        let mut p = pages(1000, 0, 1000, 0, 0);
+        p.page_size = 0;
+        assert_eq!(macos_available_mb(&p), None);
+    }
+
+    #[test]
+    fn unknown_memory_fails_open() {
+        let snap = sample_with(|| None);
+        assert_eq!(snap.available_memory_mb, MEMORY_UNKNOWN);
+        assert_eq!(decide(&cfg(), &snap), None);
+        let line = format_line(&cfg(), &snap);
+        assert!(line.contains("memory unknown"), "{line}");
+        assert!(!line.contains("waiting"), "{line}");
+    }
+
+    #[test]
+    fn live_sample_reads_nonzero_memory() {
+        // A live host always has some free/inactive memory; 0 was the bug.
+        let snap = sample();
+        assert!(snap.available_memory_mb > 0);
     }
 
     #[test]

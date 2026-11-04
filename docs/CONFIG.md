@@ -358,7 +358,11 @@ settle = "30s"           # gap between starts while gating is on
 ```
 
 Before starting a new task, atr samples host load and free memory (macOS and
-Linux, via `sysinfo`). Over the limit, the task stays `queued` and status /
+Linux). Linux memory comes from `sysinfo`; macOS memory comes from
+`host_statistics64` as free (minus speculative) + inactive + purgeable pages,
+the same pages `vm_stat` lists, without subtracting compressed pages (before
+v0.1.40 that subtraction often read 0 MiB and held every queued task). A
+reading of 0 counts as unknown and fails open. Over the limit, the task stays `queued` and status /
 the dashboard show why. While the gate is on, queued work starts one at a
 time with `settle` between starts so a burst does not pile on. A sample
 failure fails open (does not stall the scheduler). `enabled = false` turns
