@@ -1363,7 +1363,10 @@ cli = "/bin/true"
             token = dir.path().join("missing.mcp.token").display(),
         );
         std::fs::write(&path, &text).unwrap();
-        let cfg = crate::config::parse_config_toml(&text).unwrap();
+        let mut cfg = crate::config::parse_config_toml(&text).unwrap();
+        // Not the real name: `atr serve` exports it to its verify children and
+        // a developer's shell may have it.
+        cfg.shadow.gh_token_env = "ATR_SHADOW_GH_TOKEN_DOCTOR_TEST_UNSET".into();
         (dir, cfg, path)
     }
 

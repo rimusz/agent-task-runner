@@ -13,6 +13,7 @@ fn atr() -> Command {
 
 /// Shared + fake CLIs, **without** starting HTTP/`atr serve`.
 async fn no_serve(providers: &[(&str, bool, &str)]) -> (TempDir, Arc<Shared>, std::path::PathBuf) {
+    atr::service::ignore_host_service();
     let dir = TempDir::new().unwrap();
     let fake_dir = dir.path().join("fake");
     fs::create_dir_all(&fake_dir).unwrap();
