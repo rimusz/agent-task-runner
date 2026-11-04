@@ -1063,6 +1063,13 @@ pub fn task_verbose_text(shared: &Shared, key: &str) -> Result<String> {
         if !t.model_override.is_empty() {
             let model = r.model.as_deref().filter(|m| !m.is_empty()).unwrap_or("-");
             buf.push_str(&format!("run_model\t{}\t{model}\n", r.id));
+            for e in shared.db.events_for_run(r.id).unwrap_or_default() {
+                if e.kind == crate::scheduler::MODEL_PIN_EVENT {
+                    let detail: Value = serde_json::from_str(&e.raw).unwrap_or_default();
+                    let reason = detail["reason"].as_str().unwrap_or_default();
+                    buf.push_str(&format!("run_failure\t{}\t{reason}\n", r.id));
+                }
+            }
         }
         if let Some(h) = r.handoff.as_deref().filter(|s| !s.is_empty()) {
             buf.push_str(&format!("--- handoff (run {}) ---\n", r.id));

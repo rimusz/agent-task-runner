@@ -242,7 +242,7 @@ Lessons are refused if they look like they contain a secret (token prefixes, `KE
 
 ### Per-task provider and model
 
-A task can name the configured provider and the model it runs on. Tasks that don't keep the `[[provider]]` order and each provider's `model`.
+A task can name the configured provider and the model it runs on. Setting a model pins the task strictly to the named provider (no fallback); `--provider` alone stays a soft preference. Tasks that name neither keep the `[[provider]]` order and each provider's `model`.
 
 ```bash
 atr add --provider codex --model gpt-5.6-sol "Fix the flaky date parser test"
@@ -262,7 +262,7 @@ Validation at intake:
 
 `atr add` and `POST /tasks` reject a bad request with the reason (`unknown provider X; configured: a, b`, `provider codex lacks capability browser; providers with browser: claude`), and MCP does too with one exception: because MCP `provider` also carries the free-form `hint` / `driver` aliases, a bare unknown name with no `model` and no `needs` stays a soft preference that logs a warning. GitHub labels never fail a poll: an unknown or incapable provider drops both labels (`needs` stay, so a capable provider runs the task), an invalid model drops just that label, and a `model:` label without a `provider:` label is ignored. Each case logs a warning.
 
-The provider is still a preference, not a pin. If atr fails over, the other provider keeps its own model and atr logs that the override wasn't applied; a retry starts from the named provider again. Naming a different provider in a follow-up clears the model. A task with a model skips the planner, since subtasks and the planning turn run elsewhere. `atr tasks KEY --verbose` prints `model` and a `run_model` line per run; `atr status --json`, MCP task views and `GET /tasks/KEY/result` include `model` when set. Inbox files and `atr triage run` have no model field; `atr triage run --provider` checks the name, and an inbox `provider` stays a soft hint.
+A task with a model runs only on that provider, with no fallback to the `[[provider]]` order and no failover. While the provider is busy, cooling, degraded or over quota, the task stays queued; a transient error retries on the same provider. If the provider is disabled, missing or lacks a needed capability at dispatch, or a run ends in an error atr would otherwise fail over from, the task fails with the reason (`model override gpt-5.6-sol pins provider codex: provider codex is disabled`). `atr retry KEY` tries the same provider again. Naming a different provider in a follow-up clears the model and the pin. A task with a model skips the planner, since subtasks and the planning turn run elsewhere. `atr tasks KEY --verbose` prints `model`, a `run_model` line per run and a `run_failure` line with the pin's reason; `atr status --json`, MCP task views and `GET /tasks/KEY/result` include `model` when set. Inbox files and `atr triage run` have no model field; `atr triage run --provider` checks the name, and an inbox `provider` stays a soft hint.
 
 ### Compare two providers
 
