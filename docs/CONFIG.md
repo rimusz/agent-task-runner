@@ -209,6 +209,37 @@ on `{bind}:{port}` so submit/cancel stay on loopback.
 
 The recommended way to reach the dashboard and `/mcp` from other devices is Tailscale Serve with `listen` left on loopback. See [REMOTE-ACCESS.md](REMOTE-ACCESS.md). The dashboard has no auth of its own.
 
+### Telegram
+
+```toml
+[telegram]
+enabled = true
+allowed_chat_ids = [123456789]
+# Optional. Empty = check from.id against allowed_chat_ids.
+# allowed_user_ids = [123456789]
+# Empty = every task event (today). Unknown names fail at load.
+# Live Mini: only problems.
+events = ["failed", "needs_attention", "stalled"]
+```
+
+`events` filters task-lifecycle Telegram notifies (`start`, `finished`,
+`verify_retry`, `failed`, `needs_attention`, `stalled`, `fallback`,
+`cancelled`, `retry`, `held`, `planned`, `review`, `quota_skip`, `compare`,
+`hook`). Empty keeps current behaviour (send all). GitHub token-expiry
+alerts, Telegram health alerts, the daily summary, and replies to
+interactive commands are never filtered.
+
+The bot accepts updates only from a **private** chat whose `chat.id` is in
+`allowed_chat_ids` and whose `from.id` is in `allowed_user_ids` (or
+`allowed_chat_ids` when that list is empty). Groups, supergroups and
+channels are ignored. In a private chat `chat.id` equals the user id, so
+today's `allowed_chat_ids` keep working.
+
+`/add <prompt>` is still answer-only (no workspace). `/add <repo> <prompt>`
+submits a git repo task when `<repo>` is an enabled `[[repo]]` name, with
+the same workspace and verify path as `atr add --repo` / a GitHub-issue
+task (branch-only; no PR). A disabled repo is rejected.
+
 ### Repos
 
 **One repo** — top-level shorthand (what `atr init` writes):

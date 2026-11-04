@@ -21,7 +21,7 @@ Watch
 • ui — dashboard link
 
 Work
-• add <prompt> — queue a task
+• add [repo] <prompt> — queue a task
 • cancel / retry <id>
 
 Control
@@ -167,6 +167,69 @@ pub fn allowed_chats(cfg: &TelegramConfig) -> Vec<i64> {
         }
     }
     ids
+}
+
+/// `from.id` allow-list. Empty `allowed_user_ids` reuses `allowed_chats`.
+pub fn allowed_users(cfg: &TelegramConfig) -> Vec<i64> {
+    if cfg.allowed_user_ids.is_empty() {
+        allowed_chats(cfg)
+    } else {
+        cfg.allowed_user_ids.clone()
+    }
+}
+
+fn update_origin(update: &Value) -> Option<(i64, String, i64)> {
+    if let Some(cb) = update.get("callback_query") {
+        let chat_id = cb.pointer("/message/chat/id")?.as_i64()?;
+        let chat_type = cb
+            .pointer("/message/chat/type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let from_id = cb.pointer("/from/id")?.as_i64()?;
+        return Some((chat_id, chat_type, from_id));
+    }
+    if let Some(msg) = update.get("message") {
+        let chat_id = msg.pointer("/chat/id")?.as_i64()?;
+        let chat_type = msg
+            .pointer("/chat/type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let from_id = msg.pointer("/from/id")?.as_i64()?;
+        return Some((chat_id, chat_type, from_id));
+    }
+    None
+}
+
+/// Private chat, chat.id in `allowed_chats`, from.id in `allowed_users`.
+pub fn update_allowed(cfg: &TelegramConfig, update: &Value) -> bool {
+    let Some((chat_id, chat_type, from_id)) = update_origin(update) else {
+        tracing::debug!("telegram: drop update missing chat/from");
+        return false;
+    };
+    if chat_type != "private" {
+        tracing::debug!(
+            chat_id,
+            chat_type,
+            from_id,
+            "telegram: drop non-private update"
+        );
+        return false;
+    }
+    if !allowed_chats(cfg).contains(&chat_id) {
+        tracing::debug!(
+            chat_id,
+            from_id,
+            "telegram: drop chat not in allowed_chat_ids"
+        );
+        return false;
+    }
+    if !allowed_users(cfg).contains(&from_id) {
+        tracing::debug!(chat_id, from_id, "telegram: drop user not in allowed users");
+        return false;
+    }
+    true
 }
 
 pub fn api_base(cfg: &TelegramConfig) -> String {
@@ -914,7 +977,9 @@ fn poll_once(shared: &Shared) {
             max_id = max_id.max(id + 1);
         }
         if let Some(id) = upd.pointer("/callback_query/id").and_then(|v| v.as_str()) {
-            answer_callback(&cfg, &token, id);
+            if update_allowed(&cfg, upd) {
+                answer_callback(&cfg, &token, id);
+            }
         }
         if let Ok(outs) = handle_update(shared, upd) {
             for o in outs {
@@ -943,7 +1008,7 @@ pub const BOT_COMMANDS: &[(&str, &str)] = &[
     ("doctor", "Health checks (warn/FAIL only)"),
     ("tokens", "GitHub tokens: state, days left"),
     ("usage", "Spend and cache"),
-    ("add", "Queue a task: /add <prompt>"),
+    ("add", "Queue a task: /add [repo] <prompt>"),
     ("ui", "Dashboard link"),
     ("help", "All commands"),
 ];
@@ -1029,15 +1094,14 @@ fn tokens_text(shared: &Shared) -> String {
 /// Handle one Telegram update. Public for tests.
 pub fn handle_update(shared: &Shared, update: &Value) -> Result<Vec<Outgoing>> {
     let cfg = shared.config.read().unwrap().telegram.clone();
-    let allowed = allowed_chats(&cfg);
+    if !update_allowed(&cfg, update) {
+        return Ok(Vec::new());
+    }
     if let Some(cb) = update.get("callback_query") {
         let chat = cb
             .pointer("/message/chat/id")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        if !allowed.contains(&chat) {
-            return Ok(Vec::new());
-        }
         let data = cb.get("data").and_then(|v| v.as_str()).unwrap_or("");
         return Ok(vec![handle_callback(shared, chat, data)]);
     }
@@ -1049,9 +1113,6 @@ pub fn handle_update(shared: &Shared, update: &Value) -> Result<Vec<Outgoing>> {
         .pointer("/chat/id")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    if !allowed.contains(&chat) {
-        return Ok(Vec::new());
-    }
     let text = msg
         .get("text")
         .and_then(|v| v.as_str())
@@ -1224,6 +1285,12 @@ fn handle_command(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
     }
 }
 
+fn add_usage() -> String {
+    "usage: /add <prompt>   (answer-only; no workspace)\n\
+     usage: /add <repo> <prompt>   (repo task)"
+        .into()
+}
+
 fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
     let rest = raw
         .split_once(char::is_whitespace)
@@ -1232,7 +1299,7 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
     if rest.is_empty() {
         return Outgoing {
             chat_id: chat,
-            text: "usage: /add <prompt>   (answer-only; no workspace)".into(),
+            text: add_usage(),
             markup: None,
         };
     }
@@ -1244,7 +1311,38 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
             markup: None,
         };
     }
-    let title: String = rest
+    if shared.intake_paused.load(Ordering::Relaxed) {
+        return Outgoing {
+            chat_id: chat,
+            text: "intake is paused".into(),
+            markup: None,
+        };
+    }
+    let first = rest.split_whitespace().next().unwrap_or("");
+    let repo_entry = cfg.repo_by_name(first);
+    if let Some(entry) = repo_entry.as_ref() {
+        if !entry.enabled {
+            return Outgoing {
+                chat_id: chat,
+                text: format!("repo {first} is disabled"),
+                markup: None,
+            };
+        }
+        let prompt = rest[first.len()..].trim();
+        if prompt.is_empty() {
+            return Outgoing {
+                chat_id: chat,
+                text: add_usage(),
+                markup: None,
+            };
+        }
+    }
+    let prompt = if let Some(entry) = repo_entry.as_ref() {
+        rest[entry.name.len()..].trim()
+    } else {
+        rest
+    };
+    let title: String = prompt
         .lines()
         .next()
         .unwrap_or("task")
@@ -1261,22 +1359,31 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
             }
         }
     };
+    let (workspace_kind, repo_path, allow_empty, kind_label) = match repo_entry {
+        Some(entry) => (
+            "git",
+            Some(entry.path.display().to_string()),
+            false,
+            format!("repo {}", entry.name),
+        ),
+        None => ("none", None, true, "answer-only".into()),
+    };
     drop(cfg);
     match shared.submit_with(
         &key,
-        rest,
+        prompt,
         "telegram",
-        None,
+        repo_path.as_deref(),
         None,
         false,
         false,
         crate::app::SubmitOpts {
-            workspace_kind: Some("none".into()),
+            workspace_kind: Some(workspace_kind.into()),
             output_kind: Some("reply".into()),
             output_spec: Some(chat.to_string()),
             source_kind: Some("telegram".into()),
             title: Some(title),
-            allow_empty_repo: true,
+            allow_empty_repo: allow_empty,
             provider_hint: None,
             needs: Vec::new(),
             after: Vec::new(),
@@ -1284,12 +1391,12 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
     ) {
         Ok(SubmitOutcome::Accepted) => Outgoing {
             chat_id: chat,
-            text: format!("queued {key}"),
+            text: format!("queued {key} ({kind_label})"),
             markup: None,
         },
         Ok(SubmitOutcome::Queued) => Outgoing {
             chat_id: chat,
-            text: format!("queued follow-up on {key}"),
+            text: format!("queued follow-up on {key} ({kind_label})"),
             markup: None,
         },
         Err(e) => Outgoing {
@@ -2702,6 +2809,10 @@ mod tests {
     use std::sync::Arc;
 
     fn harness_shared() -> Arc<Shared> {
+        harness_shared_with("")
+    }
+
+    fn harness_shared_with(extra: &str) -> Arc<Shared> {
         let dir = tempfile::tempdir().unwrap();
         let dbp = dir.path().join("s.db");
         let cfg = format!(
@@ -2721,6 +2832,7 @@ allowed_chat_ids = [42]
 prefix = "atr:"
 notify_interval = "1s"
 daily_summary = ""
+{extra}
 [[provider]]
 name = "claude"
 kind = "claude"
@@ -2728,6 +2840,7 @@ cli = "/bin/true"
 "#,
             db = dbp.display(),
             root = dir.path().display(),
+            extra = extra.replace("{root}", &dir.path().display().to_string()),
         );
         std::fs::write(dir.path().join("p.md"), "p\n").unwrap();
         let path = dir.path().join("c.toml");
@@ -2744,7 +2857,7 @@ cli = "/bin/true"
     fn ignores_unknown_chat() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
-        let upd = json!({"message":{"chat":{"id":99},"text":"/status"}});
+        let upd = json!({"message":{"chat":{"id":99,"type":"private"},"from":{"id":99},"text":"/status"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert!(out.is_empty());
     }
@@ -2760,7 +2873,8 @@ cli = "/bin/true"
             nonempty(&repo.label),
             repo.enabled,
         );
-        let upd = json!({"message":{"chat":{"id":42},"text":"/repos"}});
+        let upd =
+            json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/repos"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert_eq!(out.len(), 1);
         assert!(out[0].text.starts_with("Repos\n"), "{}", out[0].text);
@@ -2782,7 +2896,7 @@ cli = "/bin/true"
     fn providers_list_is_readable_on_phone() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
-        let upd = json!({"message":{"chat":{"id":42},"text":"/providers"}});
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/providers"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert!(out[0].text.starts_with("Providers\n"), "{}", out[0].text);
         assert!(
@@ -2807,7 +2921,8 @@ cli = "/bin/true"
     fn tasks_and_task_are_readable_on_phone() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
-        let empty = json!({"message":{"chat":{"id":42},"text":"/tasks"}});
+        let empty =
+            json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/tasks"}});
         let out = handle_update(&shared, &empty).unwrap();
         assert!(out[0].text.starts_with("Tasks · UTC"), "{}", out[0].text);
         assert!(out[0].text.contains("(none)"), "{}", out[0].text);
@@ -2825,7 +2940,8 @@ cli = "/bin/true"
         let run = shared.db.start_run("acme-1", "claude", "m").unwrap();
         shared.db.finish_run(run, "success", Some(0)).unwrap();
 
-        let list = json!({"message":{"chat":{"id":42},"text":"/tasks"}});
+        let list =
+            json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/tasks"}});
         let out = handle_update(&shared, &list).unwrap();
         assert!(
             out[0].text.contains("• acme-1 — waiting"),
@@ -2837,11 +2953,12 @@ cli = "/bin/true"
         assert!(!out[0].text.contains('\t'), "{}", out[0].text);
         assert!(!out[0].text.contains("repo="), "{}", out[0].text);
 
-        let missing = json!({"message":{"chat":{"id":42},"text":"/task"}});
+        let missing =
+            json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/task"}});
         let out = handle_update(&shared, &missing).unwrap();
         assert_eq!(out[0].text, "usage: /task <key>");
 
-        let one = json!({"message":{"chat":{"id":42},"text":"/task acme-1"}});
+        let one = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/task acme-1"}});
         let out = handle_update(&shared, &one).unwrap();
         assert!(
             out[0].text.starts_with("acme-1 — waiting"),
@@ -2865,7 +2982,7 @@ cli = "/bin/true"
     fn shadow_report_is_readable_on_phone() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
-        let empty = json!({"message":{"chat":{"id":42},"text":"/shadow"}});
+        let empty = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/shadow"}});
         let out = handle_update(&shared, &empty).unwrap();
         assert!(out[0].text.starts_with("Shadow · UTC"), "{}", out[0].text);
         assert!(
@@ -2918,7 +3035,7 @@ cli = "/bin/true"
     fn status_from_allowed_chat() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
-        let upd = json!({"message":{"chat":{"id":42},"text":"/status"}});
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/status"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert_eq!(out.len(), 1);
         assert!(out[0].text.contains("atr ·"), "{}", out[0].text);
@@ -3044,14 +3161,14 @@ cli = "/bin/true"
         let shared = harness_shared();
         shared.db.upsert_task("acme-1", "/repo", None).unwrap();
         shared.db.set_status("acme-1", "waiting").unwrap();
-        let upd = json!({"message":{"chat":{"id":42},"text":"/cancel acme-1"}});
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/cancel acme-1"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert!(out[0].text.contains("Cancel"));
         let data = out[0].markup.as_ref().unwrap()["inline_keyboard"][0][0]["callback_data"]
             .as_str()
             .unwrap()
             .to_string();
-        let cb = json!({"callback_query":{"data":data,"message":{"chat":{"id":42}}}});
+        let cb = json!({"callback_query":{"from":{"id":42},"data":data,"message":{"chat":{"id":42,"type":"private"}}}});
         let out = handle_update(&shared, &cb).unwrap();
         assert!(out[0].text.contains("cancelled"));
         assert_eq!(
@@ -3067,15 +3184,13 @@ cli = "/bin/true"
         let key = assistant_task_key(42);
         shared.db.upsert_task(&key, "/repo", None).unwrap();
         shared.db.set_status(&key, "waiting").unwrap();
-        let other = json!({"callback_query":{"data":"cx:tg7","message":{"chat":{"id":42}}}});
+        let other = json!({"callback_query":{"from":{"id":42},"data":"cx:tg7","message":{"chat":{"id":42,"type":"private"}}}});
         assert!(handle_update(&shared, &other).unwrap()[0]
             .text
             .contains("not for this chat"));
-        let stranger =
-            json!({"callback_query":{"data":format!("cx:{key}"),"message":{"chat":{"id":99}}}});
+        let stranger = json!({"callback_query":{"from":{"id":99},"data":format!("cx:{key}"),"message":{"chat":{"id":99,"type":"private"}}}});
         assert!(handle_update(&shared, &stranger).unwrap().is_empty());
-        let mine =
-            json!({"callback_query":{"data":format!("cx:{key}"),"message":{"chat":{"id":42}}}});
+        let mine = json!({"callback_query":{"from":{"id":42},"data":format!("cx:{key}"),"message":{"chat":{"id":42,"type":"private"}}}});
         assert!(handle_update(&shared, &mine).unwrap()[0]
             .text
             .contains("cancelled"));
@@ -3093,19 +3208,19 @@ cli = "/bin/true"
         let shared = harness_shared();
         let out = handle_update(
             &shared,
-            &json!({"message":{"chat":{"id":42},"text":"/tokens"}}),
+            &json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/tokens"}}),
         )
         .unwrap();
         assert!(out[0].text.contains("GitHub tokens"), "{}", out[0].text);
         assert!(!out[0].text.contains("tok-secret"));
         let out = handle_update(
             &shared,
-            &json!({"message":{"chat":{"id":42},"text":"/doctor"}}),
+            &json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/doctor"}}),
         )
         .unwrap();
         assert!(out[0].text.starts_with("doctor:"), "{}", out[0].text);
         assert!(!out[0].text.contains("tok-secret"));
-        let cb = json!({"callback_query":{"data":"doctor","message":{"chat":{"id":42}}}});
+        let cb = json!({"callback_query":{"from":{"id":42},"data":"doctor","message":{"chat":{"id":42,"type":"private"}}}});
         assert!(handle_update(&shared, &cb).unwrap()[0]
             .text
             .starts_with("doctor:"));
@@ -3187,7 +3302,7 @@ cli = "/bin/true"
     fn enable_needs_confirm() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
-        let upd = json!({"message":{"chat":{"id":42},"text":"/enable claude"}});
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/enable claude"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert!(out[0].text.contains("Enable claude"));
         assert!(out[0].markup.is_some());
@@ -3195,7 +3310,7 @@ cli = "/bin/true"
             .as_str()
             .unwrap()
             .to_string();
-        let cb = json!({"callback_query":{"data":data,"message":{"chat":{"id":42}}}});
+        let cb = json!({"callback_query":{"from":{"id":42},"data":data,"message":{"chat":{"id":42,"type":"private"}}}});
         let out = handle_update(&shared, &cb).unwrap();
         assert!(out[0].text.contains("enabled claude"));
         assert_eq!(shared.db.enabled_override("claude").unwrap(), Some(true));
@@ -3215,7 +3330,7 @@ cli = "/bin/true"
     fn usage_today_uses_timezone() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
-        let upd = json!({"message":{"chat":{"id":42},"text":"/usage today"}});
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/usage today"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert!(out[0].text.contains("Usage"), "{}", out[0].text);
         assert!(out[0].text.contains("UTC"));
@@ -3245,7 +3360,7 @@ cli = "/bin/true"
                 "{}",
             )
             .unwrap();
-        let upd = json!({"message":{"chat":{"id":42},"text":"/usage month"}});
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/usage month"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert!(out[0].text.contains("Usage · month"), "{}", out[0].text);
         assert!(out[0].text.contains("UTC"), "{}", out[0].text);
@@ -3259,7 +3374,8 @@ cli = "/bin/true"
     }
 
     fn confirm_and_apply(shared: &Shared, text: &str) -> String {
-        let upd = json!({"message":{"chat":{"id":42},"text":text}});
+        let upd =
+            json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":text}});
         let out = handle_update(shared, &upd).unwrap();
         assert_eq!(out.len(), 1, "{text}: {out:?}");
         let data = out[0].markup.as_ref().expect(text)["inline_keyboard"][0][0]["callback_data"]
@@ -3267,7 +3383,7 @@ cli = "/bin/true"
             .unwrap()
             .to_string();
         let prompt = out[0].text.clone();
-        let cb = json!({"callback_query":{"data":data,"message":{"chat":{"id":42}}}});
+        let cb = json!({"callback_query":{"from":{"id":42},"data":data,"message":{"chat":{"id":42,"type":"private"}}}});
         let out = handle_update(shared, &cb).unwrap();
         format!("{prompt}\n---\n{}", out[0].text)
     }
@@ -3276,15 +3392,14 @@ cli = "/bin/true"
     fn config_get_set_and_secrets() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
-        let upd = json!({"message":{"chat":{"id":42},"text":"/config get listen"}});
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/config get listen"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert!(out[0].text.contains("127.0.0.1:0"), "{}", out[0].text);
 
-        let unknown = json!({"message":{"chat":{"id":99},"text":"/config get listen"}});
+        let unknown = json!({"message":{"chat":{"id":99,"type":"private"},"from":{"id":99},"text":"/config get listen"}});
         assert!(handle_update(&shared, &unknown).unwrap().is_empty());
 
-        let secret =
-            json!({"message":{"chat":{"id":42},"text":"/config get telegram.bot_token_env"}});
+        let secret = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/config get telegram.bot_token_env"}});
         let out = handle_update(&shared, &secret).unwrap();
         assert!(out[0].text.contains("refused"), "{}", out[0].text);
         assert!(
@@ -3294,8 +3409,7 @@ cli = "/bin/true"
         );
         assert!(!out[0].text.contains("tok-secret"), "{}", out[0].text);
 
-        let set_secret =
-            json!({"message":{"chat":{"id":42},"text":"/config set telegram.bot_token_env LEAK"}});
+        let set_secret = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/config set telegram.bot_token_env LEAK"}});
         let out = handle_update(&shared, &set_secret).unwrap();
         assert!(out[0].text.contains("refused"), "{}", out[0].text);
         assert!(out[0].markup.is_none());
@@ -3321,7 +3435,7 @@ cli = "/bin/true"
             shared.config_path.parent().unwrap().join("opencode.json"),
         ));
 
-        let missing = json!({"message":{"chat":{"id":42},"text":"/providers add kimi"}});
+        let missing = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/providers add kimi"}});
         let out = handle_update(&shared, &missing).unwrap();
         assert!(out[0].text.contains("<key>"), "{}", out[0].text);
         assert!(out[0].markup.is_none());
@@ -3380,7 +3494,8 @@ cli = "/bin/true"
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
         shared.config.write().unwrap().dashboard.public_url = "https://ai.t.ts.net/".into();
-        let upd = json!({"message":{"chat":{"id":42},"text":"/ui"}});
+        let upd =
+            json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/ui"}});
         let out = handle_update(&shared, &upd).unwrap();
         let t = &out[0].text;
         assert!(t.starts_with(HTML_MARK), "{t}");
@@ -3400,7 +3515,8 @@ cli = "/bin/true"
     fn help_lists_commands() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
-        let upd = json!({"message":{"chat":{"id":42},"text":"/help"}});
+        let upd =
+            json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/help"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert_eq!(out[0].text, COMMANDS);
         assert!(out[0].text.contains("Watch\n"), "{}", out[0].text);
@@ -3434,7 +3550,7 @@ cli = "/bin/true"
     fn add_command_queues_answer_only_task() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
-        let upd = json!({"message":{"chat":{"id":42},"text":"/add what is 2+2?"}});
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/add what is 2+2?"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert!(out[0].text.contains("queued"), "{}", out[0].text);
         let tasks = shared.db.list_tasks().unwrap();
@@ -3442,13 +3558,126 @@ cli = "/bin/true"
         assert_eq!(tasks[0].issue, None);
         assert_eq!(tasks[0].workspace_kind, "none");
         assert_eq!(tasks[0].source_kind, "telegram");
+        assert!(out[0].text.contains("answer-only"), "{}", out[0].text);
+    }
+
+    #[test]
+    fn add_repo_name_queues_git_task() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared_with(
+            r#"
+[[repo]]
+name = "demo"
+path = "{root}"
+github = "o/demo"
+enabled = true
+[[repo]]
+name = "off"
+path = "{root}"
+github = "o/off"
+enabled = false
+"#,
+        );
+        let root = shared
+            .config
+            .read()
+            .unwrap()
+            .repo_by_name("demo")
+            .unwrap()
+            .path;
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/add demo fix the login"}});
+        let out = handle_update(&shared, &upd).unwrap();
+        assert!(out[0].text.contains("queued"), "{}", out[0].text);
+        assert!(out[0].text.contains("repo demo"), "{}", out[0].text);
+        let tasks = shared.db.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].workspace_kind, "git");
+        assert_eq!(tasks[0].source_kind, "telegram");
+        assert_eq!(tasks[0].repo.as_deref(), Some(root.to_str().unwrap()));
+        assert!(!out[0].text.contains("answer-only"), "{}", out[0].text);
+    }
+
+    #[test]
+    fn add_unknown_first_word_stays_answer_only() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared_with(
+            r#"
+[[repo]]
+name = "demo"
+path = "{root}"
+github = "o/demo"
+"#,
+        );
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/add what is 2+2?"}});
+        let out = handle_update(&shared, &upd).unwrap();
+        assert!(out[0].text.contains("answer-only"), "{}", out[0].text);
+        let tasks = shared.db.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].workspace_kind, "none");
+        assert!(tasks[0].repo.as_deref().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn add_disabled_repo_is_rejected() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared_with(
+            r#"
+[[repo]]
+name = "off"
+path = "{root}"
+github = "o/off"
+enabled = false
+"#,
+        );
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/add off do something"}});
+        let out = handle_update(&shared, &upd).unwrap();
+        assert!(out[0].text.contains("disabled"), "{}", out[0].text);
+        assert!(shared.db.list_tasks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lockdown_drops_group_chat_even_when_id_allowed() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let upd =
+            json!({"message":{"chat":{"id":42,"type":"group"},"from":{"id":42},"text":"/status"}});
+        assert!(handle_update(&shared, &upd).unwrap().is_empty());
+        let super_g = json!({"message":{"chat":{"id":42,"type":"supergroup"},"from":{"id":42},"text":"/status"}});
+        assert!(handle_update(&shared, &super_g).unwrap().is_empty());
+    }
+
+    #[test]
+    fn lockdown_drops_private_chat_with_wrong_from() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":99},"text":"/status"}});
+        assert!(handle_update(&shared, &upd).unwrap().is_empty());
+    }
+
+    #[test]
+    fn lockdown_drops_callback_from_non_allowed_user() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let cb = json!({"callback_query":{"from":{"id":99},"data":"doctor","message":{"chat":{"id":42,"type":"private"}}}});
+        assert!(handle_update(&shared, &cb).unwrap().is_empty());
+    }
+
+    #[test]
+    fn lockdown_handles_allowed_private_chat() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let upd =
+            json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/help"}});
+        let out = handle_update(&shared, &upd).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, COMMANDS);
     }
 
     #[test]
     fn free_text_without_assistant_tips_enable() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
-        let upd = json!({"message":{"chat":{"id":42},"text":"how do I add kimi?"}});
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"how do I add kimi?"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert_eq!(out[0].text, ASSISTANT_OFF_TIP);
         assert!(out[0].text.contains("Assistant is off"), "{}", out[0].text);
@@ -3468,7 +3697,7 @@ cli = "/bin/true"
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
         shared.config.write().unwrap().telegram.assistant.enabled = true;
-        let upd = json!({"message":{"chat":{"id":42},"text":"how do I add kimi?"}});
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"how do I add kimi?"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert_eq!(out[0].text, "⏳ on it…");
         let task = shared.db.get_task("tg42").unwrap().unwrap();
@@ -3478,7 +3707,7 @@ cli = "/bin/true"
         assert!(pending[0].body.contains("kimi"), "{}", pending[0].body);
 
         shared.db.set_status("tg42", "running").unwrap();
-        let again = json!({"message":{"chat":{"id":42},"text":"why did smoke fail?"}});
+        let again = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"why did smoke fail?"}});
         let out = handle_update(&shared, &again).unwrap();
         assert!(out[0].text.contains("queued"), "{}", out[0].text);
         assert_eq!(shared.db.pending_messages("tg42").unwrap().len(), 2);
@@ -3489,7 +3718,7 @@ cli = "/bin/true"
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
         shared.config.write().unwrap().telegram.assistant.enabled = true;
-        let upd = json!({"message":{"chat":{"id":99},"text":"how do I add kimi?"}});
+        let upd = json!({"message":{"chat":{"id":99,"type":"private"},"from":{"id":99},"text":"how do I add kimi?"}});
         assert!(handle_update(&shared, &upd).unwrap().is_empty());
     }
 

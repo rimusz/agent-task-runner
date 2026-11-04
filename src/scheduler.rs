@@ -14,14 +14,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-fn notify_run(cfg: &crate::config::TelegramConfig, body: &str, shadow: bool) {
+fn notify_run(cfg: &crate::config::TelegramConfig, event: notify::Event, body: &str, shadow: bool) {
     if body
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
         .any(|k| crate::telegram::is_assistant_key(k) || crate::tui::is_tui_key(k))
     {
         return;
     }
-    notify::notify_unless_shadow(cfg, body, shadow);
+    notify::notify_event(cfg, event, body, shadow);
 }
 
 /// Held for the whole `run_claimed` (including verify). Dropped on every
@@ -147,6 +147,7 @@ async fn dispatch_matching(shared: &Arc<Shared>, only: Option<&str>) -> Result<(
             shared.db.set_status(&key, "failed")?;
             notify_run(
                 &cfg.telegram,
+                notify::Event::Failed,
                 &format!("failed {key} (task timeout)"),
                 task.shadow,
             );
@@ -457,6 +458,7 @@ pub fn fail_strict_arm(
     let _ = crate::output::capture(shared, key);
     notify_run(
         &cfg.telegram,
+        notify::Event::Failed,
         &format!("failed {key} (compare arm: {reason})"),
         task.shadow,
     );
@@ -764,6 +766,7 @@ fn log_skips(
             if reason == "quota" {
                 notify_run(
                     &cfg.telegram,
+                    notify::Event::QuotaSkip,
                     &format!(
                         "quota skip {} task={} overflow={}",
                         p.name, task.key, chosen.name
@@ -1230,6 +1233,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
 
     notify_run(
         &cfg.telegram,
+        notify::Event::Start,
         &format!("start {key} provider={}", provider.name),
         task.shadow,
     );
@@ -1337,6 +1341,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             )?;
             notify_run(
                 &cfg.telegram,
+                notify::Event::Fallback,
                 &format!("fallback {key} {} (spawn)", provider.name),
                 task.shadow,
             );
@@ -1601,7 +1606,12 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             shared.db.set_task_result(&key, &report, &diff, None)?;
             shared.db.set_status(&key, "needs_attention")?;
             tracing::warn!(task = %key, "{report}");
-            notify_run(&cfg.telegram, &report, task.shadow);
+            notify_run(
+                &cfg.telegram,
+                notify::Event::NeedsAttention,
+                &report,
+                task.shadow,
+            );
         }
         "success" => {
             shared.db.set_stall_retries(&key, 0)?;
@@ -1613,6 +1623,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 shared.db.set_status(&key, "needs_attention")?;
                 notify_run(
                     &cfg.telegram,
+                    notify::Event::NeedsAttention,
                     &format!("needs_attention {key} (tests_modified)"),
                     task.shadow,
                 );
@@ -1630,6 +1641,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                     shared.db.set_status(&key, "queued")?;
                     notify_run(
                         &cfg.telegram,
+                        notify::Event::VerifyRetry,
                         &format!("verify retry {key} provider={}", provider.name),
                         task.shadow,
                     );
@@ -1638,6 +1650,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                     shared.db.set_status(&key, "needs_attention")?;
                     notify_run(
                         &cfg.telegram,
+                        notify::Event::NeedsAttention,
                         &format!("needs_attention {key} (verify failed)"),
                         task.shadow,
                     );
@@ -1649,6 +1662,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                         .set_status(&key, if more { "queued" } else { "waiting" })?;
                     notify_run(
                         &cfg.telegram,
+                        notify::Event::Finished,
                         &format!(
                             "finished {key} provider={} (verify recorded)",
                             provider.name
@@ -1673,6 +1687,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                         shared.db.set_status(&key, "needs_attention")?;
                         notify_run(
                             &cfg.telegram,
+                            notify::Event::NeedsAttention,
                             &format!("needs_attention {key} (review)"),
                             task.shadow,
                         );
@@ -1687,6 +1702,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             shared.db.unconsume_run(run_id)?;
             notify_run(
                 &cfg.telegram,
+                notify::Event::Stalled,
                 &format!(
                     "stalled {key} provider={} (CLI hang / heartbeat)",
                     provider.name
@@ -1728,6 +1744,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 shared.db.unconsume_run(run_id)?;
                 notify_run(
                     &cfg.telegram,
+                    notify::Event::Fallback,
                     &format!("fallback {key} {} (unavailable)", provider.name),
                     task.shadow,
                 );
@@ -1750,6 +1767,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 shared.db.unconsume_run(run_id)?;
                 notify_run(
                     &cfg.telegram,
+                    notify::Event::Fallback,
                     &format!("fallback {key} {} ({})", provider.name, result.outcome),
                     task.shadow,
                 );
@@ -1758,13 +1776,19 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         }
         "cancelled" => {
             shared.db.set_status(&key, "failed")?;
-            notify_run(&cfg.telegram, &format!("cancelled {key}"), task.shadow);
+            notify_run(
+                &cfg.telegram,
+                notify::Event::Cancelled,
+                &format!("cancelled {key}"),
+                task.shadow,
+            );
             notify_held_dependents(&shared, &cfg, &key, task.shadow);
         }
         "needs_attention" => {
             shared.db.unconsume_run(run_id)?;
             notify_run(
                 &cfg.telegram,
+                notify::Event::Fallback,
                 &format!("fallback {key} {} (blocked or unfinished)", provider.name),
                 task.shadow,
             );
@@ -1793,6 +1817,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 shared.db.set_status(&key, "failed")?;
                 notify_run(
                     &cfg.telegram,
+                    notify::Event::Failed,
                     &format!("failed {key} provider={}", provider.name),
                     task.shadow,
                 );
@@ -1903,6 +1928,7 @@ async fn handle_failover(
         } else {
             notify_run(
                 &cfg.telegram,
+                notify::Event::Failed,
                 &format!("failed {key} (no remaining provider)"),
                 task.shadow,
             );
@@ -2046,6 +2072,7 @@ fn try_transient_retry(
     let how = if resume { "resume" } else { "rerun" };
     notify_run(
         &cfg.telegram,
+        notify::Event::Retry,
         &format!("retry {key} in {wait} ({}, {how})", class.reason),
         task.shadow,
     );
@@ -2073,6 +2100,7 @@ fn hold_blocked(shared: &Shared, cfg: &Config, task: &crate::db::Task, reason: &
     }
     notify_run(
         &cfg.telegram,
+        notify::Event::Held,
         &format!("held {} ({reason})", task.key),
         task.shadow,
     );
@@ -2097,7 +2125,12 @@ fn notify_held_dependents(shared: &Shared, cfg: &Config, key: &str, shadow: bool
         if already {
             continue;
         }
-        notify_run(&cfg.telegram, &format!("held {child} ({reason})"), shadow);
+        notify_run(
+            &cfg.telegram,
+            notify::Event::Held,
+            &format!("held {child} ({reason})"),
+            shadow,
+        );
         let _ = shared.db.set_hold(&child, &reason, true);
     }
 }
@@ -2115,6 +2148,7 @@ fn finish_waiting(
         .set_status(key, if more { "queued" } else { "waiting" })?;
     notify_run(
         &cfg.telegram,
+        notify::Event::Finished,
         &format!("finished {key} provider={provider}"),
         shadow,
     );
@@ -2186,6 +2220,7 @@ fn finish_plan(
             } else {
                 notify_run(
                     &cfg.telegram,
+                    notify::Event::Planned,
                     &format!("planned {key} → {} subtasks", kids.len()),
                     task.shadow,
                 );
@@ -2265,6 +2300,7 @@ async fn maybe_review(
             shared.db.enqueue_message(key, &body, "review")?;
             notify_run(
                 &cfg.telegram,
+                notify::Event::Review,
                 &format!("review changes {key} round {}", used + 1),
                 task.shadow,
             );

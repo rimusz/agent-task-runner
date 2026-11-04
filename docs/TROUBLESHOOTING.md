@@ -179,6 +179,11 @@ owner's env var, ok/warn/fail and days left without printing values.
 - `atr doctor` → `telegram*` lines; `atr telegram setup` redoes token + chat id; `atr telegram test` sends a test message.
 - No alerts arriving: `[telegram] enabled = true` and `allowed_chat_ids` set;
   first id is the owner chat that gets alerts. Logs show `telegram notify failed`.
+  If `events` is set, only those task kinds are sent (`failed`,
+  `needs_attention`, `stalled`, …). Token-expiry, health, daily summary and
+  command replies are never filtered.
+- Groups / channels silent: the bot only accepts private chats. A group that
+  happens to share an allowed id is dropped (debug log).
 - Free text not answered: `[telegram.assistant] enabled = true`.
 - `telegram reachability` / `telegram:` status line / dashboard banner:
   `warn` = 3+ getUpdates failures in a row; `FAIL` = unreachable 15+ min
