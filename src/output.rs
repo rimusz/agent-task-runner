@@ -444,7 +444,7 @@ fn deliver_reply(shared: &Shared, task: &Task, source: SourceKind, payload: &Val
                 }
                 s
             };
-            crate::notify::notify_unless_shadow(&cfg, &body, task.shadow);
+            crate::notify::notify_event(&cfg, crate::notify::Event::Finished, &body, task.shadow);
             Ok(())
         }
         SourceKind::Inbox => {

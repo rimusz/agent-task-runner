@@ -468,6 +468,7 @@ fn after_arm_inner(shared: &Shared, arm_key: &str) -> Result<()> {
                 shared.db.set_status(&parent_key, "needs_attention")?;
                 notify(
                     &cfg,
+                    crate::notify::Event::NeedsAttention,
                     &format!("needs_attention {parent_key} (compare: promoting {w} failed: {e:#})"),
                 );
                 return Ok(());
@@ -477,6 +478,7 @@ fn after_arm_inner(shared: &Shared, arm_key: &str) -> Result<()> {
             }
             notify(
                 &cfg,
+                crate::notify::Event::Compare,
                 &format!(
                     "compare {parent_key}: {w} ({}) won, {}{}",
                     d.winner_provider.as_deref().unwrap_or(""),
@@ -502,14 +504,14 @@ fn after_arm_inner(shared: &Shared, arm_key: &str) -> Result<()> {
                     msg.push_str(&format!("\n  {}", a.verify_tail));
                 }
             }
-            notify(&cfg, &msg);
+            notify(&cfg, crate::notify::Event::NeedsAttention, &msg);
         }
     }
     Ok(())
 }
 
-fn notify(cfg: &Config, msg: &str) {
-    crate::notify::notify_unless_shadow(&cfg.telegram, msg, false);
+fn notify(cfg: &Config, event: crate::notify::Event, msg: &str) {
+    crate::notify::notify_event(&cfg.telegram, event, msg, false);
 }
 
 fn save(db: &Db, key: &str, d: &Decision) -> Result<()> {

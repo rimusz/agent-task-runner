@@ -457,7 +457,12 @@ async fn plugin_hook(
         && !crate::telegram::is_assistant_key(&task)
     {
         let cfg = shared.config.read().unwrap().clone();
-        crate::notify::notify_unless_shadow(&cfg.telegram, &format!("hook {kind} {task}"), false);
+        crate::notify::notify_event(
+            &cfg.telegram,
+            crate::notify::Event::Hook,
+            &format!("hook {kind} {task}"),
+            false,
+        );
     }
     (StatusCode::OK, Json(json!({"ok": true})))
 }

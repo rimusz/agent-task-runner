@@ -1752,8 +1752,8 @@ async fn telegram_fake_api_status_confirm_and_acl_inner() {
     let fake = FakeTg {
         token: token.into(),
         updates: Arc::new(Mutex::new(vec![
-            json!({"update_id": 10, "message": {"chat": {"id": 99}, "text": "/status"}}),
-            json!({"update_id": 11, "message": {"chat": {"id": 42}, "text": "/status"}}),
+            json!({"update_id": 10, "message": {"chat": {"id": 99, "type": "private"}, "from": {"id": 99}, "text": "/status"}}),
+            json!({"update_id": 11, "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "/status"}}),
         ])),
         sent: Arc::new(Mutex::new(Vec::new())),
         hits: Arc::new(Mutex::new(Vec::new())),
@@ -1848,7 +1848,7 @@ cli = "/bin/true"
 
     fake.updates.lock().unwrap().push(json!({
         "update_id": 12,
-        "message": {"chat": {"id": 42}, "text": "/pause"}
+        "message": {"chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "/pause"}
     }));
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
     let data = loop {
@@ -1871,7 +1871,7 @@ cli = "/bin/true"
     };
     fake.updates.lock().unwrap().push(json!({
         "update_id": 13,
-        "callback_query": {"data": data, "message": {"chat": {"id": 42}}}
+        "callback_query": {"from": {"id": 42}, "data": data, "message": {"chat": {"id": 42, "type": "private"}}}
     }));
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
     loop {
@@ -1919,7 +1919,7 @@ async fn telegram_assistant_uses_fake_cli_and_counts_usage() {
         cfg.telegram.assistant.enabled = true;
         cfg.telegram.assistant.timeout = Duration::from_secs(60);
     }
-    let upd = serde_json::json!({"message":{"chat":{"id":42},"text":"how do I add kimi?"}});
+    let upd = serde_json::json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"how do I add kimi?"}});
     let out = atr::telegram::handle_update(&h.shared, &upd).unwrap();
     assert!(
         out[0].text.starts_with(atr::telegram::INTERIM_PREFIX),
@@ -1967,7 +1967,7 @@ async fn telegram_assistant_uses_fake_cli_and_counts_usage() {
     assert!(confirm.text.contains("grok"), "{}", confirm.text);
 
     let sid = task.session_id.clone();
-    let follow = serde_json::json!({"message":{"chat":{"id":42},"text":"why did smoke fail?"}});
+    let follow = serde_json::json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"why did smoke fail?"}});
     let out = atr::telegram::handle_update(&h.shared, &follow).unwrap();
     assert!(
         out[0].text.starts_with(atr::telegram::INTERIM_PREFIX),

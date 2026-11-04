@@ -102,7 +102,7 @@ async fn retried_assistant_task_follows_the_reloaded_provider() {
         cfg.telegram.assistant.provider = "claude".into();
         cfg.telegram.assistant.timeout = Duration::from_secs(60);
     }
-    let upd = serde_json::json!({"message":{"chat":{"id":42},"text":"hello"}});
+    let upd = serde_json::json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"hello"}});
     atr::telegram::handle_update(&h.shared, &upd).unwrap();
     h.wait_status("tg42", &["waiting"], 12000).await;
     let t = h.shared.db.get_task("tg42").unwrap().unwrap();
