@@ -287,6 +287,11 @@ pub fn apply_session_knobs(provider: &mut crate::config::Provider, db: &Db, key:
     knobs::apply_session_knobs(provider, db, key);
 }
 
+/// Same check the TUI `/model` picker uses for a provider kind.
+pub fn accept_model(kind: &str, model: &str) -> bool {
+    proxy::accept_model_name(kind, model)
+}
+
 /// Drop catalog-junk / alias `--model` values before CLI argv is built.
 pub fn sanitize_spawn_model(provider: &mut crate::config::Provider) {
     if proxy::accept_model_name(&provider.kind, &provider.model) {

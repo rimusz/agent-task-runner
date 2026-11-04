@@ -246,6 +246,20 @@ PRs. atr itself never logs the value.
 Doctor prints `GH_TOKEN set` / `in shadow.env` / `unset` — never the value,
 never `--show-token`. Tokens are never printed.
 
+## Issue labels that shape a task
+
+Next to the intake label (default `for:atr`), atr reads these when it creates
+the task:
+
+| Label | Effect |
+|-------|--------|
+| `needs:browser`, `needs:desktop` | Required capabilities ([NEEDS.md](NEEDS.md)) |
+| `provider:<name>` | Preferred `[[provider]]`, like `atr add --provider` |
+| `model:<id>` | Model for that provider. Needs a `provider:` label |
+
+An invalid `provider:` or `model:` label never fails the poll: atr drops it and
+logs a warning, and `needs:*` labels still apply. Rules: [USAGE.md](USAGE.md#per-task-provider-and-model).
+
 ## Troubleshooting
 
 | Symptom | What to check |

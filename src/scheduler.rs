@@ -755,6 +755,29 @@ fn unavailable(
     Ok(None)
 }
 
+/// Use the task's model override when it runs on the provider it named. A
+/// failover provider keeps its own model: the id belongs to the named one.
+pub fn apply_task_model(provider: &mut Provider, task: &crate::db::Task) {
+    let model = task.model_override.as_str();
+    if model.is_empty() {
+        return;
+    }
+    if provider.name != task.provider_hint {
+        tracing::info!(
+            task = %task.key,
+            provider = %provider.name,
+            wanted = %task.provider_hint,
+            "model override not applied; task is on another provider"
+        );
+        return;
+    }
+    if !crate::task::model_allowed(&provider.kind, model) {
+        tracing::warn!(task = %task.key, provider = %provider.name, %model, "ignoring unusable model override");
+        return;
+    }
+    provider.model = model.to_string();
+}
+
 async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -> Result<()> {
     let cfg = shared.config.read().unwrap().clone();
     let assistant = crate::telegram::is_assistant_key(&key);
@@ -778,6 +801,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         shared.db.set_status(&key, "waiting")?;
         return Ok(());
     }
+    apply_task_model(&mut provider, &task);
 
     crate::reported::refresh_grok_billing(&shared.db, &provider, &Clock::system())
         .await

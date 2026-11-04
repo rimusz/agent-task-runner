@@ -240,6 +240,30 @@ atr lessons export --repo R  # markdown, to copy into AGENTS.md by hand
 
 Lessons are refused if they look like they contain a secret (token prefixes, `KEY=value`, `Bearer …`, private keys, URLs with passwords, values from `shadow.env`) or like instructions (`git push`, `gh pr create`, "ignore previous instructions", …). With lessons on, atr also writes up to 2 lessons itself after an informative failure (see [CONFIG.md](CONFIG.md#lessons)); `atr lessons list` shows them with their evidence (task, run, signal). There is no Telegram command for lessons yet.
 
+### Per-task provider and model
+
+A task can name the configured provider and the model it runs on. Tasks that don't keep the `[[provider]]` order and each provider's `model`.
+
+```bash
+atr add --provider codex --model gpt-5.6-sol "Fix the flaky date parser test"
+curl -s -X POST http://127.0.0.1:7420/tasks \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"body":"Fix the flaky date parser test","provider":"codex","model":"gpt-5.6-sol"}'
+```
+
+MCP `add_task` takes the same `provider` and `model` arguments. On GitHub, add the labels `provider:codex` and `model:gpt-5.6-sol` next to the intake label (case-insensitive prefix; the model id keeps its case). Labels are read when the task is created.
+
+Validation at intake:
+
+- The provider must be a configured `[[provider]]` name.
+- The model must be a usable id for that provider's kind. Claude takes full ids (`claude-opus-5-5`), not aliases (`opus`). An id starting with `-` is refused.
+- `model` requires `provider`.
+- The provider must list every capability in the task's `needs`, so `--provider codex --needs browser` is refused unless codex has `capabilities = ["browser"]` ([NEEDS.md](NEEDS.md)).
+
+`atr add` and `POST /tasks` reject a bad request with the reason (`unknown provider X; configured: a, b`, `provider codex lacks capability browser; providers with browser: claude`), and MCP does too with one exception: because MCP `provider` also carries the free-form `hint` / `driver` aliases, a bare unknown name with no `model` and no `needs` stays a soft preference that logs a warning. GitHub labels never fail a poll: an unknown or incapable provider drops both labels (`needs` stay, so a capable provider runs the task), an invalid model drops just that label, and a `model:` label without a `provider:` label is ignored. Each case logs a warning.
+
+The provider is still a preference, not a pin. If atr fails over, the other provider keeps its own model and atr logs that the override wasn't applied; a retry starts from the named provider again. Naming a different provider in a follow-up clears the model. A task with a model skips the planner, since subtasks and the planning turn run elsewhere. `atr tasks KEY --verbose` prints `model` and a `run_model` line per run; `atr status --json`, MCP task views and `GET /tasks/KEY/result` include `model` when set. Inbox files and `atr triage run` have no model field; `atr triage run --provider` checks the name, and an inbox `provider` stays a soft hint.
+
 ### Compare two providers
 
 Run the same task on two providers and keep the better result:

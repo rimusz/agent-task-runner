@@ -610,6 +610,118 @@ pub fn task_needs(stored: &str, labels: &str) -> Vec<String> {
     out
 }
 
+fn label_value<'a>(label: &'a str, prefix: &str) -> Option<&'a str> {
+    let l = label.trim();
+    l.get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| l[prefix.len()..].trim())
+        .filter(|v| !v.is_empty())
+}
+
+/// `provider:<name>` / `model:<id>` GitHub labels (case-insensitive prefix,
+/// value case kept). A `model:` label without a `provider:` label is ignored
+/// with a warning.
+pub fn overrides_from_labels<S: AsRef<str>>(labels: &[S]) -> (Option<String>, Option<String>) {
+    let first = |prefix: &str| {
+        labels
+            .iter()
+            .find_map(|l| label_value(l.as_ref(), prefix))
+            .map(str::to_string)
+    };
+    let (provider, model) = (first("provider:"), first("model:"));
+    if provider.is_none() {
+        if let Some(m) = model {
+            tracing::warn!(model = %m, "ignoring model label without a provider label");
+        }
+        return (None, None);
+    }
+    (provider, model)
+}
+
+/// A model id a task may set: what the TUI `/model` check accepts, and never
+/// a value the CLI could read as a flag. Labels and API callers reach argv.
+pub fn model_allowed(kind: &str, model: &str) -> bool {
+    !model.starts_with('-')
+        && !model.chars().any(char::is_control)
+        && crate::tui::accept_model(kind, model)
+}
+
+/// Shared intake check for a named provider and model: the provider is
+/// configured, the model fits its kind, and it lists every needed capability.
+pub fn validate_overrides<S: AsRef<str>>(
+    cfg: &crate::config::Config,
+    provider: Option<&str>,
+    model: Option<&str>,
+    needs: &[S],
+) -> Result<()> {
+    let provider = provider.map(str::trim).filter(|s| !s.is_empty());
+    let model = model.map(str::trim).filter(|s| !s.is_empty());
+    let Some(name) = provider else {
+        if model.is_some() {
+            bail!("model requires a provider");
+        }
+        return Ok(());
+    };
+    let Some(p) = cfg.provider(name) else {
+        let names: Vec<&str> = cfg.providers.iter().map(|p| p.name.as_str()).collect();
+        bail!("unknown provider {name}; configured: {}", names.join(", "));
+    };
+    if let Some(m) = model {
+        if !model_allowed(&p.kind, m) {
+            bail!(
+                "model {m} is not valid for provider {name} (kind {})",
+                p.kind
+            );
+        }
+    }
+    for need in parse_needs(needs)? {
+        if !p.capabilities.contains(&need) {
+            let with: Vec<&str> = cfg
+                .providers
+                .iter()
+                .filter(|o| o.capabilities.contains(&need))
+                .map(|o| o.name.as_str())
+                .collect();
+            let with = if with.is_empty() {
+                "none".to_string()
+            } else {
+                with.join(", ")
+            };
+            bail!("provider {name} lacks capability {need}; providers with {need}: {with}");
+        }
+    }
+    Ok(())
+}
+
+/// Overrides from GitHub labels for a new task. Never fails a poll: an invalid
+/// provider (or one lacking `needs`) drops both labels so the normal capable
+/// provider runs the task; an invalid model drops the model only.
+pub fn label_overrides<S: AsRef<str>>(
+    cfg: &crate::config::Config,
+    key: &str,
+    labels: &[S],
+    needs: &[String],
+) -> (Option<String>, Option<String>) {
+    let (provider, model) = overrides_from_labels(labels);
+    let Some(provider) = provider else {
+        return (None, None);
+    };
+    if let Err(e) = validate_overrides(cfg, Some(&provider), None, needs) {
+        tracing::warn!(task = %key, "ignoring provider/model labels: {e:#}");
+        return (None, None);
+    }
+    let model = model.filter(
+        |m| match validate_overrides(cfg, Some(&provider), Some(m), needs) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(task = %key, "ignoring model label: {e:#}");
+                false
+            }
+        },
+    );
+    (Some(provider), model)
+}
+
 /// Serde helper: accept `needs = "browser"`, `"browser,desktop"`, or a list.
 pub fn de_needs<'de, D>(d: D) -> std::result::Result<Vec<String>, D::Error>
 where
@@ -653,6 +765,144 @@ mod needs_tests {
         assert_eq!(
             task_needs("desktop", "needs:browser,needs:desktop"),
             vec!["desktop", "browser"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    fn cfg(codex_caps: &str) -> crate::config::Config {
+        let dir = tempfile::tempdir().unwrap();
+        let text = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{root}/s.db"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "/bin/true"
+capabilities = ["browser"]
+[[provider]]
+name = "codex"
+kind = "codex"
+cli = "/bin/true"
+{codex_caps}
+"#,
+            root = dir.path().display(),
+        );
+        std::fs::write(dir.path().join("p.md"), "p\n").unwrap();
+        let raw: crate::config::RawConfig = toml::from_str(&text).unwrap();
+        crate::config::Config::from_raw(raw).unwrap()
+    }
+
+    fn err(c: &crate::config::Config, p: Option<&str>, m: Option<&str>, n: &[&str]) -> String {
+        validate_overrides(c, p, m, n).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn labels_parse_with_case_insensitive_prefix_and_kept_value_case() {
+        assert_eq!(
+            overrides_from_labels(&["for:atr", "provider:codex", "model:gpt-5.6-sol"]),
+            (Some("codex".into()), Some("gpt-5.6-sol".into()))
+        );
+        assert_eq!(
+            overrides_from_labels(&["PROVIDER: codex ", "Model: Acme/Big-Model "]),
+            (Some("codex".into()), Some("Acme/Big-Model".into()))
+        );
+        assert_eq!(
+            overrides_from_labels(&["provider:codex"]),
+            (Some("codex".into()), None)
+        );
+    }
+
+    #[test]
+    fn model_label_alone_and_empty_values_are_ignored() {
+        assert_eq!(overrides_from_labels(&["model:gpt-5.6-sol"]), (None, None));
+        assert_eq!(
+            overrides_from_labels(&["provider:", "model: "]),
+            (None, None)
+        );
+        // Multi-byte text at the prefix boundary must not panic.
+        assert_eq!(overrides_from_labels(&["provideré:x", "é"]), (None, None));
+    }
+
+    #[test]
+    fn validate_accepts_known_provider_and_model() {
+        let c = cfg("");
+        let none: &[&str] = &[];
+        validate_overrides(&c, None, None, none).unwrap();
+        validate_overrides(&c, Some(" codex "), Some(" gpt-5.6-sol "), none).unwrap();
+        validate_overrides(&c, Some("claude"), Some("claude-opus-5-5"), &["browser"]).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_unknown_provider_bad_model_and_model_alone() {
+        let c = cfg("");
+        assert_eq!(
+            err(&c, Some("nope"), None, &[]),
+            "unknown provider nope; configured: claude, codex"
+        );
+        assert!(err(&c, Some("claude"), Some("opus"), &[]).contains("not valid"));
+        assert!(err(&c, Some("codex"), Some("gpt 5"), &[]).contains("not valid"));
+        assert_eq!(
+            err(&c, None, Some("gpt-5.6-sol"), &[]),
+            "model requires a provider"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_models_the_cli_could_read_as_flags() {
+        let c = cfg("");
+        for bad in ["--dangerously-bypass-approvals", "-x1", "gpt-5\u{1b}[0m"] {
+            assert!(!model_allowed("codex", bad), "{bad:?}");
+            assert!(err(&c, Some("codex"), Some(bad), &[]).contains("not valid"));
+        }
+    }
+
+    #[test]
+    fn validate_checks_needed_capabilities() {
+        let c = cfg("");
+        assert_eq!(
+            err(&c, Some("codex"), None, &["browser"]),
+            "provider codex lacks capability browser; providers with browser: claude"
+        );
+        assert_eq!(
+            err(&c, Some("claude"), None, &["desktop"]),
+            "provider claude lacks capability desktop; providers with desktop: none"
+        );
+        let capable = cfg(r#"capabilities = ["browser"]"#);
+        validate_overrides(&capable, Some("codex"), Some("gpt-5.6-sol"), &["browser"]).unwrap();
+    }
+
+    #[test]
+    fn label_overrides_drop_what_is_invalid() {
+        let c = cfg("");
+        let needs = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            label_overrides(&c, "k", &["provider:codex", "model:gpt-5.6-sol"], &[]),
+            (Some("codex".into()), Some("gpt-5.6-sol".into()))
+        );
+        assert_eq!(
+            label_overrides(&c, "k", &["provider:nope", "model:gpt-5.6-sol"], &[]),
+            (None, None)
+        );
+        assert_eq!(
+            label_overrides(&c, "k", &["provider:codex", "model:--flag"], &[]),
+            (Some("codex".into()), None)
+        );
+        assert_eq!(
+            label_overrides(
+                &c,
+                "k",
+                &["provider:codex", "model:gpt-5.6-sol"],
+                &needs(&["browser"])
+            ),
+            (None, None)
         );
     }
 }

@@ -565,9 +565,11 @@ Set or change it:
 - Telegram: `/config set driver codex`, `/providers model cursor <model>`,
   `/providers move <name> <n>`, `/config set telegram.assistant.provider claude`,
   `/config set telegram.assistant.providers ["grok","claude"]` (CLI: `atr config set telegram.assistant.providers '["grok","codex","claude"]'`).
-- Per task (provider only): `atr add --provider claude "…"`, `"provider"` in
-  `POST /tasks` JSON, or `provider` on the MCP `add_task` tool. It's a
-  preference; the provider still needs the task's capabilities.
+- Per task: `atr add --provider codex --model gpt-5.6-sol "…"`, `"provider"`
+  and `"model"` in `POST /tasks` JSON or on the MCP `add_task` tool, or the
+  issue labels `provider:codex` and `model:gpt-5.6-sol`. It's a preference
+  checked at intake; a failover provider keeps its own model. See
+  [USAGE.md](USAGE.md#per-task-provider-and-model).
 
 Examples: `atr driver set grok` (recommended; enables Grok extras),
 `atr driver set claude --model opus`, `atr driver set cursor`,

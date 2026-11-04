@@ -16,7 +16,7 @@ pub const PROTOCOL_VERSION: &str = "2025-03-26";
 const TOOLS: &[(&str, &str)] = &[
     (
         "add_task",
-        "Enqueue a new atr task. Optional workspace (git repo, local dir, or none), output, key, provider/driver hint, after (task keys that must succeed first), idempotency_key (replay the same create), and files (name + content_base64 or text; land in the worktree by filename).",
+        "Enqueue a new atr task. Optional workspace (git repo, local dir, or none), output, key, provider/driver hint, model (for that provider), after (task keys that must succeed first), idempotency_key (replay the same create), and files (name + content_base64 or text; land in the worktree by filename).",
     ),
     (
         "list_tasks",
@@ -368,6 +368,7 @@ fn tool_schema(name: &str) -> Value {
                 "patch": {"type": "string"},
                 "key": {"type": "string"},
                 "provider": {"type": "string", "description": "Provider or driver hint"},
+                "model": {"type": "string", "description": "Model id, used when the task runs on `provider` (requires `provider`); a failover provider keeps its own model"},
                 "needs": {"type": "array", "items": {"type": "string", "enum": ["browser", "desktop"]}, "description": "Required provider capabilities; desktop tasks wait for a logged-in, unlocked graphical session"},
                 "after": {"type": "array", "items": {"type": "string"}, "description": "Task keys that must succeed before this one starts"},
                 "hint": {"type": "string"},
@@ -610,6 +611,7 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
             patch: arg_str(args, &["patch"]),
             triage: arg_str(args, &["triage", "triage_spec"]),
             provider: arg_str(args, &["provider", "hint", "driver"]),
+            model: arg_str(args, &["model"]),
             needs: arg_needs(args)?,
             after: crate::deps::parse_after(&arg_after(args)?),
             source: "mcp".into(),
@@ -703,7 +705,7 @@ fn list_tasks(shared: &Shared, args: &Value) -> Result<Value, String> {
             Some(p) => t.parent_key.as_deref() == Some(p),
         })
         .map(|t| {
-            json!({
+            let view = json!({
                 "key": t.key,
                 "status": t.status,
                 "role": t.role,
@@ -720,7 +722,8 @@ fn list_tasks(shared: &Shared, args: &Value) -> Result<Value, String> {
                 "after": t.deps,
                 "hold_reason": t.hold_reason,
                 "retry_reason": t.retry_reason,
-            })
+            });
+            crate::output::with_task_model(view, &t)
         })
         .collect();
     Ok(json!({"tasks": tasks}))
@@ -757,7 +760,7 @@ fn task_status(shared: &Shared, args: &Value) -> Result<Value, String> {
         })
         .collect();
     let kids = shared.db.children_of(&key).unwrap_or_default();
-    Ok(json!({
+    let view = json!({
         "key": t.key,
         "status": t.status,
         "role": t.role,
@@ -787,7 +790,8 @@ fn task_status(shared: &Shared, args: &Value) -> Result<Value, String> {
             "started": r.started,
             "ended": r.ended,
         })),
-    }))
+    });
+    Ok(crate::output::with_task_model(view, &t))
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -1483,5 +1487,34 @@ cli = "/bin/true"
             r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
         ));
         assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_task_takes_a_model_and_views_show_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path());
+        let add = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_task","arguments":{"title":"Pinned","body":"x","provider":"claude","model":"claude-opus-5-5"}}}"#,
+        )
+        .await;
+        assert_eq!(add[0]["result"]["isError"], false, "{}", add[0]);
+        let t = s.db.get_task("task-pinned").unwrap().unwrap();
+        assert_eq!(t.model_override, "claude-opus-5-5");
+        let status = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"task_status","arguments":{"key":"task-pinned"}}}"#,
+        )
+        .await;
+        let text = status[0]["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"model\": \"claude-opus-5-5\""), "{text}");
+
+        let bad = handle_raw(
+            &s,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add_task","arguments":{"title":"Bad","body":"x","provider":"claude","model":"opus"}}}"#,
+        )
+        .await;
+        assert_eq!(bad[0]["result"]["isError"], true, "{}", bad[0]);
+        assert!(s.db.get_task("task-bad").unwrap().is_none());
     }
 }

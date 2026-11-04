@@ -51,6 +51,9 @@ pub struct Task {
     pub deps: String,
     pub review_rounds: i64,
     pub provider_hint: String,
+    /// Model to use when the task runs on `provider_hint`; other providers
+    /// keep their own. Empty = none.
+    pub model_override: String,
     pub title: String,
     /// git | dir | none
     pub workspace_kind: String,
@@ -106,6 +109,7 @@ impl Default for Task {
             deps: String::new(),
             review_rounds: 0,
             provider_hint: String::new(),
+            model_override: String::new(),
             title: String::new(),
             workspace_kind: "git".into(),
             output_kind: "reply".into(),
@@ -135,7 +139,7 @@ const TASK_SELECT: &str = "key, repo, issue, status, provider, session_id, workt
                           result_text, result_diff, result_pr_url, needs,
                           pin_strict, compare_decision, clock_started,
                           retry_attempt, retry_next_at, retry_reason,
-                          hold_reason, hold_notified";
+                          hold_reason, hold_notified, model_override";
 
 const RUN_SELECT: &str = "id, task_key, provider, model, pid, started, ended, outcome,
                           last_event_at, exit_code, session_id, handoff, prefix_hash,
@@ -490,6 +494,10 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE tasks ADD COLUMN provider_hint TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN model_override TEXT NOT NULL DEFAULT ''",
             [],
         );
         let _ = conn.execute(
@@ -957,11 +965,24 @@ impl Db {
         Ok(())
     }
 
+    /// A model override belongs to the provider it was validated against, so
+    /// naming a different provider drops it.
     pub fn set_provider_hint(&self, key: &str, hint: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(
-            "UPDATE tasks SET provider_hint = ?1, updated = ?2 WHERE key = ?3",
+            r#"UPDATE tasks SET provider_hint = ?1, updated = ?2,
+                   model_override = CASE WHEN provider_hint = ?1 THEN model_override ELSE '' END
+               WHERE key = ?3"#,
             params![hint, now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_model_override(&self, key: &str, model: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET model_override = ?1, updated = ?2 WHERE key = ?3",
+            params![model, now_rfc3339(), key],
         )?;
         Ok(())
     }
@@ -3020,6 +3041,7 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         retry_reason: r.get::<_, Option<String>>(35)?.unwrap_or_default(),
         hold_reason: r.get::<_, Option<String>>(36)?.unwrap_or_default(),
         hold_notified: r.get::<_, Option<i64>>(37)?.unwrap_or(0) != 0,
+        model_override: r.get::<_, Option<String>>(38)?.unwrap_or_default(),
     })
 }
 

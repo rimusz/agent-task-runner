@@ -141,7 +141,10 @@ async fn poll_repo(
                 issue.body.unwrap_or_default(),
                 issue.number
             );
-            shared.submit_with(
+            let labels: Vec<&str> = issue.labels.iter().map(|l| l.name.as_str()).collect();
+            let needs = crate::task::needs_from_labels(&labels);
+            let (provider_hint, model) = crate::task::label_overrides(cfg, &key, &labels, &needs);
+            shared.submit_with_model(
                 &key,
                 &body,
                 "github",
@@ -156,16 +159,11 @@ async fn poll_repo(
                     source_kind: Some("github".into()),
                     title: Some(issue.title.clone()),
                     allow_empty_repo: false,
-                    provider_hint: None,
-                    needs: crate::task::needs_from_labels(
-                        &issue
-                            .labels
-                            .iter()
-                            .map(|l| l.name.as_str())
-                            .collect::<Vec<_>>(),
-                    ),
+                    provider_hint,
+                    needs,
                     after: Vec::new(),
                 },
+                model.as_deref(),
             )?;
         }
         let names: Vec<_> = issue.labels.iter().map(|l| l.name.as_str()).collect();
@@ -345,5 +343,68 @@ enabled = false
         );
         poll_once(&s).await.unwrap();
         assert!(s.db.get_task("task-12").unwrap().is_none());
+    }
+
+    const CODEX: &str = r#"
+[[provider]]
+name = "codex"
+kind = "codex"
+cli = "/bin/true"
+"#;
+
+    async fn poll_labels(dir: &std::path::Path, labels: &str, extra: &str) -> crate::db::Task {
+        let fake = dir.join("fake");
+        std::fs::create_dir_all(&fake).unwrap();
+        std::fs::write(
+            fake.join("gh-issues.json"),
+            format!(
+                r#"[{{"number":12,"title":"Fix login","body":"do the work","labels":[{labels}]}}]"#
+            ),
+        )
+        .unwrap();
+        let s = shared(dir, extra);
+        poll_once(&s).await.unwrap();
+        s.db.get_task("task-12").unwrap().expect("labelled issue")
+    }
+
+    #[tokio::test]
+    async fn labels_set_provider_and_model_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = poll_labels(
+            dir.path(),
+            r#"{"name":"for:atr"},{"name":"provider:codex"},{"name":"model:gpt-5.6-sol"}"#,
+            CODEX,
+        )
+        .await;
+        assert_eq!(t.provider_hint, "codex");
+        assert_eq!(t.model_override, "gpt-5.6-sol");
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_label_is_ignored_without_failing_the_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = poll_labels(
+            dir.path(),
+            r#"{"name":"for:atr"},{"name":"provider:nope"},{"name":"model:gpt-5.6-sol"}"#,
+            CODEX,
+        )
+        .await;
+        assert_eq!(t.status, "queued");
+        assert_eq!(t.provider_hint, "");
+        assert_eq!(t.model_override, "");
+    }
+
+    #[tokio::test]
+    async fn incapable_provider_label_is_dropped_and_needs_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = poll_labels(
+            dir.path(),
+            r#"{"name":"for:atr"},{"name":"needs:browser"},{"name":"provider:codex"},{"name":"model:gpt-5.6-sol"}"#,
+            CODEX,
+        )
+        .await;
+        assert_eq!(t.needs, "browser");
+        assert_eq!(t.provider_hint, "");
+        assert_eq!(t.model_override, "");
     }
 }

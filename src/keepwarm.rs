@@ -256,7 +256,11 @@ pub fn ping_provider(p: &Provider) -> Provider {
 
 /// Run one ping. Never touches the task's runs, turns or usage rows.
 pub async fn run_ping(cfg: &Config, provider: &Provider, task: &Task, session: &str) -> PingResult {
-    let provider = &ping_provider(provider);
+    let provider = &{
+        let mut p = ping_provider(provider);
+        crate::scheduler::apply_task_model(&mut p, task);
+        p
+    };
     let fail = |note: String| PingResult {
         note,
         ..Default::default()
@@ -743,5 +747,24 @@ mod tests {
                 .count,
             0
         );
+    }
+
+    #[test]
+    fn ping_uses_the_task_model_override() {
+        // The real turn spawned with the override; any other argv is a
+        // different cache.
+        let p = claude();
+        let mut task = Task {
+            provider_hint: p.name.clone(),
+            model_override: "claude-override-5-5".into(),
+            ..Task::default()
+        };
+        let mut spawned = ping_provider(&p);
+        crate::scheduler::apply_task_model(&mut spawned, &task);
+        assert_eq!(spawned.model, "claude-override-5-5");
+        task.provider_hint = "other".into();
+        let mut spawned = ping_provider(&p);
+        crate::scheduler::apply_task_model(&mut spawned, &task);
+        assert_ne!(spawned.model, "claude-override-5-5");
     }
 }
