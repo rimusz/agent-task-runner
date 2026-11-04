@@ -110,6 +110,11 @@ A new message on the held task also unblocks it unless you pass a new
 **Queued work is not starting and status says `host: … waiting`.** CPU load
 or free memory is past `[host]` (`max_load` 0.85 per core, `min_memory_mb`
 512). Wait, raise the limits, or `atr config set host.enabled false`.
+On macOS before v0.1.40 the memory reading could stick at `0 MiB free`
+while `memory_pressure` showed plenty free (sysinfo subtracted compressed
+pages); upgrade, or set `host.min_memory_mb = 0` to skip only the memory
+check. `memory unknown` means the sample failed; the memory check then
+does not block.
 Starts are one-at-a-time with `host.settle` (30s) while the gate is on.
 
 **Task failed with `task timeout`.** The task passed `task_timeout` (default
