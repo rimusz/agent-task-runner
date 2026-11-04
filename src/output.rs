@@ -85,7 +85,7 @@ pub fn capture(shared: &Shared, key: &str) -> Result<Value> {
 
 /// Like [`capture`], with the result text given instead of read from the
 /// task's own last run (a compare parent has no runs of its own).
-fn capture_with(shared: &Shared, key: &str, text: Option<&str>) -> Result<Value> {
+pub(crate) fn capture_with(shared: &Shared, key: &str, text: Option<&str>) -> Result<Value> {
     let Some(task) = shared.db.get_task(key)? else {
         anyhow::bail!("unknown task {key}");
     };

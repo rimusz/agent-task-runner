@@ -135,9 +135,9 @@ async fn dispatch_matching(shared: &Arc<Shared>, only: Option<&str>) -> Result<(
                 continue;
             }
         }
-        if task.pin_strict {
+        if strictly_pinned(&task) {
             if let Some(reason) = strict_pin_unusable(&cfg, &shared.db, &task) {
-                fail_strict_arm(shared, &cfg, &task, None, &reason);
+                fail_strict(shared, &cfg, &task, None, &reason);
                 continue;
             }
         }
@@ -328,10 +328,31 @@ pub fn record_task_timeout(shared: &Arc<Shared>, cfg: &Config, task: &crate::db:
     }
 }
 
+/// Run outcome and event kind for a model pin that cannot run.
+pub const MODEL_PIN_EVENT: &str = "model_pin_unavailable";
+
+/// Runs on one provider only: a compare arm, or a task that set a model.
+pub fn strictly_pinned(task: &crate::db::Task) -> bool {
+    task.pin_strict || !task.model_override.is_empty()
+}
+
+/// The only provider a strictly pinned task may run on.
+pub fn strict_provider(task: &crate::db::Task) -> Option<&str> {
+    let name = if task.pin_strict {
+        task.provider.as_deref()?
+    } else if !task.model_override.is_empty() {
+        task.provider_hint.as_str()
+    } else {
+        return None;
+    };
+    Some(name).filter(|n| !n.is_empty())
+}
+
 /// Why a strictly pinned task can never run on its provider (unknown,
 /// disabled, missing CLI, or lacking a needed capability), if so.
 pub fn strict_pin_unusable(cfg: &Config, db: &Db, task: &crate::db::Task) -> Option<String> {
-    let name = task.provider.as_deref().filter(|n| !n.is_empty())?;
+    // `atr add --compare` also probes providers on a not-yet-pinned task.
+    let name = strict_provider(task).or(task.provider.as_deref().filter(|n| !n.is_empty()))?;
     let Some(p) = cfg.provider(name) else {
         return Some(format!("provider {name} is not configured"));
     };
@@ -351,6 +372,59 @@ pub fn strict_pin_unusable(cfg: &Config, db: &Db, task: &crate::db::Task) -> Opt
         return Some(format!("provider {name} lacks {}", needs.join(",")));
     }
     None
+}
+
+fn fail_strict(
+    shared: &Shared,
+    cfg: &Config,
+    task: &crate::db::Task,
+    run_id: Option<i64>,
+    reason: &str,
+) {
+    if task.pin_strict {
+        fail_strict_arm(shared, cfg, task, run_id, reason);
+    } else {
+        fail_model_pin(shared, cfg, task, run_id, reason);
+    }
+}
+
+/// A task that set a model cannot continue on its named provider: fail it
+/// instead of running anywhere else. Records the reason as a
+/// `MODEL_PIN_EVENT` on `run_id`, or on a finished marker run when it never
+/// started.
+fn fail_model_pin(
+    shared: &Shared,
+    cfg: &Config,
+    task: &crate::db::Task,
+    run_id: Option<i64>,
+    reason: &str,
+) {
+    let key = task.key.as_str();
+    let text = format!(
+        "model override {} pins provider {}: {reason}",
+        task.model_override, task.provider_hint
+    );
+    tracing::warn!(task = %key, "{text}");
+    let detail = serde_json::json!({"type": MODEL_PIN_EVENT, "reason": text}).to_string();
+    match run_id {
+        Some(id) => {
+            let _ = shared.db.insert_event(id, MODEL_PIN_EVENT, &detail);
+        }
+        None => {
+            if let Ok(id) = shared.db.start_run(key, &task.provider_hint, "") {
+                let _ = shared.db.insert_event(id, MODEL_PIN_EVENT, &detail);
+                let _ = shared.db.finish_run(id, MODEL_PIN_EVENT, None);
+            }
+        }
+    }
+    let _ = shared.db.set_status(key, "failed");
+    let _ = crate::output::capture_with(shared, key, Some(&text));
+    notify_run(
+        &cfg.telegram,
+        &format!("failed {key} ({text})"),
+        task.shadow,
+    );
+    notify_held_dependents(shared, cfg, key, task.shadow);
 }
 
 /// A compare arm cannot continue on its pinned provider: fail it instead of
@@ -470,6 +544,30 @@ pub fn pick_provider(
     }
     let capable = |p: &Provider| provider_has(p, &needs);
 
+    // Strict pin (compare arm, or a task that set a model): only that provider,
+    // ever. Busy, cooling, degraded or over quota means wait; disabled/missing
+    // is failed by the dispatcher.
+    if strictly_pinned(task) {
+        let Some(name) = strict_provider(task) else {
+            return Ok(None);
+        };
+        // A model pin never fails over, so `tried` can only be a leftover from
+        // soft runs before the model was set.
+        if task.pin_strict && tried.contains(&name) {
+            return Ok(None);
+        }
+        let Some(p) = cfg.provider(name).filter(|p| capable(p)) else {
+            return Ok(None);
+        };
+        // A stall retry resumes on the same provider despite the degraded
+        // mark it just set, exactly like a soft-pinned task.
+        let resuming = task.stall_retries > 0 || (task.pin_strict && task.session_id.is_some());
+        return Ok(match unavailable(cfg, p, db, inflight, resuming, clock)? {
+            None => Some(p.clone()),
+            Some(_) => None,
+        });
+    }
+
     // Telegram assistant with `[telegram.assistant] providers`: the first
     // listed provider that is usable right now; wait while a listed one is
     // only busy/cooling; fall through when none of them can ever run.
@@ -487,27 +585,6 @@ pub fn pick_provider(
             ListPick::Wait => return Ok(None),
             ListPick::NoneUsable => {}
         }
-    }
-
-    // Compare arms: only the pinned provider, ever. Busy, cooling, degraded
-    // or over quota means wait; disabled/missing is failed by the dispatcher.
-    if task.pin_strict {
-        let Some(name) = task.provider.as_deref().filter(|n| !n.is_empty()) else {
-            return Ok(None);
-        };
-        if tried.contains(&name) {
-            return Ok(None);
-        }
-        let Some(p) = cfg.provider(name).filter(|p| capable(p)) else {
-            return Ok(None);
-        };
-        // A stall retry resumes on the same provider despite the degraded
-        // mark it just set, exactly like a soft-pinned task.
-        let resuming = task.stall_retries > 0 || task.session_id.is_some();
-        return Ok(match unavailable(cfg, p, db, inflight, resuming, clock)? {
-            None => Some(p.clone()),
-            Some(_) => None,
-        });
     }
 
     let mut prefers = Vec::new();
@@ -755,8 +832,8 @@ fn unavailable(
     Ok(None)
 }
 
-/// Use the task's model override when it runs on the provider it named. A
-/// failover provider keeps its own model: the id belongs to the named one.
+/// Use the task's model override on the provider it named. The pin keeps the
+/// task there; the name check guards the id against any other provider.
 pub fn apply_task_model(provider: &mut Provider, task: &crate::db::Task) {
     let model = task.model_override.as_str();
     if model.is_empty() {
@@ -1762,8 +1839,8 @@ async fn handle_failover(
     run_id: i64,
     worktree: &std::path::Path,
 ) -> Result<()> {
-    if let Some(task) = shared.db.get_task(key)?.filter(|t| t.pin_strict) {
-        fail_strict_arm(
+    if let Some(task) = shared.db.get_task(key)?.filter(strictly_pinned) {
+        fail_strict(
             shared,
             cfg,
             &task,
@@ -1889,7 +1966,7 @@ fn failover_has_next(
     task: &crate::db::Task,
     current: &Provider,
 ) -> Result<bool> {
-    if task.pin_strict {
+    if strictly_pinned(task) {
         return Ok(false);
     }
     let mut tried: Vec<&str> = task
@@ -1923,6 +2000,8 @@ fn try_transient_retry(
     if !cfg.retry.enabled {
         return Ok(false);
     }
+    // Compare arms end instead; a model pin may retry, on its own provider
+    // only (`failover_has_next` is false and `pick_provider` stays on it).
     if task.pin_strict {
         return Ok(false);
     }
@@ -4099,5 +4178,112 @@ capabilities = ["browser", "desktop"]
         // Different command string so the short probe cache is bypassed.
         let unlocked = needs_cfg(dir.path(), &format!("sh {}", probe.display()));
         assert_eq!(pick_name(&unlocked, &db, "gui").as_deref(), Some("desk"));
+    }
+
+    fn model_pin_task(db: &Db, key: &str) -> crate::db::Task {
+        db.upsert_task(key, "/repo", None).unwrap();
+        db.set_provider_hint(key, "grok").unwrap();
+        db.set_model_override(key, "grok-override-9").unwrap();
+        db.get_task(key).unwrap().unwrap()
+    }
+
+    fn pick(
+        cfg: &Config,
+        db: &Db,
+        inflight: &HashMap<String, InFlight>,
+        t: &crate::db::Task,
+    ) -> Option<String> {
+        pick_provider(cfg, db, inflight, t, &crate::clock::Clock::system())
+            .unwrap()
+            .map(|p| p.name)
+    }
+
+    #[test]
+    fn model_pin_runs_on_its_provider_ignoring_order_and_stale_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = two_provider_cfg(dir.path(), 10_000.0);
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        let t = model_pin_task(&db, "pin-1");
+        let none = HashMap::new();
+        assert_eq!(pick(&cfg, &db, &none, &t).as_deref(), Some("grok"));
+        assert_eq!(strict_provider(&t), Some("grok"));
+        // An older soft run on claude, or a `tried` left by it, changes nothing.
+        db.set_provider_session("pin-1", Some("claude"), Some("sid"))
+            .unwrap();
+        db.set_tried("pin-1", Some("grok")).unwrap();
+        let t = db.get_task("pin-1").unwrap().unwrap();
+        assert_eq!(pick(&cfg, &db, &none, &t).as_deref(), Some("grok"));
+    }
+
+    #[test]
+    fn model_pin_waits_while_its_provider_is_busy_cooling_or_degraded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = two_provider_cfg(dir.path(), 10_000.0);
+        cfg.providers[1].max_parallel = 1;
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        let t = model_pin_task(&db, "pin-2");
+
+        let mut busy = HashMap::new();
+        busy.insert(
+            "other".to_string(),
+            InFlight {
+                provider: "grok".into(),
+                pid: 0,
+                run_id: 0,
+                kill: Arc::new(Mutex::new(None)),
+                shadow: false,
+            },
+        );
+        assert_eq!(
+            pick(&cfg, &db, &busy, &t),
+            None,
+            "claude is free but not allowed"
+        );
+
+        let none = HashMap::new();
+        let until = crate::db::cooldown_rfc3339(std::time::Duration::from_secs(600));
+        db.set_cooldown("grok", &until).unwrap();
+        assert_eq!(pick(&cfg, &db, &none, &t), None);
+        // A session on it does not skip the wait.
+        db.set_provider_session("pin-2", Some("grok"), Some("sid"))
+            .unwrap();
+        let t = db.get_task("pin-2").unwrap().unwrap();
+        assert_eq!(pick(&cfg, &db, &none, &t), None);
+        db.set_cooldown("grok", "2000-01-01T00:00:00Z").unwrap();
+
+        db.set_degraded_until("grok", Some(&until)).unwrap();
+        assert_eq!(pick(&cfg, &db, &none, &t), None);
+    }
+
+    #[test]
+    fn model_pin_reports_why_its_provider_cannot_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = two_provider_cfg(dir.path(), 10_000.0);
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        let t = model_pin_task(&db, "pin-3");
+        assert_eq!(strict_pin_unusable(&cfg, &db, &t), None);
+        cfg.providers[1].enabled = false;
+        assert_eq!(
+            strict_pin_unusable(&cfg, &db, &t).as_deref(),
+            Some("provider grok is disabled")
+        );
+        assert_eq!(pick(&cfg, &db, &HashMap::new(), &t), None);
+    }
+
+    #[test]
+    fn provider_hint_without_a_model_is_not_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = two_provider_cfg(dir.path(), 10_000.0);
+        let db = Db::open(&dir.path().join("state.db")).unwrap();
+        db.upsert_task("soft-1", "/repo", None).unwrap();
+        db.set_provider_hint("soft-1", "grok").unwrap();
+        let t = db.get_task("soft-1").unwrap().unwrap();
+        assert!(!strictly_pinned(&t));
+        assert_eq!(strict_provider(&t), None);
+        cfg.providers[1].enabled = false;
+        assert_eq!(
+            pick(&cfg, &db, &HashMap::new(), &t).as_deref(),
+            Some("claude")
+        );
     }
 }

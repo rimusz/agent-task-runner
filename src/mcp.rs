@@ -368,7 +368,7 @@ fn tool_schema(name: &str) -> Value {
                 "patch": {"type": "string"},
                 "key": {"type": "string"},
                 "provider": {"type": "string", "description": "Provider or driver hint"},
-                "model": {"type": "string", "description": "Model id, used when the task runs on `provider` (requires `provider`); a failover provider keeps its own model"},
+                "model": {"type": "string", "description": "Model id (requires `provider`). Pins the task strictly to `provider`: no fallback or failover"},
                 "needs": {"type": "array", "items": {"type": "string", "enum": ["browser", "desktop"]}, "description": "Required provider capabilities; desktop tasks wait for a logged-in, unlocked graphical session"},
                 "after": {"type": "array", "items": {"type": "string"}, "description": "Task keys that must succeed before this one starts"},
                 "hint": {"type": "string"},
