@@ -96,6 +96,10 @@ enum Cmd {
         key: Option<String>,
         #[arg(long)]
         provider: Option<String>,
+        /// Model id for --provider. Pins the task strictly to that provider
+        /// (no fallback or failover); --provider alone stays a soft preference.
+        #[arg(long, requires = "provider")]
+        model: Option<String>,
         #[arg(long)]
         title: Option<String>,
         /// Required provider capabilities: browser, desktop (comma-separated or repeated).
@@ -749,6 +753,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             patch,
             key,
             provider,
+            model,
             title,
             needs,
             after,
@@ -766,6 +771,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let shared = open_after_init(path, "atr add").await?;
             let cfg = shared.config.read().unwrap().clone();
             atr::task::check_prompt_bytes(&text, cfg.max_prompt_bytes)?;
+            // Before http_create: any error from it falls back to a local submit.
+            atr::task::validate_overrides(&cfg, provider.as_deref(), model.as_deref(), &needs)?;
             let title = title
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| atr::task::title_from_prompt(&text));
@@ -843,6 +850,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 output_spec.as_deref(),
                 title.as_str(),
                 provider.as_deref(),
+                model.as_deref(),
                 matches!(workspace_kind, atr::task::WorkspaceKind::Dir),
                 &needs,
                 &after,
@@ -855,7 +863,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 });
             }
             drop(cfg);
-            let outcome = shared.submit_with(
+            let outcome = shared.submit_with_model(
                 &key,
                 &body,
                 "cli",
@@ -874,6 +882,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     needs: needs.clone(),
                     after: after.clone(),
                 },
+                model.as_deref(),
             )?;
             println!("{key}");
             match outcome {
@@ -1433,6 +1442,7 @@ fn http_create(
     output_spec: Option<&str>,
     title: &str,
     provider: Option<&str>,
+    model: Option<&str>,
     as_dir: bool,
     needs: &[String],
     after: &[String],
@@ -1455,6 +1465,9 @@ fn http_create(
     }
     if let Some(p) = provider {
         payload["provider"] = serde_json::Value::String(p.into());
+    }
+    if let Some(m) = model {
+        payload["model"] = serde_json::Value::String(m.into());
     }
     if !needs.is_empty() {
         payload["needs"] = serde_json::json!(needs);
@@ -1546,6 +1559,7 @@ async fn run_triage_cmd(path: PathBuf, cmd: TriageCmd) -> anyhow::Result<ExitCod
         } => {
             let shared = open_after_init(path, "atr triage run").await?;
             let cfg = shared.config.read().unwrap().clone();
+            atr::task::validate_overrides(&cfg, provider.as_deref(), None, &[] as &[String])?;
             let entry = cfg
                 .resolve_repo_filter(&repo)
                 .ok_or_else(|| anyhow::anyhow!("unknown repo {repo}"))?;
@@ -1579,6 +1593,7 @@ async fn run_triage_cmd(path: PathBuf, cmd: TriageCmd) -> anyhow::Result<ExitCod
                 Some(&spec),
                 title.as_str(),
                 provider.as_deref(),
+                None,
                 false,
                 &[],
                 &[],

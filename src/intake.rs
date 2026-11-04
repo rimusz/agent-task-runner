@@ -48,6 +48,8 @@ pub struct CreateIn {
     /// `triage:<owner/name>#<issue>:<labels>` for `output = "triage"`.
     pub triage: Option<String>,
     pub provider: Option<String>,
+    /// Model for `provider`; needs a provider.
+    pub model: Option<String>,
     pub needs: Vec<String>,
     pub after: Vec<String>,
     pub source: String,
@@ -333,6 +335,20 @@ pub fn create(shared: &Shared, spec: CreateIn) -> Result<CreateOut, CreateError>
             output_kind.as_str()
         )));
     }
+    if let Err(e) = task::validate_overrides(
+        &cfg,
+        spec.provider.as_deref(),
+        spec.model.as_deref(),
+        &spec.needs,
+    ) {
+        // MCP `provider` also carries the free-form `hint` / `driver` aliases: a
+        // bare unknown name stays a soft preference the scheduler skips.
+        let has_model = spec.model.as_deref().is_some_and(|m| !m.trim().is_empty());
+        if spec.source_kind != "mcp" || has_model || !spec.needs.is_empty() {
+            return Err(CreateError::BadRequest(e.to_string()));
+        }
+        tracing::warn!("add_task provider hint not validated: {e:#}");
+    }
     if let Some(k) = spec.idempotency_key.as_deref() {
         validate_idempotency_key(k)?;
     }
@@ -382,7 +398,7 @@ pub fn create(shared: &Shared, spec: CreateIn) -> Result<CreateOut, CreateError>
         .clone()
         .or(spec.patch.clone())
         .or(spec.triage.clone());
-    let outcome = match shared.submit_with(
+    let outcome = match shared.submit_with_model(
         &key,
         &text,
         &spec.source,
@@ -401,6 +417,7 @@ pub fn create(shared: &Shared, spec: CreateIn) -> Result<CreateOut, CreateError>
             needs: spec.needs.clone(),
             after: spec.after.clone(),
         },
+        spec.model.as_deref(),
     ) {
         Ok(o) => o,
         Err(e) => {
@@ -553,6 +570,15 @@ fn request_hash(spec: &CreateIn, title: &str) -> String {
         b"provider",
         spec.provider.as_deref().unwrap_or("").trim().as_bytes(),
     );
+    // Only when set, so idempotency keys stored before this field keep matching.
+    if let Some(m) = spec
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        put(&mut h, b"model", m.as_bytes());
+    }
     put(&mut h, b"needs", spec.needs.join(",").as_bytes());
     put(&mut h, b"after", spec.after.join(",").as_bytes());
     put(
@@ -835,5 +861,116 @@ cli = "/bin/true"
             std::fs::read_to_string(wt.join("notes.txt")).unwrap(),
             "pay attention"
         );
+    }
+
+    fn override_shared(dir: &Path) -> std::sync::Arc<Shared> {
+        std::fs::write(dir.join("p.md"), "p\n").unwrap();
+        let text = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{root}/s.db"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+[[provider]]
+name = "codex"
+kind = "codex"
+cli = "/bin/true"
+"#,
+            root = dir.display(),
+        );
+        let raw: crate::config::RawConfig = toml::from_str(&text).unwrap();
+        let cfg = crate::config::Config::from_raw(raw).unwrap();
+        Shared::from_config(dir.join("c.toml"), cfg).unwrap()
+    }
+
+    fn bad_request(r: Result<CreateOut, CreateError>) -> String {
+        match r {
+            Err(CreateError::BadRequest(e)) => e,
+            other => panic!("want BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_stores_a_valid_override_before_queueing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = override_shared(dir.path());
+        let out = create(
+            &s,
+            CreateIn {
+                provider: Some(" codex ".into()),
+                model: Some(" gpt-5.6-sol ".into()),
+                ..spec("x")
+            },
+        )
+        .unwrap();
+        let t = s.db.get_task(&out.key).unwrap().unwrap();
+        assert_eq!(t.provider_hint, "codex");
+        assert_eq!(t.model_override, "gpt-5.6-sol");
+        assert_eq!(t.status, "queued");
+    }
+
+    #[test]
+    fn create_rejects_invalid_overrides_and_stores_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = override_shared(dir.path());
+        let with = |p: Option<&str>, m: Option<&str>, n: &[&str]| CreateIn {
+            provider: p.map(str::to_string),
+            model: m.map(str::to_string),
+            needs: n.iter().map(|x| x.to_string()).collect(),
+            ..spec("x")
+        };
+        assert!(bad_request(create(&s, with(Some("nope"), None, &[])))
+            .contains("unknown provider nope; configured: codex"));
+        assert!(
+            bad_request(create(&s, with(Some("codex"), Some("--x1"), &[]))).contains("not valid")
+        );
+        assert_eq!(
+            bad_request(create(&s, with(None, Some("gpt-5.6-sol"), &[]))),
+            "model requires a provider"
+        );
+        assert!(
+            bad_request(create(&s, with(Some("codex"), None, &["browser"])))
+                .contains("lacks capability browser")
+        );
+        assert!(s.db.list_tasks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mcp_bare_unknown_provider_stays_a_hint_only_when_bare() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = override_shared(dir.path());
+        let mcp = |p: &str, m: Option<&str>, n: &[&str]| CreateIn {
+            provider: Some(p.into()),
+            model: m.map(str::to_string),
+            needs: n.iter().map(|x| x.to_string()).collect(),
+            source: "mcp".into(),
+            source_kind: "mcp".into(),
+            ..spec("x")
+        };
+        let out = create(&s, mcp("driver-name", None, &[])).unwrap();
+        assert_eq!(
+            s.db.get_task(&out.key).unwrap().unwrap().provider_hint,
+            "driver-name"
+        );
+        assert!(
+            bad_request(create(&s, mcp("nope", Some("gpt-5.6-sol"), &[])))
+                .contains("unknown provider")
+        );
+        assert!(
+            bad_request(create(&s, mcp("nope", None, &["browser"]))).contains("unknown provider")
+        );
+    }
+
+    #[test]
+    fn idempotency_hash_covers_model_and_ignores_it_when_unset() {
+        let with = |m: Option<&str>| CreateIn {
+            provider: Some("codex".into()),
+            model: m.map(str::to_string),
+            ..spec("x")
+        };
+        let base = request_hash(&with(None), "t");
+        assert_eq!(base, request_hash(&with(Some("  ")), "t"));
+        assert_ne!(base, request_hash(&with(Some("gpt-5.6-sol")), "t"));
     }
 }

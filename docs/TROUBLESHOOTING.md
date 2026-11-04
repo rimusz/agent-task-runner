@@ -244,6 +244,10 @@ points elsewhere): the change is in the state database and applies when it
 starts. A 401/503 is a token problem, not a fallback. Check the result with
 `atr status` (`intake paused`/`on`).
 
+## Tasks that set a model
+
+- **Task failed with `model override X pins provider P: …`:** setting a model pins the task strictly to the named provider, so atr fails it rather than running elsewhere. Fix what the reason names (enable the provider, install its CLI, add the capability), then `atr retry KEY`. To allow other providers, re-add the task with `--provider` alone. A queued task with a model is waiting for that provider (busy, cooling, degraded or over quota).
+
 ## Compare tasks
 
 - **`atr add --compare` refuses with "needs verify commands":** compare picks the arm that passed verify, so the repo needs verify commands (`[verify] enabled = true` plus `commands`, or a `[[verify.repo]]` entry).

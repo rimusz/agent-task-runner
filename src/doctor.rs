@@ -290,6 +290,8 @@ pub async fn run_with_probe(
     github_auth_checks(&mut checks, cfg, config_path);
     github_token_api_check(&mut checks, cfg, config_path).await;
     repo_path_check(&mut checks, cfg);
+    intake_labels_check(&mut checks, cfg);
+    shadow_overlap_check(&mut checks, cfg);
     listen_check(&mut checks, cfg);
     reported_usage_check(&mut checks, cfg);
     skip_at_check(&mut checks, cfg);
@@ -987,6 +989,46 @@ fn push_env_mode(checks: &mut Vec<Check>, snap: &crate::github_auth::Snapshot) {
             format!("0o{mode:o} (expected 0600)"),
             Some("chmod 600 ~/.config/atr/shadow.env".into()),
         );
+    }
+}
+
+/// The label set each watched repo takes issues from (any of them).
+fn intake_labels_check(checks: &mut Vec<Check>, cfg: &Config) {
+    if !cfg.intake_allows(crate::task::SourceKind::Github) {
+        return;
+    }
+    for r in cfg.enabled_watch_repos() {
+        if !r.github.is_empty() && !r.label.is_empty() {
+            let detail = format!("{}: {}", r.github, r.labels().join(", "));
+            push(
+                checks,
+                &format!("labels {}", r.name),
+                Status::Ok,
+                detail,
+                None,
+            );
+        }
+    }
+}
+
+/// A `[[repo]]` that `[shadow]` also polls is skipped by the label poller.
+fn shadow_overlap_check(checks: &mut Vec<Check>, cfg: &Config) {
+    if !cfg.intake_allows(crate::task::SourceKind::Github) {
+        return;
+    }
+    for r in cfg.enabled_watch_repos() {
+        if crate::shadow::owns_repo(cfg, &r) {
+            push(
+                checks,
+                &format!("shadow overlap {}", r.name),
+                Status::Warn,
+                format!(
+                    "{} is owned by [shadow]; the label poller skips it",
+                    r.github
+                ),
+                Some("disable [shadow], or point it at another repo, to poll it normally".into()),
+            );
+        }
     }
 }
 
@@ -1725,5 +1767,47 @@ cli = "/bin/true"
         )
         .unwrap();
         assert!(cfg.provider("claude").unwrap().legacy_expected_version);
+    }
+
+    #[test]
+    fn doctor_lists_each_repo_label_set() {
+        let (dir, _, _) = mini_cfg("");
+        let cfg = crate::config::Config::from_raw(
+            toml::from_str(&format!(
+                "repo_path = \"{}\"\n[github]\nenabled = true\n[[repo]]\nname = \"a\"\npath = \"/tmp/a\"\ngithub = \"o/a\"\nlabel = \"for:atr, for:agnt\"\n[[provider]]\nname = \"claude\"\nkind = \"claude\"\n",
+                dir.path().display()
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut checks = Vec::new();
+        intake_labels_check(&mut checks, &cfg);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "labels a");
+        assert_eq!(checks[0].detail, "o/a: for:atr, for:agnt");
+        assert_eq!(checks[0].status, Status::Ok);
+    }
+
+    fn overlap_checks(shadow_enabled: bool, shadow_repo: &str) -> Vec<Check> {
+        let cfg = crate::config::Config::from_raw(
+            toml::from_str(&format!(
+                "repo_path = \"/tmp/r\"\n[github]\nenabled = true\n[shadow]\nenabled = {shadow_enabled}\nrepo = \"{shadow_repo}\"\n[[repo]]\nname = \"a\"\npath = \"/tmp/a\"\ngithub = \"o/a\"\n[[repo]]\nname = \"b\"\npath = \"/tmp/b\"\ngithub = \"o/b\"\n[[provider]]\nname = \"claude\"\nkind = \"claude\"\n",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut checks = Vec::new();
+        shadow_overlap_check(&mut checks, &cfg);
+        checks
+    }
+
+    #[test]
+    fn doctor_warns_once_about_a_repo_shadow_owns() {
+        let checks = overlap_checks(true, "O/A");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "shadow overlap a");
+        assert_eq!(checks[0].status, Status::Warn);
+        assert!(overlap_checks(false, "o/a").is_empty());
+        assert!(overlap_checks(true, "o/other").is_empty());
     }
 }

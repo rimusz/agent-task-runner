@@ -531,4 +531,15 @@ kind = "claude"
         assert!(text.contains("shorthand"), "{text}");
         assert!(text.contains("owner/acme"), "{text}");
     }
+
+    #[test]
+    fn list_shows_the_label_set() {
+        let text = "repo_path = \"/tmp/r\"\n[[repo]]\nname = \"a\"\npath = \"/tmp/a\"\ngithub = \"o/a\"\nlabel = \"for:atr, for:agnt\"\n[[provider]]\nname = \"claude\"\nkind = \"claude\"\n";
+        let cfg = Config::from_raw(toml::from_str(text).unwrap()).unwrap();
+        assert!(
+            list_text(&cfg).contains("for:atr,for:agnt"),
+            "{}",
+            list_text(&cfg)
+        );
+    }
 }

@@ -232,6 +232,11 @@ On a shadow run atr:
 Regular (non-shadow) agents **keep** `GH_TOKEN` so they can comment and open
 PRs. atr itself never logs the value.
 
+While `[shadow]` is enabled, the label poller skips any `[[repo]]` whose `github`
+equals the shadow repo (case-insensitive), so one issue never becomes two tasks.
+This also stops comment follow-ups on that repo's existing tasks. `atr doctor`
+warns about the overlap (`shadow overlap <repo>`).
+
 ## What `atr doctor` checks
 
 | Check | Command / source | Ok when |
@@ -245,6 +250,24 @@ PRs. atr itself never logs the value.
 
 Doctor prints `GH_TOKEN set` / `in shadow.env` / `unset` — never the value,
 never `--show-token`. Tokens are never printed.
+
+## Issue labels that shape a task
+
+The intake label (default `for:atr`) can be a comma-separated list in `[[repo]]
+label` or `[github] label`, such as `for:atr,for:agnt`: an issue with **any** of
+them is picked up, and one with several is still one task. A `[[repo]]` with no
+`label` inherits `[github] label`. `atr repos list` and `atr doctor` show the set.
+
+Next to the intake label, atr reads these when it creates the task:
+
+| Label | Effect |
+|-------|--------|
+| `needs:browser`, `needs:desktop` | Required capabilities ([NEEDS.md](NEEDS.md)) |
+| `provider:<name>` | Preferred `[[provider]]`, like `atr add --provider` |
+| `model:<id>` | Model for that provider. Needs a `provider:` label. Pins the task strictly to that provider (no fallback) |
+
+An invalid `provider:` or `model:` label never fails the poll: atr drops it and
+logs a warning, and `needs:*` labels still apply. Rules: [USAGE.md](USAGE.md#per-task-provider-and-model).
 
 ## Troubleshooting
 

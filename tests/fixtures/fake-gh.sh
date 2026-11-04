@@ -40,6 +40,25 @@ if [[ "$write" -eq 1 ]]; then
 fi
 
 if [[ "$cmd" == "issue" && "$sub" == "list" ]]; then
+  # Optional per-label answers: gh-issues-by-label/<label>.json, or <label>.fail.
+  if [[ -d "$DIR/gh-issues-by-label" ]]; then
+    label=""
+    prev=""
+    for a in "$@"; do
+      if [[ "$prev" == "--label" ]]; then label="$a"; fi
+      prev="$a"
+    done
+    if [[ -f "$DIR/gh-issues-by-label/$label.fail" ]]; then
+      echo "fake-gh: issue list failed for $label" >&2
+      exit 1
+    fi
+    if [[ -f "$DIR/gh-issues-by-label/$label.json" ]]; then
+      cat "$DIR/gh-issues-by-label/$label.json"
+    else
+      echo '[]'
+    fi
+    exit 0
+  fi
   if [[ -f "$DIR/gh-issues.json" ]]; then
     cat "$DIR/gh-issues.json"
   else

@@ -167,6 +167,9 @@ struct TaskIn {
     tests_ok: bool,
     #[serde(default)]
     provider: Option<String>,
+    /// Model for `provider` (needs `provider`).
+    #[serde(default)]
+    model: Option<String>,
     /// Required capabilities: `"browser"`, `"desktop"`, or a list.
     #[serde(default, deserialize_with = "crate::task::de_needs")]
     needs: Vec<String>,
@@ -238,6 +241,7 @@ async fn create_task(
             patch: payload.patch,
             triage: payload.triage,
             provider: payload.provider,
+            model: payload.model,
             needs: payload.needs,
             after: payload.after,
             source: source.clone().unwrap_or_else(|| "http".into()),
@@ -1379,5 +1383,44 @@ token_file = "{token}"
         let b = crate::mcp::generate_token();
         assert_ne!(a, b);
         assert!(a.len() >= 32, "token too short");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn post_tasks_takes_a_model_and_rejects_invalid_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shared(dir.path(), "");
+        let base = listen(s.clone()).await;
+        let url = format!("{base}/tasks");
+        post_json(
+            &url,
+            r#"{"key":"ov-http","body":"x","workspace":"none","provider":"claude","model":"claude-opus-5-5"}"#,
+        )
+        .unwrap();
+        let t = s.db.get_task("ov-http").unwrap().unwrap();
+        assert_eq!(t.provider_hint, "claude");
+        assert_eq!(t.model_override, "claude-opus-5-5");
+
+        let cases = [
+            (
+                r#""provider":"nope""#,
+                "unknown provider nope; configured: claude",
+            ),
+            (r#""model":"claude-opus-5-5""#, "model requires a provider"),
+            (
+                r#""provider":"claude","model":"opus""#,
+                "not valid for provider claude",
+            ),
+            (
+                r#""provider":"claude","needs":"browser""#,
+                "lacks capability browser",
+            ),
+        ];
+        for (fields, want) in cases {
+            let body = format!(r#"{{"key":"ov-bad","body":"x","workspace":"none",{fields}}}"#);
+            let (code, text) = status_body(post_json(&url, &body).unwrap_err());
+            assert_eq!(code, 400, "{fields}: {text}");
+            assert!(text.contains(want), "{fields}: {text}");
+        }
+        assert!(s.db.get_task("ov-bad").unwrap().is_none());
     }
 }

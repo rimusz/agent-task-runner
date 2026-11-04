@@ -146,6 +146,26 @@ impl Shared {
         tests_ok: bool,
         opts: SubmitOpts,
     ) -> Result<SubmitOutcome> {
+        self.submit_with_model(key, body, source, repo, issue, shadow, tests_ok, opts, None)
+    }
+
+    /// [`Self::submit_with`] plus a per-task model for `opts.provider_hint`,
+    /// stored before queueing like the hint. Callers validate it first
+    /// ([`crate::task::validate_overrides`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_with_model(
+        &self,
+        key: &str,
+        body: &str,
+        source: &str,
+        repo: Option<&str>,
+        issue: Option<i64>,
+        shadow: bool,
+        tests_ok: bool,
+        opts: SubmitOpts,
+        model: Option<&str>,
+    ) -> Result<SubmitOutcome> {
+        let model = model.map(str::trim).filter(|s| !s.is_empty());
         let cfg = self.config.read().unwrap().clone();
         let existing = self.db.get_task(key)?;
         let source_kind = opts
@@ -202,7 +222,9 @@ impl Shared {
             opts.output_spec.as_deref(),
             Some(source_kind.as_str()),
         )?;
-        if existing.is_none() && crate::plan::should_plan(&cfg, body) {
+        // A named model is one run on one provider: the planning turn would pin
+        // the task to the driver and its subtasks would lose the override.
+        if existing.is_none() && model.is_none() && crate::plan::should_plan(&cfg, body) {
             let _ = self.db.set_task_role(key, "plan");
         }
         if let Some(title) = opts.title.as_deref().filter(|s| !s.is_empty()) {
@@ -221,6 +243,9 @@ impl Shared {
             .filter(|s| !s.is_empty())
         {
             self.db.set_provider_hint(key, h)?;
+        }
+        if let Some(m) = model {
+            self.db.set_model_override(key, m)?;
         }
         if !opts.needs.is_empty() {
             let needs = crate::task::parse_needs(&opts.needs)?;
@@ -607,7 +632,7 @@ impl Shared {
             "telegram_assistant": crate::dashboard::telegram_assistant(&cfg, &self.db),
             "tasks": tasks.iter().filter(|t| {
                 repo.map(|f| cfg.task_matches_repo(t, f)).unwrap_or(true)
-            }).map(|t| json!({
+            }).map(|t| crate::output::with_task_model(json!({
                 "key": t.key,
                 "status": t.status,
                 "provider": t.provider,
@@ -627,7 +652,7 @@ impl Shared {
                 "retry_next_at": t.retry_next_at,
                 "retry_reason": t.retry_reason,
                 "hold_reason": t.hold_reason,
-            })).collect::<Vec<_>>(),
+            }), t)).collect::<Vec<_>>(),
             "host": host,
             "retry": {
                 "enabled": cfg.retry.enabled,
@@ -1005,6 +1030,9 @@ pub fn task_verbose_text(shared: &Shared, key: &str) -> Result<String> {
         tz.format_str(&t.updated),
         tz.label
     ));
+    if !t.model_override.is_empty() {
+        buf.push_str(&format!("model\t{}\n", t.model_override));
+    }
     if let Some(h) = t.handoff.as_deref().filter(|s| !s.is_empty()) {
         buf.push_str("\n--- pending handoff ---\n");
         buf.push_str(h);
@@ -1032,6 +1060,17 @@ pub fn task_verbose_text(shared: &Shared, key: &str) -> Result<String> {
             tz.format_str(&r.started),
             tz.format_opt(r.ended.as_deref())
         ));
+        if !t.model_override.is_empty() {
+            let model = r.model.as_deref().filter(|m| !m.is_empty()).unwrap_or("-");
+            buf.push_str(&format!("run_model\t{}\t{model}\n", r.id));
+            for e in shared.db.events_for_run(r.id).unwrap_or_default() {
+                if e.kind == crate::scheduler::MODEL_PIN_EVENT {
+                    let detail: Value = serde_json::from_str(&e.raw).unwrap_or_default();
+                    let reason = detail["reason"].as_str().unwrap_or_default();
+                    buf.push_str(&format!("run_failure\t{}\t{reason}\n", r.id));
+                }
+            }
+        }
         if let Some(h) = r.handoff.as_deref().filter(|s| !s.is_empty()) {
             buf.push_str(&format!("--- handoff (run {}) ---\n", r.id));
             buf.push_str(h);
@@ -1793,6 +1832,68 @@ cli = "/bin/true"
         assert_eq!(t.status, "queued");
         assert!(t.deps.is_empty());
         assert!(t.hold_reason.is_empty());
+        std::mem::forget(dir);
+    }
+
+    #[test]
+    fn naming_another_provider_drops_the_model_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = test_shared(&dir);
+        let submit = |provider: &str, model: Option<&str>| {
+            shared
+                .submit_with_model(
+                    "ov-1",
+                    "x",
+                    "cli",
+                    None,
+                    None,
+                    false,
+                    false,
+                    SubmitOpts {
+                        provider_hint: Some(provider.into()),
+                        ..SubmitOpts::default()
+                    },
+                    model,
+                )
+                .unwrap();
+            shared.db.get_task("ov-1").unwrap().unwrap().model_override
+        };
+        assert_eq!(submit("codex", Some("gpt-5.6-sol")), "gpt-5.6-sol");
+        assert_eq!(
+            submit("codex", None),
+            "gpt-5.6-sol",
+            "same provider keeps it"
+        );
+        assert_eq!(submit("grok", None), "", "a codex id must not reach grok");
+        std::mem::forget(dir);
+    }
+
+    #[test]
+    fn model_override_skips_the_planner() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = test_shared(&dir);
+        shared.config.write().unwrap().planner.mode = crate::config::PlannerMode::Always;
+        let submit = |key: &str, model: Option<&str>| {
+            shared
+                .submit_with_model(
+                    key,
+                    "x",
+                    "cli",
+                    None,
+                    None,
+                    false,
+                    false,
+                    SubmitOpts {
+                        provider_hint: Some("claude".into()),
+                        ..SubmitOpts::default()
+                    },
+                    model,
+                )
+                .unwrap();
+            shared.db.get_task(key).unwrap().unwrap().role
+        };
+        assert_eq!(submit("ov-plan", None), "plan");
+        assert_eq!(submit("ov-noplan", Some("claude-opus-5-5")), "worker");
         std::mem::forget(dir);
     }
 }

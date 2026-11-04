@@ -21,21 +21,32 @@ pub fn result_payload(shared: &Shared, task: &Task) -> Value {
     } else {
         task.result_diff.clone()
     };
-    json!({
-        "key": task.key,
-        "status": task.status,
-        "title": task.title,
-        "text": text,
-        "diff": diff,
-        "pr_url": task.result_pr_url,
-        "workspace": task.workspace_kind,
-        "output": task.output_kind,
-        "source": task.source_kind,
-        "repo": task.repo,
-        "issue": task.issue,
-        "worktree": task.worktree,
-        "provider": task.provider,
-    })
+    with_task_model(
+        json!({
+            "key": task.key,
+            "status": task.status,
+            "title": task.title,
+            "text": text,
+            "diff": diff,
+            "pr_url": task.result_pr_url,
+            "workspace": task.workspace_kind,
+            "output": task.output_kind,
+            "source": task.source_kind,
+            "repo": task.repo,
+            "issue": task.issue,
+            "worktree": task.worktree,
+            "provider": task.provider,
+        }),
+        task,
+    )
+}
+
+/// Task JSON views show `model` only when the task has an override.
+pub fn with_task_model(mut view: Value, task: &Task) -> Value {
+    if !task.model_override.is_empty() {
+        view["model"] = json!(task.model_override);
+    }
+    view
 }
 
 pub fn last_text(shared: &Shared, key: &str) -> String {
@@ -74,7 +85,7 @@ pub fn capture(shared: &Shared, key: &str) -> Result<Value> {
 
 /// Like [`capture`], with the result text given instead of read from the
 /// task's own last run (a compare parent has no runs of its own).
-fn capture_with(shared: &Shared, key: &str, text: Option<&str>) -> Result<Value> {
+pub(crate) fn capture_with(shared: &Shared, key: &str, text: Option<&str>) -> Result<Value> {
     let Some(task) = shared.db.get_task(key)? else {
         anyhow::bail!("unknown task {key}");
     };

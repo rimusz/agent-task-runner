@@ -58,13 +58,20 @@ pub fn shadow_repo(cfg: &Config) -> String {
     }
 }
 
+/// `[shadow]` polls this `[[repo]]`, so the label poller must not: one issue
+/// would become both `<repo>-N` and `<prefix>-shadow-N`.
+pub fn owns_repo(cfg: &Config, repo: &crate::config::RepoEntry) -> bool {
+    cfg.shadow.enabled
+        && !repo.shorthand
+        && !repo.github.trim().is_empty()
+        && shadow_repo(cfg)
+            .trim()
+            .eq_ignore_ascii_case(repo.github.trim())
+}
+
 pub fn shadow_labels(cfg: &Config) -> Vec<String> {
     if cfg.shadow.labels.is_empty() {
-        if cfg.github.label.is_empty() {
-            Vec::new()
-        } else {
-            vec![cfg.github.label.clone()]
-        }
+        crate::config::parse_labels(&cfg.github.label)
     } else {
         cfg.shadow.labels.clone()
     }
@@ -1062,5 +1069,21 @@ mod tests {
         assert_eq!(cell("abcdefghijklmnopqrstuvwxyz", 8), "abcdefg…");
         assert_eq!(cell("short", 8), "short   ");
         assert_eq!(short_diffstat("   \n"), "-");
+    }
+
+    #[test]
+    fn shadow_labels_split_the_github_label_list() {
+        let mut cfg = crate::config::Config::from_raw(
+            toml::from_str(
+                "repo_path = \"/tmp/r\"\n[github]\nlabel = \"for:atr, for:agnt\"\n[[provider]]\nname = \"claude\"\nkind = \"claude\"\n",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(shadow_labels(&cfg), vec!["for:atr", "for:agnt"]);
+        cfg.github.label = String::new();
+        assert!(shadow_labels(&cfg).is_empty());
+        cfg.shadow.labels = vec!["x".into()];
+        assert_eq!(shadow_labels(&cfg), vec!["x"]);
     }
 }
