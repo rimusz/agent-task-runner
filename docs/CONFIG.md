@@ -240,11 +240,12 @@ allowed_chat_ids = [123456789]
 # Empty = every task event (today). Unknown names fail at load.
 # Live Mini: only problems.
 events = ["failed", "needs_attention", "stalled"]
-# Plain-dir ops workspace for `/add mini` (created if missing). Not a git
+# Plain-dir ops workspace for `/add host` (created if missing). Not a git
 # worktree; separate from repo worktrees and the assistant throwaway repo.
-mini_dir = "~/atr-ops"
+# `mini_dir` is still accepted as a deprecated alias; host_dir wins if both set.
+host_dir = "~/atr-ops"
 
-# Best-effort deny rules for Telegram-originated runs and the mini dir.
+# Best-effort deny rules for Telegram-originated runs and the host dir.
 # Empty `rules` uses the built-in defaults (rm -rf, launchctl bootout/unload,
 # git push --force/-f, git push --delete, git branch -D of main/develop/
 # rimas-develop, sudo). `wrapper` (off) PATH-prepends git/rm/launchctl/sudo
@@ -269,12 +270,16 @@ today's `allowed_chat_ids` keep working.
 
 There is no `/sh` (or any other Telegram path that execs a shell).
 
-`/add [repo|mini] [--provider P] [--model M] [--agent A] <prompt>` queues a
-task after **Confirm**. Omit the workspace for answer-only. `mini` uses
-`telegram.mini_dir` (default `~/atr-ops`): a plain directory, created if
-missing, stored as workspace kind `dir`. `<repo>` must be an enabled
+`/add [repo|host] [--provider P] [--model M] [--agent A] <prompt>` queues a
+task after **Confirm**. Omit the workspace for answer-only. `host` uses
+`telegram.host_dir` (default `~/atr-ops`): a plain directory, created if
+missing, stored as workspace kind `dir`. Host tasks get a `host-` key
+prefix. `mini` is not reserved: a repo named `mini` is selectable, and
+`/add mini …` with no such repo is prompt text. `<repo>` must be an enabled
 `[[repo]]` name (same git worktree and verify path as `atr add --repo` /
 a GitHub-issue task; branch-only, no PR). A disabled repo is rejected.
+iOS Smart Punctuation em/en dashes at the start of a flag token
+(`—provider`, `–provider`, `—-provider`) are read as `--`.
 `--provider` must be a configured `[[provider]]` name (typically grok,
 claude, codex, cursor, spark). `--model` needs `--provider` and uses the
 v0.1.41 strict-pin path (`submit_with_model`, `provider_hint` plus
@@ -299,7 +304,7 @@ argument shows it. The config default stays empty (= first available /
 first).
 
 `[telegram.deny]` is applied when atr builds the CLI command for a
-Telegram-originated run (and for the mini workspace at minimum):
+Telegram-originated run (and for the host workspace at minimum):
 
 | kind | mapping |
 |---|---|

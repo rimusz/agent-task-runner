@@ -1,4 +1,4 @@
-//! Best-effort deny rules for Telegram-originated (and mini) CLI runs.
+//! Best-effort deny rules for Telegram-originated (and host) CLI runs.
 //!
 //! These map onto each vendor's own flags where they exist. They are not a
 //! hard guarantee — GitHub branch protection is the backstop for force-push
@@ -34,21 +34,21 @@ pub fn effective_rules(deny: &TelegramDeny) -> Vec<String> {
     }
 }
 
-/// Telegram-originated runs, and anything whose workspace is the mini dir.
+/// Telegram-originated runs, and anything whose workspace is the host dir.
 pub fn applies(cfg: &Config, task: &Task) -> bool {
     if task.source_kind == "telegram" {
         return true;
     }
-    is_mini_workspace(cfg, task)
+    is_host_workspace(cfg, task)
 }
 
-pub fn is_mini_workspace(cfg: &Config, task: &Task) -> bool {
+pub fn is_host_workspace(cfg: &Config, task: &Task) -> bool {
     let Some(repo) = task.repo.as_deref().filter(|s| !s.is_empty()) else {
         return false;
     };
-    let mini = crate::config::expand_path(&cfg.telegram.mini_dir);
+    let host = crate::config::expand_path(&cfg.telegram.host_dir);
     let repo_path = crate::config::expand_path(repo);
-    paths_equal(&mini, &repo_path)
+    paths_equal(&host, &repo_path)
 }
 
 fn paths_equal(a: &Path, b: &Path) -> bool {
@@ -199,17 +199,17 @@ for a in "$@"; do
   prev=$a
 done
 if [ "$force" = 1 ]; then
-  echo "atr deny: git push --force is blocked (Telegram/mini). GitHub branch protection is the hard backstop." >&2
+  echo "atr deny: git push --force is blocked (Telegram/host). GitHub branch protection is the hard backstop." >&2
   exit 1
 fi
 if [ "$delete" = 1 ]; then
-  echo "atr deny: git push --delete is blocked (Telegram/mini)." >&2
+  echo "atr deny: git push --delete is blocked (Telegram/host)." >&2
   exit 1
 fi
 if [ "$branch_d" = 1 ]; then
   case "$branch" in
     main|develop|rimas-develop)
-      echo "atr deny: git branch -D $branch is blocked (Telegram/mini)." >&2
+      echo "atr deny: git branch -D $branch is blocked (Telegram/host)." >&2
       exit 1
       ;;
   esac
@@ -251,7 +251,7 @@ for a in "$@"; do
   esac
 done
 if [ "$recur" = 1 ]; then
-  echo "atr deny: rm -rf is blocked (Telegram/mini)." >&2
+  echo "atr deny: rm -rf is blocked (Telegram/host)." >&2
   exit 1
 fi
 real=$(find_real rm) || { echo "atr deny: rm not found on PATH" >&2; exit 127; }
@@ -284,7 +284,7 @@ find_real() {
 for a in "$@"; do
   case "$a" in
     bootout|unload)
-      echo "atr deny: launchctl $a is blocked (Telegram/mini)." >&2
+      echo "atr deny: launchctl $a is blocked (Telegram/host)." >&2
       exit 1
       ;;
   esac
@@ -296,7 +296,7 @@ exec "$real" "$@"
 
 const SUDO_SHIM: &str = concat!(
     "#!/bin/sh\n",
-    "echo \"atr deny: sudo is blocked (Telegram/mini).\" >&2\n",
+    "echo \"atr deny: sudo is blocked (Telegram/host).\" >&2\n",
     "exit 1\n",
 );
 
@@ -381,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn applies_to_telegram_and_mini() {
+    fn applies_to_telegram_and_host() {
         let cfg = crate::config::Config::from_raw(
             toml::from_str(
                 r#"
@@ -391,7 +391,7 @@ worktree_root = "/tmp"
 repo_path = "/tmp"
 system_prompt_file = "/tmp/p.md"
 [telegram]
-mini_dir = "/tmp/atr-ops-test"
+host_dir = "/tmp/atr-ops-test"
 [[provider]]
 name = "claude"
 kind = "claude"
@@ -412,13 +412,33 @@ cli = "/bin/true"
             ..Task::default()
         };
         assert!(!applies(&cfg, &other));
-        let mini = Task {
+        let host = Task {
             source_kind: "cli".into(),
             repo: Some("/tmp/atr-ops-test".into()),
             workspace_kind: "dir".into(),
             ..Task::default()
         };
-        assert!(applies(&cfg, &mini));
+        assert!(applies(&cfg, &host));
+        let alias = crate::config::Config::from_raw(
+            toml::from_str(
+                r#"
+listen = "127.0.0.1:0"
+state_db = "/tmp/x.db"
+worktree_root = "/tmp"
+repo_path = "/tmp"
+system_prompt_file = "/tmp/p.md"
+[telegram]
+mini_dir = "/tmp/atr-ops-test"
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "/bin/true"
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(applies(&alias, &host));
     }
 
     #[test]

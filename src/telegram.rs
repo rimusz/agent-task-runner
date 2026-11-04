@@ -3,6 +3,7 @@ use crate::config::{Config, TelegramConfig};
 use crate::providers::hit_ratio_from_sums;
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -21,7 +22,7 @@ Watch
 • ui — dashboard link
 
 Work
-• add [repo|mini] [flags] <prompt> — queue (Confirm)
+• add [repo|host] [flags] <prompt> — queue (Confirm)
 • cancel / retry <id>
 
 Control
@@ -1013,7 +1014,7 @@ pub const BOT_COMMANDS: &[(&str, &str)] = &[
     ("usage", "Spend and cache"),
     (
         "add",
-        "Queue a task: /add [repo|mini] [--provider] [--model] [--agent] <prompt>",
+        "Queue a task: /add [repo|host] [--provider] [--model] [--agent] <prompt>",
     ),
     ("assistant", "Chat assistant provider: /assistant [name]"),
     ("ui", "Dashboard link"),
@@ -1296,9 +1297,9 @@ fn handle_command(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
 }
 
 fn add_usage() -> String {
-    "usage: /add [repo|mini] [--provider P] [--model M] [--agent A] <prompt>\n\
+    "usage: /add [repo|host] [--provider P] [--model M] [--agent A] <prompt>\n\
      repo = enabled [[repo]] name (git worktree)\n\
-     mini = ops dir (telegram.mini_dir, default ~/atr-ops)\n\
+     host = ops dir (telegram.host_dir, default ~/atr-ops)\n\
      omit workspace = answer-only"
         .into()
 }
@@ -1306,8 +1307,21 @@ fn add_usage() -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AddWorkspace {
     None,
-    Mini,
+    Host,
     Repo(String),
+}
+
+/// iOS Smart Punctuation turns `--` into an em dash (U+2014) or en dash
+/// (U+2013). Also accept `—-` / `–-`. Prompt tokens after flags are left alone.
+fn normalize_leading_flag_dashes(tok: &str) -> Cow<'_, str> {
+    const EM: char = '\u{2014}';
+    const EN: char = '\u{2013}';
+    let rest = tok.strip_prefix(EM).or_else(|| tok.strip_prefix(EN));
+    let Some(rest) = rest else {
+        return Cow::Borrowed(tok);
+    };
+    let rest = rest.strip_prefix('-').unwrap_or(rest);
+    Cow::Owned(format!("--{rest}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1335,12 +1349,16 @@ fn parse_add_command(cfg: &Config, raw: &str) -> std::result::Result<AddSpec, St
     let mut i = 0;
     let mut saw_workspace = false;
     while i < tokens.len() {
-        let tok = tokens[i];
+        let raw_tok = tokens[i];
+        let tok = normalize_leading_flag_dashes(raw_tok);
         if let Some(flag) = tok.strip_prefix("--") {
-            if flag.is_empty() || tok == "--" {
-                return Err(format!("unknown flag {tok}"));
+            if flag.is_empty() || tok.as_ref() == "--" {
+                return Err(format!("unknown flag {raw_tok}"));
             }
-            let value = tokens.get(i + 1).copied().filter(|v| !v.starts_with("--"));
+            let value = tokens
+                .get(i + 1)
+                .copied()
+                .filter(|v| !normalize_leading_flag_dashes(v).starts_with("--"));
             match flag {
                 "provider" => {
                     let Some(v) = value else {
@@ -1368,17 +1386,17 @@ fn parse_add_command(cfg: &Config, raw: &str) -> std::result::Result<AddSpec, St
             continue;
         }
         if tok.starts_with('-') {
-            return Err(format!("unknown flag {tok}"));
+            return Err(format!("unknown flag {raw_tok}"));
         }
         if !saw_workspace {
-            if tok == "mini" {
-                workspace = AddWorkspace::Mini;
+            if raw_tok == "host" {
+                workspace = AddWorkspace::Host;
                 saw_workspace = true;
                 i += 1;
                 continue;
             }
-            if cfg.repo_by_name(tok).is_some() {
-                workspace = AddWorkspace::Repo(tok.to_string());
+            if cfg.repo_by_name(raw_tok).is_some() {
+                workspace = AddWorkspace::Repo(raw_tok.to_string());
                 saw_workspace = true;
                 i += 1;
                 continue;
@@ -1435,8 +1453,8 @@ fn parse_add_command(cfg: &Config, raw: &str) -> std::result::Result<AddSpec, St
 fn add_summary(cfg: &Config, spec: &AddSpec) -> String {
     let workspace = match &spec.workspace {
         AddWorkspace::None => "answer-only".to_string(),
-        AddWorkspace::Mini => {
-            format!("mini ({})", cfg.telegram.mini_dir)
+        AddWorkspace::Host => {
+            format!("host ({})", cfg.telegram.host_dir)
         }
         AddWorkspace::Repo(name) => format!("repo {name}"),
     };
@@ -1501,7 +1519,11 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
         .chars()
         .take(80)
         .collect();
-    let key = match crate::task::allocate_key(&shared.db, &cfg.task_key_prefix, &title) {
+    let prefix = match &spec.workspace {
+        AddWorkspace::Host => "host",
+        _ => cfg.task_key_prefix.as_str(),
+    };
+    let key = match crate::task::allocate_key(&shared.db, prefix, &title) {
         Ok(k) => k,
         Err(e) => {
             return Outgoing {
@@ -1521,8 +1543,8 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
                 format!("repo {name}"),
             )
         }
-        AddWorkspace::Mini => match ensure_mini_dir(&cfg) {
-            Ok(p) => ("dir", Some(p.display().to_string()), false, "mini".into()),
+        AddWorkspace::Host => match ensure_host_dir(&cfg) {
+            Ok(p) => ("dir", Some(p.display().to_string()), false, "host".into()),
             Err(e) => {
                 return Outgoing {
                     chat_id: chat,
@@ -1627,8 +1649,8 @@ pub fn apply_assistant_timeout(
     p
 }
 
-pub fn ensure_mini_dir(cfg: &Config) -> Result<PathBuf> {
-    let path = crate::config::expand_path(&cfg.telegram.mini_dir);
+pub fn ensure_host_dir(cfg: &Config) -> Result<PathBuf> {
+    let path = crate::config::expand_path(&cfg.telegram.host_dir);
     std::fs::create_dir_all(&path)?;
     Ok(path)
 }
@@ -3977,11 +3999,11 @@ enabled = false
     }
 
     #[test]
-    fn parse_add_flags_mini_and_rejects_bad_values() {
+    fn parse_add_flags_host_and_rejects_bad_values() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared_with(
             r#"
-mini_dir = "{root}/ops"
+host_dir = "{root}/ops"
 [[repo]]
 name = "demo"
 path = "{root}"
@@ -3996,10 +4018,10 @@ cli = "/bin/true"
         let cfg = shared.config.read().unwrap().clone();
         let spec = parse_add_command(
             &cfg,
-            "/add mini --provider claude --model claude-sonnet-5-5 --agent ops fix login",
+            "/add host --provider claude --model claude-sonnet-5-5 --agent ops fix login",
         )
         .unwrap();
-        assert_eq!(spec.workspace, AddWorkspace::Mini);
+        assert_eq!(spec.workspace, AddWorkspace::Host);
         assert_eq!(spec.provider.as_deref(), Some("claude"));
         assert_eq!(spec.model.as_deref(), Some("claude-sonnet-5-5"));
         assert_eq!(spec.agent.as_deref(), Some("ops"));
@@ -4007,6 +4029,9 @@ cli = "/bin/true"
         let repo = parse_add_command(&cfg, "/add demo --provider grok ship it").unwrap();
         assert_eq!(repo.workspace, AddWorkspace::Repo("demo".into()));
         assert_eq!(repo.provider.as_deref(), Some("grok"));
+        let mini_prompt = parse_add_command(&cfg, "/add mini say hello").unwrap();
+        assert_eq!(mini_prompt.workspace, AddWorkspace::None);
+        assert_eq!(mini_prompt.prompt, "mini say hello");
         assert!(parse_add_command(&cfg, "/add --provider nope hi")
             .unwrap_err()
             .contains("unknown provider"));
@@ -4027,19 +4052,70 @@ cli = "/bin/true"
     }
 
     #[test]
-    fn add_mini_and_provider_pin_queue_after_confirm() {
+    fn parse_add_accepts_unicode_dashes_as_flag_prefix() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared_with(
             r#"
-mini_dir = "{root}/ops"
+host_dir = "{root}/ops"
+[[provider]]
+name = "spark"
+kind = "opencode"
+cli = "/bin/true"
 "#,
         );
+        let cfg = shared.config.read().unwrap().clone();
+        for raw in [
+            "/add host --provider spark say ok",
+            "/add host \u{2014}provider spark say ok",
+            "/add host \u{2013}provider spark say ok",
+            "/add host \u{2014}-provider spark say ok",
+            "/add host \u{2013}-provider spark say ok",
+        ] {
+            let spec = parse_add_command(&cfg, raw).unwrap();
+            assert_eq!(spec.workspace, AddWorkspace::Host, "{raw}");
+            assert_eq!(spec.provider.as_deref(), Some("spark"), "{raw}");
+            assert_eq!(spec.prompt, "say ok", "{raw}");
+        }
+        let body = parse_add_command(&cfg, "/add host keep \u{2014}provider in prompt").unwrap();
+        assert_eq!(body.workspace, AddWorkspace::Host);
+        assert!(body.provider.is_none());
+        assert_eq!(body.prompt, "keep \u{2014}provider in prompt");
+    }
+
+    #[test]
+    fn parse_add_mini_selects_repo_when_configured() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared_with(
+            r#"
+[[repo]]
+name = "mini"
+path = "{root}"
+github = "o/mini"
+enabled = true
+"#,
+        );
+        let cfg = shared.config.read().unwrap().clone();
+        let spec = parse_add_command(&cfg, "/add mini ship it").unwrap();
+        assert_eq!(spec.workspace, AddWorkspace::Repo("mini".into()));
+        assert_eq!(spec.prompt, "ship it");
+    }
+
+    #[test]
+    fn add_host_and_provider_pin_queue_after_confirm() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared_with(
+            r#"
+host_dir = "{root}/ops"
+"#,
+        );
+        shared.config.write().unwrap().task_key_prefix = "scratch".into();
         let body = add_and_confirm(
             &shared,
-            "/add mini --provider claude --model claude-sonnet-5-5 --agent ops do the thing",
+            "/add host --provider claude --model claude-sonnet-5-5 --agent ops do the thing",
         );
         assert!(body.contains("queued"), "{body}");
-        assert!(body.contains("mini"), "{body}");
+        assert!(body.contains("host"), "{body}");
+        assert!(!body.contains("mini"), "{body}");
         let tasks = shared.db.list_tasks().unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].workspace_kind, "dir");
@@ -4047,14 +4123,64 @@ mini_dir = "{root}/ops"
         assert_eq!(tasks[0].provider_hint, "claude");
         assert_eq!(tasks[0].model_override, "claude-sonnet-5-5");
         assert_eq!(shared.db.task_agent(&tasks[0].key).unwrap(), "ops");
+        assert!(
+            tasks[0].key.starts_with("host-"),
+            "host tasks must not use scratch-: {}",
+            tasks[0].key
+        );
+        assert!(!tasks[0].key.starts_with("scratch-"), "{}", tasks[0].key);
         assert!(shared
             .config
             .read()
             .unwrap()
             .telegram
-            .mini_dir
+            .host_dir
             .contains("ops"));
         assert!(std::path::Path::new(tasks[0].repo.as_deref().unwrap()).is_dir());
+    }
+
+    #[test]
+    fn add_host_unicode_dash_uses_host_prefix() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared_with(
+            r#"
+host_dir = "{root}/ops"
+[[provider]]
+name = "spark"
+kind = "opencode"
+cli = "/bin/true"
+"#,
+        );
+        shared.config.write().unwrap().task_key_prefix = "scratch".into();
+        let confirm = handle_update(
+            &shared,
+            &json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/add host \u{2014}provider spark say ok"}}),
+        )
+        .unwrap();
+        assert!(
+            confirm[0].text.contains("workspace: host"),
+            "{}",
+            confirm[0].text
+        );
+        assert!(
+            confirm[0].text.contains("provider: spark"),
+            "{}",
+            confirm[0].text
+        );
+        assert!(confirm[0].text.contains("say ok"), "{}", confirm[0].text);
+        let body = add_and_confirm(&shared, "/add host \u{2014}provider spark say ok");
+        assert!(body.contains("queued"), "{body}");
+        assert!(body.contains("host"), "{body}");
+        let tasks = shared.db.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].key.starts_with("host-"), "{}", tasks[0].key);
+        assert!(
+            !tasks[0].key.contains("provider-spark"),
+            "flags must not leak into the key: {}",
+            tasks[0].key
+        );
+        assert_eq!(tasks[0].provider_hint, "spark");
+        assert_eq!(tasks[0].workspace_kind, "dir");
     }
 
     #[test]

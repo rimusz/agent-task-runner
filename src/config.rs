@@ -463,8 +463,11 @@ pub struct RawTelegram {
     pub api_base: String,
     #[serde(default)]
     pub assistant: RawTelegramAssistant,
-    /// Plain-dir ops workspace for `/add mini` (created if missing).
-    #[serde(default = "default_mini_dir")]
+    /// Plain-dir ops workspace for `/add host` (created if missing).
+    #[serde(default)]
+    pub host_dir: String,
+    /// Deprecated alias for `host_dir`. Used only when `host_dir` is empty.
+    #[serde(default)]
     pub mini_dir: String,
     #[serde(default)]
     pub deny: RawTelegramDeny,
@@ -536,7 +539,7 @@ pub struct TelegramConfig {
     pub daily_summary: String,
     pub api_base: String,
     pub assistant: TelegramAssistant,
-    pub mini_dir: String,
+    pub host_dir: String,
     pub deny: TelegramDeny,
 }
 
@@ -555,7 +558,7 @@ impl Default for TelegramConfig {
             daily_summary: String::new(),
             api_base: String::new(),
             assistant: TelegramAssistant::default(),
-            mini_dir: default_mini_dir(),
+            host_dir: default_host_dir(),
             deny: TelegramDeny::default(),
         }
     }
@@ -1256,8 +1259,21 @@ impl Default for DashboardConfig {
         }
     }
 }
-fn default_mini_dir() -> String {
+fn default_host_dir() -> String {
     "~/atr-ops".into()
+}
+
+/// `host_dir` wins over the deprecated `mini_dir` alias. Empty → `~/atr-ops`.
+fn resolve_host_dir(host_dir: &str, mini_dir: &str) -> String {
+    let host = host_dir.trim();
+    if !host.is_empty() {
+        return host.to_string();
+    }
+    let alias = mini_dir.trim();
+    if !alias.is_empty() {
+        return alias.to_string();
+    }
+    default_host_dir()
 }
 
 fn default_assistant_timeout() -> String {
@@ -2683,11 +2699,7 @@ impl Config {
                         timeout: parse_duration(&t.assistant.timeout)
                             .unwrap_or(Duration::from_secs(600)),
                     },
-                    mini_dir: if t.mini_dir.trim().is_empty() {
-                        default_mini_dir()
-                    } else {
-                        t.mini_dir
-                    },
+                    host_dir: resolve_host_dir(&t.host_dir, &t.mini_dir),
                     deny: TelegramDeny {
                         rules: t
                             .deny
@@ -3823,7 +3835,7 @@ kind = "claude"
         assert!(!cfg.telegram.assistant.enabled);
         assert!(cfg.telegram.assistant.provider.is_empty());
         assert_eq!(cfg.telegram.assistant.timeout, Duration::from_secs(600));
-        assert_eq!(cfg.telegram.mini_dir, "~/atr-ops");
+        assert_eq!(cfg.telegram.host_dir, "~/atr-ops");
         assert!(!cfg.telegram.deny.wrapper);
         assert!(cfg.telegram.deny.rules.is_empty());
 
@@ -3864,6 +3876,49 @@ kind = "claude"
         .unwrap();
         assert!(!cfg.dashboard.enabled);
         assert_eq!(cfg.dashboard.bind, "100.64.0.10");
+    }
+
+    #[test]
+    fn telegram_host_dir_wins_over_deprecated_mini_dir() {
+        let alias = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[telegram]
+mini_dir = "~/old-ops"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap();
+        assert_eq!(alias.telegram.host_dir, "~/old-ops");
+
+        let both = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[telegram]
+host_dir = "~/atr-ops"
+mini_dir = "~/old-ops"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap();
+        assert_eq!(both.telegram.host_dir, "~/atr-ops");
+
+        let host = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[telegram]
+host_dir = "/tmp/ops"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap();
+        assert_eq!(host.telegram.host_dir, "/tmp/ops");
     }
 
     #[test]
