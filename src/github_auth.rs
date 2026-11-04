@@ -848,23 +848,21 @@ mod tests {
 
     #[test]
     fn presence_reads_shadow_env_without_exposing_value() {
+        // Not GH_TOKEN: the ambient env must not change the answer.
+        const KEY: &str = "ATR_PRESENCE_TEST_UNSET_TOKEN";
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
         std::fs::write(&cfg, "listen = \"127.0.0.1:1\"\n").unwrap();
         let secret = "ghp_TESTSECRETVALUE_must_not_appear_zzzzzzzz";
-        std::fs::write(
-            dir.path().join("shadow.env"),
-            format!("GH_TOKEN={secret}\n"),
-        )
-        .unwrap();
-        let p = presence(&cfg, "GH_TOKEN");
+        std::fs::write(dir.path().join("shadow.env"), format!("{KEY}={secret}\n")).unwrap();
+        let p = presence(&cfg, KEY);
         assert_eq!(p, Presence::ShadowEnv);
-        assert_eq!(p.detail("GH_TOKEN"), "GH_TOKEN in shadow.env");
+        assert_eq!(p.detail(KEY), format!("{KEY} in shadow.env"));
         let snap = Snapshot {
             gh_ok: false,
             gh_detail: "gh auth status failed".into(),
             gh_hint: None,
-            token_key: "GH_TOKEN".into(),
+            token_key: KEY.into(),
             token: p,
             scopes: None,
             scopes_kind: None,

@@ -1740,7 +1740,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 }
             } else if task.role == "plan" {
                 shared.db.set_verify_retries(&key, 0)?;
-                finish_plan(&shared, &cfg, &key, &task, &result)?;
+                finish_plan(&shared, &cfg, &key, &task, &result, run_id)?;
             } else {
                 shared.db.set_verify_retries(&key, 0)?;
                 match maybe_review(&shared, &cfg, &key, &task, &wt, assistant).await? {
@@ -2233,7 +2233,12 @@ fn finish_plan(
     key: &str,
     task: &crate::db::Task,
     result: &runner::RunResult,
+    run_id: i64,
 ) -> Result<()> {
+    // The planner's session is read-only (Grok stays in plan mode and refuses
+    // every edit), so nothing resumes it. The next run gets the original task
+    // and the planner's summary through the handoff block.
+    shared.db.clear_task_sessions(key)?;
     match crate::plan::parse_plan(&result.snippet).or_else(|_| {
         let events = shared.db.events_for_run(
             shared
@@ -2257,6 +2262,8 @@ fn finish_plan(
             if kids.len() <= 1 && kids.first().map(|k| k.as_str()) == Some(key) {
                 shared.db.set_status(key, "queued")?;
             } else if kids.is_empty() {
+                // No subtask prompt: the worker runs the planner's own message.
+                shared.db.unconsume_run(run_id)?;
                 shared.db.set_task_role(key, "worker")?;
                 shared.db.set_status(key, "queued")?;
             } else {
@@ -2271,6 +2278,7 @@ fn finish_plan(
         }
         Err(e) => {
             tracing::warn!(task = %key, "planner parse failed: {e:#}; running as one task");
+            shared.db.unconsume_run(run_id)?;
             shared.db.set_task_role(key, "worker")?;
             shared.db.set_status(key, "queued")?;
             shared.kick.notify_waiters();

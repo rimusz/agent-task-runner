@@ -1406,7 +1406,7 @@ fn default_no_shell_extra_retries() -> u32 {
     1
 }
 fn default_verify_output() -> usize {
-    4000
+    64 * 1024
 }
 fn default_protect_skip_label() -> String {
     "atr:tests-ok".into()
@@ -1577,6 +1577,9 @@ pub struct RawVerify {
     pub protect_tests_skip_label: String,
     #[serde(default)]
     pub test_globs: Vec<String>,
+    /// Env names verify commands keep despite the ATR_* and GitHub token scrub.
+    #[serde(default)]
+    pub pass_env: Vec<String>,
     #[serde(default, rename = "repo")]
     pub repos: Vec<RawVerifyRepo>,
 }
@@ -1594,6 +1597,7 @@ impl Default for RawVerify {
             protect_tests: true,
             protect_tests_skip_label: default_protect_skip_label(),
             test_globs: Vec::new(),
+            pass_env: Vec::new(),
             repos: Vec::new(),
         }
     }
@@ -1623,6 +1627,7 @@ pub struct VerifyConfig {
     pub protect_tests: bool,
     pub protect_tests_skip_label: String,
     pub test_globs: Vec<String>,
+    pub pass_env: Vec<String>,
     pub repos: Vec<VerifyRepo>,
 }
 
@@ -2696,6 +2701,7 @@ impl Config {
                 } else {
                     raw.verify.test_globs
                 },
+                pass_env: raw.verify.pass_env,
                 repos: raw
                     .verify
                     .repos

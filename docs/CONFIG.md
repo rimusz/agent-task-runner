@@ -131,7 +131,14 @@ issue about `slugify` came back with `README.md` rewritten.)
 [verify]
 max_retries = 1              # default: follow-ups after a failed check
 no_shell_extra_retries = 1   # default: extra follow-ups for a no-shell provider
+max_output_bytes = 65536     # default: output kept per check
 ```
+
+When a check prints more than `max_output_bytes`, atr keeps the end, where test
+runners and compilers report the failure, and starts it with
+`…[truncated N bytes]…`. The agent's follow-up gets the same text, so a larger
+value costs more tokens on every failed check. A handoff block keeps 4,000 bytes
+per check so that it stays inside `[handoff] max_bytes`.
 
 A provider with no shell (OpenCode with `allow_shell = false`) can't run the
 tests itself, so atr's verify follow-up is its only test loop. It gets
@@ -139,6 +146,18 @@ tests itself, so atr's verify follow-up is its only test loop. It gets
 provider gets `max_retries`. Set `no_shell_extra_retries = 0` for the same
 budget everywhere. Triage tasks never run verify: they are suggest-only and the
 worktree is not their deliverable.
+
+### Verify environment
+
+Verify commands run the repo's code, so they don't inherit atr's own settings or
+tokens. atr removes every `ATR_*` variable, every `*GH_TOKEN*` / `*GITHUB_TOKEN*`
+variable, and the names set in `shadow.gh_token_env`, `telegram.bot_token_env`
+and `mcp.token_env`. A check that needs one lists it:
+
+```toml
+[verify]
+pass_env = ["GH_TOKEN"]      # default: []
+```
 
 ### Guards: no-shell providers vs. every provider
 
@@ -151,7 +170,8 @@ Only for providers **without a shell** (OpenCode without `allow_shell`):
   only logs a warning, because a person or another tool may be editing that
   checkout at the same time;
 - `atr retry` drops the stored session so the retry starts fresh. A provider
-  with a shell resumes its session, as in v0.1.34.
+  with a shell resumes its session, as in v0.1.34, unless the task is still in
+  its planning run, which always starts fresh.
 
 For **every** provider (Git worktree tasks; never shadow or the Telegram
 assistant):

@@ -329,7 +329,7 @@ impl Alert {
     }
 }
 
-fn is_token_var(name: &str) -> bool {
+pub(crate) fn is_token_var(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
     n.contains("GH_TOKEN") || n.contains("GITHUB_TOKEN")
 }

@@ -218,6 +218,13 @@ Grok plan command (verified on 1.0.52): `--max-turns N --output-format json
 --json-schema … --permission-mode plan`. Other providers use their
 structured/JSON output, or a fenced JSON block.
 
+The planning session ends with the plan. When the task becomes a worker (one
+subtask, an empty plan, or output atr can't parse), the worker starts a fresh
+session, with the original task and the planner's summary in its handoff block.
+A resumed Grok session would still be in plan mode and refuse every edit. An
+empty or unparsable plan runs the original message as one task. `atr retry` on a
+task still in the planning role also starts fresh.
+
 ### Review
 
 When `[review] enabled = true`, the driver reviews the worker diff after a
