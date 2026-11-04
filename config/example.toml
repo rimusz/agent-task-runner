@@ -167,9 +167,10 @@ chat_id_file = ""
 prefix = "atr:"
 notify_interval = "20s"
 daily_summary = ""
-# Plain-dir ops workspace for `/add mini` (created if missing).
-mini_dir = "~/atr-ops"
-# Best-effort deny for Telegram-originated runs and mini. Empty rules =
+# Plain-dir ops workspace for `/add host` (created if missing).
+# `mini_dir` is still accepted as a deprecated alias.
+host_dir = "~/atr-ops"
+# Best-effort deny for Telegram-originated runs and host. Empty rules =
 # built-in defaults. wrapper (off) PATH-prepends git/rm/launchctl/sudo shims.
 # Not a guarantee — GitHub branch protection is the hard backstop.
 # [telegram.deny]

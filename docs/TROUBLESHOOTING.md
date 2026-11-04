@@ -198,8 +198,13 @@ owner's env var, ok/warn/fail and days left without printing values.
   queue path waits for **Confirm** from an allowed private chat and user.
   Cancel or a stale button (2 minutes or after a restart) is a no-op.
   Plain Q&A and `@provider` questions do not need Confirm.
-- `/add mini` folder missing: atr creates `telegram.mini_dir` (default
-  `~/atr-ops`). It is a plain directory, not a git worktree.
+- `/add host` folder missing: atr creates `telegram.host_dir` (default
+  `~/atr-ops`; `mini_dir` still works as an alias). It is a plain
+  directory, not a git worktree. `/add mini …` is a repo named `mini` if
+  you have one, otherwise prompt text.
+- `/add —provider …` from iPhone: Smart Punctuation em/en dashes are
+  treated as `--`. If the prompt still contains a dash, the flags were
+  after the first non-flag word.
 - Agent still ran `rm -rf` / force-push: deny rules are best-effort (grok
   `--deny`, claude `--disallowedTools`, codex workspace-write). cursor-agent
   and spark have no deny flag. Optional `[telegram.deny] wrapper = true`

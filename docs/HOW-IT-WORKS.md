@@ -283,12 +283,15 @@ filters task notifies; command replies, health, token-expiry and the daily
 summary stay unfiltered. There is no `/sh` and no Telegram path that execs
 a shell.
 
-`/add [repo|mini] [--provider P] [--model M] [--agent A] <prompt>` parses
+`/add [repo|host] [--provider P] [--model M] [--agent A] <prompt>` parses
 flags, then posts Confirm (workspace, provider, model, agent, prompt
 preview). Queueing happens only in `handle_add` after Confirm from the
-same allowed chat. `mini` is workspace kind `dir` at `telegram.mini_dir`
-(default `~/atr-ops`, created if missing) — not a git worktree, and not
-the assistant throwaway repo under `worktree_root/_src/assistant`.
+same allowed chat. `host` is workspace kind `dir` at `telegram.host_dir`
+(default `~/atr-ops`, created if missing; `mini_dir` is a deprecated
+alias) — not a git worktree, and not the assistant throwaway repo under
+`worktree_root/_src/assistant`. Host tasks are keyed `host-<slug>`.
+`mini` is only a repo name when an enabled `[[repo]]` is called `mini`.
+A leading em/en dash on a flag token is normalized to `--`.
 `--provider` plus `--model` is the v0.1.41 strict pin (`submit_with_model`,
 `provider_hint` + `model_override`). `--provider` alone is a soft hint.
 `--agent` is stored in db meta (`task.agent.{key}`) and added as
@@ -300,7 +303,7 @@ db; `/assistant` shows it. When the hint is set, `pick_provider` skips
 `telegram.assistant.providers` so the mention or chat pin wins. Config
 `telegram.assistant.provider` stays empty by default (first available).
 
-Telegram-originated runs (and the mini dir) get `[telegram.deny]` when
+Telegram-originated runs (and the host dir) get `[telegram.deny]` when
 the CLI command is built: grok `--deny`, claude
 `--disallowedTools Bash(<rule>:*)`, codex `-s workspace-write`.
 cursor-agent and spark/opencode have no matching flag. Optional
