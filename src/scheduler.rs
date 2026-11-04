@@ -422,6 +422,7 @@ fn fail_model_pin(
     let _ = crate::output::capture_with(shared, key, Some(&text));
     notify_run(
         &cfg.telegram,
+        notify::Event::Failed,
         &format!("failed {key} ({text})"),
         task.shadow,
     );

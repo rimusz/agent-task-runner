@@ -3594,6 +3594,8 @@ enabled = false
         assert_eq!(tasks[0].workspace_kind, "git");
         assert_eq!(tasks[0].source_kind, "telegram");
         assert_eq!(tasks[0].repo.as_deref(), Some(root.to_str().unwrap()));
+        assert!(tasks[0].provider_hint.is_empty());
+        assert!(tasks[0].model_override.is_empty());
         assert!(!out[0].text.contains("answer-only"), "{}", out[0].text);
     }
 
