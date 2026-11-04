@@ -95,7 +95,7 @@ curl -s -X POST http://127.0.0.1:7420/tasks \
   -d '{"title":"Read brief","body":"summarize brief.md","workspace":"none","output":"text","files":[{"name":"brief.md","text":"hello attach"}]}'
 ```
 
-**Telegram.** Send `/add` followed by a prompt, for example `/add what is 2+2?` (answer-only). `/add <repo> <prompt>` runs a git repo task when `<repo>` is an enabled `[[repo]]` name. The reply comes back to the chat.
+**Telegram.** Send `/add` followed by a prompt, for example `/add what is 2+2?` (answer-only). `/add <repo> <prompt>` runs a git repo task when `<repo>` is an enabled `[[repo]]` name. `/add mini <prompt>` uses the ops directory (`telegram.mini_dir`, default `~/atr-ops`). Optional `--provider`, `--model`, and `--agent` pin that run (`--model` is a strict pin; `--agent` only on grok/claude). Every `/add` shows Confirm first. The reply comes back to the chat.
 
 **Inbox folder.** A folder atr watches. Any script or agent can drop a `.toml` or `.json` task file into it, and atr runs it like any other task. It is **off by default**. To turn it on, add this to your config and restart atr:
 
@@ -164,6 +164,10 @@ atr telegram test
 /task my-task
 /add what is 2+2?
 /add demo fix the login
+/add mini --provider claude --model claude-sonnet-5-5 draft a changelog
+/assistant
+/assistant grok
+@claude how do I add kimi?
 /usage month
 /cancel my-task
 /ui
@@ -171,9 +175,11 @@ atr telegram test
 
 `/ui` replies with a dashboard link: `[dashboard] public_url` if set, else a detected Tailscale Serve `https://…ts.net/` URL, else the local `atr ui --print` address (marked local-only).
 
-If you type a normal sentence (not a `/command`), the assistant answers. It can only propose the same commands; each write still needs Confirm. An assistant-proposed `ATR: /add …` posts the task with Confirm / Cancel and queues only after Confirm from an allowed private chat. Cancel or a stale button is a short no-op (pending proposals expire after two minutes or a restart). Outbound Telegram text is redacted for common token shapes (GitHub PATs, `sk-` keys, bot tokens, `KEY=`/`TOKEN=`/`SECRET=`/`PASSWORD=`, Bearer headers). If the assistant times out, that chat is told so; grok (or whichever provider ran it) is not marked degraded and other work is unaffected.
+If you type a normal sentence (not a `/command`), the assistant answers. Prefix the sentence with `@claude` / `@codex` / `@grok` (any configured provider) to use that provider for that one message. `/assistant <provider>` sets this chat's default assistant provider (persisted); `/assistant` shows it. The config default stays grok / first available. The assistant can only propose the same commands; each write still needs Confirm. Every queued task (typed `/add` and an assistant-proposed `ATR: /add …`) posts a workspace / provider / model / agent / prompt summary with Confirm / Cancel and queues only after Confirm from an allowed private chat. Cancel or a stale button is a short no-op (pending proposals expire after two minutes or a restart). Plain Q&A does not need Confirm. There is no `/sh`. Outbound Telegram text is redacted for common token shapes (GitHub PATs, `sk-` keys, bot tokens, `KEY=`/`TOKEN=`/`SECRET=`/`PASSWORD=`, Bearer headers). If the assistant times out, that chat is told so; grok (or whichever provider ran it) is not marked degraded and other work is unaffected.
 
-The assistant uses `[telegram.assistant] provider`, or the first available provider. To give it a fallback order, set `providers`: each turn takes the first listed provider that is enabled and not busy, cooling down, rate-limited or at quota, and moves down the list if a run fails. The "⏳ working" message, `atr status` and the dashboard name the provider actually used.
+Telegram-originated CLI runs (and the mini workspace) get best-effort deny rules (`rm -rf`, force-push, `sudo`, …) mapped onto grok `--deny`, claude `--disallowedTools`, and codex workspace-write. cursor-agent and spark have no matching flag. Optional `[telegram.deny] wrapper = true` PATH-prepends git/rm/launchctl/sudo shims. This is not a hard guarantee — GitHub branch protection is the backstop.
+
+The assistant uses `[telegram.assistant] provider`, or the first available provider, unless this chat set `/assistant` or the message started with `@provider`. To give it a fallback order, set `providers`: each turn takes the first listed provider that is enabled and not busy, cooling down, rate-limited or at quota, and moves down the list if a run fails. The "⏳ working" message, `atr status` and the dashboard name the provider actually used.
 
 ```bash
 atr config set telegram.assistant.providers '["grok", "codex", "claude"]'
@@ -211,7 +217,8 @@ Telegram command to CLI:
 | `/status [repo]` | `atr status [--repo R]` | `GET /status` |
 | `/tasks [repo]` | `atr tasks [--repo R]` | `GET /dashboard.json` |
 | `/task <key>` | `atr tasks <key>` | `GET /tasks/<key>` |
-| `/add <prompt>` | `atr add <prompt>` | `POST /tasks` |
+| `/add [repo or mini] [--provider P] [--model M] [--agent A] <prompt>` | `atr add [--repo R] [--provider P] [--model M] <prompt>` | `POST /tasks` |
+| `/assistant [provider]` | none (per-chat default) | none |
 | `/cancel <key> [force]` | `atr cancel <key> [--force]` | `POST /tasks/<key>/cancel` |
 | `/retry <key>` | `atr retry <key>` | `POST /tasks/<key>/retry` |
 | `/pause` | `atr pause` | `POST /intake/pause` |
@@ -451,7 +458,8 @@ Commands (allowed private chats only; also registered in the `/` menu via setMyC
 | `/cancel <id>` | cancel a task (asks Confirm) |
 | `/doctor` | `atr doctor`, warn/FAIL lines only |
 | `/tokens` | GitHub tokens: owner, env var, ok/warn/fail, days left — never values |
-| `/add <prompt>`, `/add <repo> <prompt>` | answer-only task, or a git repo task when `<repo>` is an enabled `[[repo]]` name. Typed `/add` queues immediately; an assistant-proposed `/add` waits for Confirm |
+| `/add [repo or mini] [--provider P] [--model M] [--agent A] <prompt>` | answer-only, an enabled `[[repo]]` git worktree, or the `mini` ops dir. Every `/add` waits for Confirm |
+| `/assistant [provider]` | show or set this chat's default assistant provider |
 | `/usage`, `/ui`, `/help` | spend, dashboard link, everything else |
 
 Buttons: GitHub auth-failure and token-expiry alerts carry **Run doctor**; the

@@ -987,6 +987,20 @@ impl Db {
         Ok(())
     }
 
+    fn agent_meta_key(key: &str) -> String {
+        format!("task.agent.{key}")
+    }
+
+    pub fn set_task_agent(&self, key: &str, agent: &str) -> Result<()> {
+        self.meta_set(&Self::agent_meta_key(key), agent.trim())
+    }
+
+    pub fn task_agent(&self, key: &str) -> Result<String> {
+        Ok(self
+            .meta_get(&Self::agent_meta_key(key))?
+            .unwrap_or_default())
+    }
+
     pub fn set_task_needs(&self, key: &str, needs: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(

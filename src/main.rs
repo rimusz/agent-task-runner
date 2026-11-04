@@ -881,6 +881,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     provider_hint: provider.clone(),
                     needs: needs.clone(),
                     after: after.clone(),
+                    agent: None,
                 },
                 model.as_deref(),
             )?;
@@ -1625,6 +1626,7 @@ async fn run_triage_cmd(path: PathBuf, cmd: TriageCmd) -> anyhow::Result<ExitCod
                     provider_hint: provider,
                     needs: Vec::new(),
                     after: Vec::new(),
+                    agent: None,
                 },
             )?;
             println!("{key}");

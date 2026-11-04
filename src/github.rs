@@ -145,6 +145,7 @@ async fn poll_repo(
                     provider_hint,
                     needs,
                     after: Vec::new(),
+                    agent: None,
                 },
                 model.as_deref(),
             )?;

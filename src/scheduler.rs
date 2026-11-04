@@ -574,7 +574,10 @@ pub fn pick_provider(
     // Telegram assistant with `[telegram.assistant] providers`: the first
     // listed provider that is usable right now; wait while a listed one is
     // only busy/cooling; fall through when none of them can ever run.
-    if crate::telegram::is_assistant_key(&task.key) && !cfg.telegram.assistant.providers.is_empty()
+    // A per-chat `/assistant` pin or `@provider` hint wins over the list.
+    if crate::telegram::is_assistant_key(&task.key)
+        && task.provider_hint.is_empty()
+        && !cfg.telegram.assistant.providers.is_empty()
     {
         match list_pick(
             cfg,
@@ -859,6 +862,22 @@ pub fn apply_task_model(provider: &mut Provider, task: &crate::db::Task) {
     provider.model = model.to_string();
 }
 
+fn apply_task_agent(provider: &mut Provider, agent: &str) {
+    let agent = agent.trim();
+    if agent.is_empty() || !crate::deny::agent_supported(&provider.kind) {
+        return;
+    }
+    if provider
+        .extra_args
+        .windows(2)
+        .any(|w| w[0] == "--agent" && w[1] == agent)
+    {
+        return;
+    }
+    provider.extra_args.push("--agent".into());
+    provider.extra_args.push(agent.to_string());
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StallFollowup {
     Done,
@@ -947,6 +966,9 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         return Ok(());
     }
     apply_task_model(&mut provider, &task);
+    if let Ok(agent) = shared.db.task_agent(&key) {
+        apply_task_agent(&mut provider, &agent);
+    }
 
     crate::reported::refresh_grok_billing(&shared.db, &provider, &Clock::system())
         .await
@@ -1303,12 +1325,23 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         task.shadow,
     );
 
-    let path_prepend = if hardened {
-        let bin = wt.join(".atr").join("bin");
-        crate::shadow::write_gh_wrapper(&bin).ok();
-        Some(bin)
-    } else {
-        None
+    let path_prepend = {
+        let wrapper = cfg.telegram.deny.wrapper && crate::deny::applies(&cfg, &task);
+        if hardened || wrapper {
+            let bin = if hardened {
+                let bin = wt.join(".atr").join("bin");
+                crate::shadow::write_gh_wrapper(&bin).ok();
+                bin
+            } else {
+                crate::deny::wrapper_dir(&cfg.state_db)
+            };
+            if wrapper {
+                let _ = crate::deny::write_wrappers(&bin);
+            }
+            Some(bin)
+        } else {
+            None
+        }
     };
     let sys_path = files_dir.join("system.md");
     let attach_system = !resume_delta && has_slot;

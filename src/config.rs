@@ -463,6 +463,11 @@ pub struct RawTelegram {
     pub api_base: String,
     #[serde(default)]
     pub assistant: RawTelegramAssistant,
+    /// Plain-dir ops workspace for `/add mini` (created if missing).
+    #[serde(default = "default_mini_dir")]
+    pub mini_dir: String,
+    #[serde(default)]
+    pub deny: RawTelegramDeny,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -500,6 +505,22 @@ impl Default for TelegramAssistant {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RawTelegramDeny {
+    /// Empty = built-in defaults (`rm -rf`, force-push, …).
+    #[serde(default)]
+    pub rules: Vec<String>,
+    /// PATH-prepended git/rm/launchctl/sudo shims. Off by default.
+    #[serde(default)]
+    pub wrapper: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TelegramDeny {
+    pub rules: Vec<String>,
+    pub wrapper: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct TelegramConfig {
     pub enabled: bool,
@@ -515,6 +536,8 @@ pub struct TelegramConfig {
     pub daily_summary: String,
     pub api_base: String,
     pub assistant: TelegramAssistant,
+    pub mini_dir: String,
+    pub deny: TelegramDeny,
 }
 
 impl Default for TelegramConfig {
@@ -532,6 +555,8 @@ impl Default for TelegramConfig {
             daily_summary: String::new(),
             api_base: String::new(),
             assistant: TelegramAssistant::default(),
+            mini_dir: default_mini_dir(),
+            deny: TelegramDeny::default(),
         }
     }
 }
@@ -1231,6 +1256,10 @@ impl Default for DashboardConfig {
         }
     }
 }
+fn default_mini_dir() -> String {
+    "~/atr-ops".into()
+}
+
 fn default_assistant_timeout() -> String {
     "10m".into()
 }
@@ -2163,6 +2192,7 @@ fn known_field_names() -> Vec<String> {
         introspect::fields::<GithubConfig>(),
         introspect::fields::<RawTelegram>(),
         introspect::fields::<RawTelegramAssistant>(),
+        introspect::fields::<RawTelegramDeny>(),
         introspect::fields::<RawProvider>(),
         introspect::fields::<RawHealth>(),
         introspect::fields::<RawQuota>(),
@@ -2652,6 +2682,21 @@ impl Config {
                         },
                         timeout: parse_duration(&t.assistant.timeout)
                             .unwrap_or(Duration::from_secs(600)),
+                    },
+                    mini_dir: if t.mini_dir.trim().is_empty() {
+                        default_mini_dir()
+                    } else {
+                        t.mini_dir
+                    },
+                    deny: TelegramDeny {
+                        rules: t
+                            .deny
+                            .rules
+                            .into_iter()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                        wrapper: t.deny.wrapper,
                     },
                 }
             },
@@ -3778,6 +3823,9 @@ kind = "claude"
         assert!(!cfg.telegram.assistant.enabled);
         assert!(cfg.telegram.assistant.provider.is_empty());
         assert_eq!(cfg.telegram.assistant.timeout, Duration::from_secs(600));
+        assert_eq!(cfg.telegram.mini_dir, "~/atr-ops");
+        assert!(!cfg.telegram.deny.wrapper);
+        assert!(cfg.telegram.deny.rules.is_empty());
 
         let cfg = parse_config_toml(
             r#"

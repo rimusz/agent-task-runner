@@ -275,6 +275,39 @@ the persisted schedule. A Telegram assistant task (`tg<chat>`) that stalls
 or hits its run cap fails only that run (the chat is told it timed out)
 and does **not** mark the provider degraded or retry/failover other work.
 
+## Telegram
+
+The bot is private-chat only (`chat.type == private`; `from.id` must be
+allowed). Outbound text goes through `redact_secrets`. `[telegram] events`
+filters task notifies; command replies, health, token-expiry and the daily
+summary stay unfiltered. There is no `/sh` and no Telegram path that execs
+a shell.
+
+`/add [repo|mini] [--provider P] [--model M] [--agent A] <prompt>` parses
+flags, then posts Confirm (workspace, provider, model, agent, prompt
+preview). Queueing happens only in `handle_add` after Confirm from the
+same allowed chat. `mini` is workspace kind `dir` at `telegram.mini_dir`
+(default `~/atr-ops`, created if missing) — not a git worktree, and not
+the assistant throwaway repo under `worktree_root/_src/assistant`.
+`--provider` plus `--model` is the v0.1.41 strict pin (`submit_with_model`,
+`provider_hint` + `model_override`). `--provider` alone is a soft hint.
+`--agent` is stored in db meta (`task.agent.{key}`) and added as
+`--agent` on grok/claude only.
+
+`@provider …` is one assistant Q&A turn on that provider (no Confirm).
+`/assistant <provider>` writes `telegram.assistant.{chat}` in the state
+db; `/assistant` shows it. When the hint is set, `pick_provider` skips
+`telegram.assistant.providers` so the mention or chat pin wins. Config
+`telegram.assistant.provider` stays empty by default (first available).
+
+Telegram-originated runs (and the mini dir) get `[telegram.deny]` when
+the CLI command is built: grok `--deny`, claude
+`--disallowedTools Bash(<rule>:*)`, codex `-s workspace-write`.
+cursor-agent and spark/opencode have no matching flag. Optional
+`telegram.deny.wrapper` PATH-prepends git/rm/launchctl/sudo shims
+(`deny-bin/` next to the state db, or the hardened worktree `.atr/bin`).
+These are best-effort. GitHub branch protection is the hard backstop.
+
 ## Task dependencies (`after`)
 
 `atr add … --after build,test` (same field on inbox / HTTP / MCP) stores those

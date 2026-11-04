@@ -8,6 +8,7 @@ pub mod config;
 pub mod config_edit;
 pub mod dashboard;
 pub mod db;
+pub mod deny;
 pub mod deps;
 pub mod desktop;
 pub mod detect;
