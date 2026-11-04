@@ -87,6 +87,10 @@ status, provider, time window) and column sorting are read-only.
 Wrong provider planning or answering? `atr driver` shows the driver; see
 [Choosing the driver provider and model](CONFIG.md#choosing-the-driver-provider-and-model).
 
+**A verify command can't authenticate, but the same command works in your
+shell.** Verify commands don't inherit `ATR_*` or GitHub token variables. List
+the ones a check needs in `[verify] pass_env` (CONFIG.md).
+
 **Task stays `queued` with a retry time.** A transient provider error
 (overloaded, 429 without a parsed reset, 5xx, 408 / request timeout,
 dropped stream) is waiting
