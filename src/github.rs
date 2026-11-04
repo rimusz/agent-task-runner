@@ -68,11 +68,18 @@ pub async fn poll_once(shared: &Shared) -> Result<()> {
     if !cfg.intake_allows(crate::task::SourceKind::Github) {
         return Ok(());
     }
-    let targets: Vec<_> = cfg
+    let (owned, targets): (Vec<_>, Vec<_>) = cfg
         .enabled_watch_repos()
         .into_iter()
         .filter(|r| !r.github.is_empty() && !r.label.is_empty())
-        .collect();
+        .partition(|r| crate::shadow::owns_repo(&cfg, r));
+    for r in &owned {
+        tracing::info!(
+            "github poll: skipping {}, owned by [shadow] (labels {})",
+            r.github,
+            r.label
+        );
+    }
     if targets.is_empty() {
         return Ok(());
     }
@@ -94,43 +101,19 @@ async fn poll_repo(
     repo: &crate::config::RepoEntry,
 ) -> Result<()> {
     let github = repo.github.as_str();
-    let label = repo.label.as_str();
     let repo_path = repo.path.display().to_string();
 
-    let mut cmd = Command::new(gh);
-    crate::gh_token::apply(&mut cmd, cfg, Some(&shared.config_path), Some(github));
-    let out = cmd
-        .args([
-            "issue",
-            "list",
-            "--repo",
-            github,
-            "--label",
-            label,
-            "--state",
-            "open",
-            "--limit",
-            "50",
-            "--json",
-            "number,title,body,labels",
-        ])
-        .output()
-        .await?;
-    crate::gh_token::observe_gh(
-        cfg,
-        Some(&shared.config_path),
-        Some(github),
-        out.status.success(),
-        &String::from_utf8_lossy(&out.stderr),
-        &format!("issue list {github}"),
-    );
-    if !out.status.success() {
-        anyhow::bail!(
-            "gh issue list failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+    // One list per label: gh ANDs repeated --label, and the label set means any.
+    // A failed label does not hold back what the others found.
+    let mut issues: Vec<Issue> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut failed = None;
+    for label in repo.labels() {
+        match list_issues(shared, cfg, gh, github, &label).await {
+            Ok(found) => issues.extend(found.into_iter().filter(|i| seen.insert(i.number))),
+            Err(e) => failed = Some(e),
+        }
     }
-    let issues: Vec<Issue> = serde_json::from_slice(&out.stdout)?;
     for issue in issues {
         let key = cfg.issue_task_key(repo, issue.number);
         let existed = shared.db.get_task(&key)?.is_some();
@@ -174,7 +157,53 @@ async fn poll_repo(
             tracing::debug!(task = %key, "comment poll: {e:#}");
         }
     }
-    Ok(())
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+async fn list_issues(
+    shared: &Shared,
+    cfg: &crate::config::Config,
+    gh: &str,
+    github: &str,
+    label: &str,
+) -> Result<Vec<Issue>> {
+    let mut cmd = Command::new(gh);
+    crate::gh_token::apply(&mut cmd, cfg, Some(&shared.config_path), Some(github));
+    let out = cmd
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            github,
+            "--label",
+            label,
+            "--state",
+            "open",
+            "--limit",
+            "50",
+            "--json",
+            "number,title,body,labels",
+        ])
+        .output()
+        .await?;
+    crate::gh_token::observe_gh(
+        cfg,
+        Some(&shared.config_path),
+        Some(github),
+        out.status.success(),
+        &String::from_utf8_lossy(&out.stderr),
+        &format!("issue list {github}"),
+    );
+    if !out.status.success() {
+        anyhow::bail!(
+            "gh issue list failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(serde_json::from_slice(&out.stdout)?)
 }
 
 async fn ingest_comments(
@@ -406,5 +435,179 @@ cli = "/bin/true"
         assert_eq!(t.needs, "browser");
         assert_eq!(t.provider_hint, "");
         assert_eq!(t.model_override, "");
+    }
+
+    fn label_answer(dir: &std::path::Path, label: &str, issue: &str) {
+        let by = dir.join("fake/gh-issues-by-label");
+        std::fs::create_dir_all(&by).unwrap();
+        std::fs::write(by.join(format!("{label}.json")), issue).unwrap();
+    }
+
+    fn issue_json(number: i64, labels: &[&str]) -> String {
+        let names: Vec<String> = labels
+            .iter()
+            .map(|l| format!(r#"{{"name":"{l}"}}"#))
+            .collect();
+        format!(
+            r#"[{{"number":{number},"title":"Fix login","body":"x","labels":[{}]}}]"#,
+            names.join(",")
+        )
+    }
+
+    fn repo_block(name: &str, github: &str, label: &str) -> String {
+        format!(
+            "[[repo]]\nname = \"{name}\"\npath = \"/tmp/{name}\"\ngithub = \"{github}\"\nlabel = \"{label}\"\n"
+        )
+    }
+
+    fn task_keys(s: &Shared) -> Vec<String> {
+        s.db.list_tasks()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.key)
+            .collect()
+    }
+
+    fn gh_log(dir: &std::path::Path) -> String {
+        std::fs::read_to_string(dir.join("fake/gh-invocations.log")).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn issue_with_both_labels_becomes_one_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let both = issue_json(12, &["for:atr", "for:agnt"]);
+        label_answer(dir.path(), "for:atr", &both);
+        label_answer(dir.path(), "for:agnt", &both);
+        let s = shared(
+            dir.path(),
+            &repo_block("demo", "owner/demo", "for:atr, for:agnt"),
+        );
+        poll_once(&s).await.unwrap();
+        assert_eq!(task_keys(&s), vec!["demo-12"]);
+        let msgs = s.db.pending_messages("demo-12").unwrap();
+        assert_eq!(msgs.iter().filter(|m| m.source == "github").count(), 1);
+        // One list per label: gh would AND them on one call.
+        let log = gh_log(dir.path());
+        assert!(log.contains("--label for:atr --state"), "{log}");
+        assert!(log.contains("--label for:agnt --state"), "{log}");
+        assert!(!log.contains("for:atr,for:agnt"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn issue_with_only_the_second_label_is_picked_up() {
+        let dir = tempfile::tempdir().unwrap();
+        label_answer(dir.path(), "for:agnt", &issue_json(7, &["for:agnt"]));
+        let s = shared(
+            dir.path(),
+            &repo_block("demo", "owner/demo", "for:atr,for:agnt"),
+        );
+        poll_once(&s).await.unwrap();
+        assert_eq!(task_keys(&s), vec!["demo-7"]);
+    }
+
+    #[tokio::test]
+    async fn single_label_ignores_an_issue_with_another_label() {
+        let dir = tempfile::tempdir().unwrap();
+        label_answer(dir.path(), "for:agnt", &issue_json(7, &["for:agnt"]));
+        let s = shared(dir.path(), &repo_block("demo", "owner/demo", "for:atr"));
+        poll_once(&s).await.unwrap();
+        assert!(task_keys(&s).is_empty());
+        let log = gh_log(dir.path());
+        assert_eq!(log.matches("issue list").count(), 1, "{log}");
+    }
+
+    #[tokio::test]
+    async fn shorthand_github_label_list_polls_each_label() {
+        let dir = tempfile::tempdir().unwrap();
+        label_answer(dir.path(), "for:agnt", &issue_json(7, &["for:agnt"]));
+        let s = shared(dir.path(), "");
+        s.config.write().unwrap().github.label = "for:atr, for:agnt".into();
+        poll_once(&s).await.unwrap();
+        assert_eq!(task_keys(&s), vec!["task-7"]);
+    }
+
+    #[tokio::test]
+    async fn failed_label_keeps_what_the_others_found_and_reports_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        label_answer(dir.path(), "for:agnt", &issue_json(7, &["for:agnt"]));
+        std::fs::write(dir.path().join("fake/gh-issues-by-label/for:atr.fail"), "").unwrap();
+        let s = shared(
+            dir.path(),
+            &repo_block("demo", "owner/demo", "for:atr,for:agnt"),
+        );
+        let cfg = s.config.read().unwrap().clone();
+        let gh = cfg.github.cli.clone();
+        let repo = cfg.enabled_watch_repos().remove(0);
+        let err = poll_repo(&s, &cfg, &gh, &repo).await.unwrap_err();
+        assert!(err.to_string().contains("gh issue list failed"), "{err}");
+        assert_eq!(task_keys(&s), vec!["demo-7"]);
+    }
+
+    fn shadow_block(enabled: bool, repo: &str) -> String {
+        format!("[shadow]\nenabled = {enabled}\nrepo = \"{repo}\"\n")
+    }
+
+    fn write_issue(dir: &std::path::Path, number: i64) {
+        let fake = dir.join("fake");
+        std::fs::create_dir_all(&fake).unwrap();
+        std::fs::write(
+            fake.join("gh-issues.json"),
+            issue_json(number, &["for:atr"]),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn poller_skips_the_repo_shadow_owns_and_not_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        write_issue(dir.path(), 12);
+        let extra = format!(
+            "{}{}{}",
+            shadow_block(true, "owner/demo"),
+            repo_block("demo", "OWNER/Demo", "for:atr"),
+            repo_block("other", "owner/other", "for:atr"),
+        );
+        let s = shared(dir.path(), &extra);
+        poll_once(&s).await.unwrap();
+        assert_eq!(task_keys(&s), vec!["other-12"]);
+        let log = gh_log(dir.path());
+        assert!(!log.to_ascii_lowercase().contains("owner/demo"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn poller_polls_the_repo_when_shadow_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        write_issue(dir.path(), 12);
+        let extra = format!(
+            "{}{}",
+            shadow_block(false, "owner/demo"),
+            repo_block("demo", "owner/demo", "for:atr"),
+        );
+        let s = shared(dir.path(), &extra);
+        poll_once(&s).await.unwrap();
+        assert_eq!(task_keys(&s), vec!["demo-12"]);
+    }
+
+    #[tokio::test]
+    async fn poller_with_only_the_shadow_repo_creates_no_task() {
+        let dir = tempfile::tempdir().unwrap();
+        write_issue(dir.path(), 12);
+        let extra = format!(
+            "{}{}",
+            shadow_block(true, "owner/demo"),
+            repo_block("demo", "owner/demo", "for:atr"),
+        );
+        let s = shared(dir.path(), &extra);
+        poll_once(&s).await.unwrap();
+        assert!(task_keys(&s).is_empty());
+    }
+
+    #[tokio::test]
+    async fn poller_keeps_the_shorthand_repo_when_shadow_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        write_issue(dir.path(), 12);
+        let s = shared(dir.path(), &shadow_block(true, "owner/acme"));
+        poll_once(&s).await.unwrap();
+        assert_eq!(task_keys(&s), vec!["task-12"]);
     }
 }

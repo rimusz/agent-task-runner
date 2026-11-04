@@ -265,7 +265,8 @@ pub struct RawRepo {
     pub name: String,
     pub path: String,
     pub github: String,
-    #[serde(default = "default_gh_label")]
+    /// Empty or absent inherits `[github] label`.
+    #[serde(default)]
     pub label: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -805,6 +806,13 @@ pub struct RepoEntry {
     pub shorthand: bool,
 }
 
+impl RepoEntry {
+    /// Labels that put an issue on this repo's intake (any of them).
+    pub fn labels(&self) -> Vec<String> {
+        parse_labels(&self.label)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Preset {
     pub name: String,
@@ -1143,6 +1151,19 @@ fn default_gh() -> String {
 }
 /// Default `[github] label`. Existing configs keep whatever they already set.
 pub const DEFAULT_GITHUB_LABEL: &str = "for:atr";
+
+/// A `label` setting as its label set: comma-separated, any of them matches.
+/// Trims, drops empties, and dedupes (GitHub label names ignore case).
+pub fn parse_labels(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for label in raw.split(',').map(str::trim).filter(|l| !l.is_empty()) {
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(label)) {
+            out.push(label.to_string());
+        }
+    }
+    out
+}
+
 fn default_gh_label() -> String {
     DEFAULT_GITHUB_LABEL.into()
 }
@@ -2536,6 +2557,7 @@ impl Config {
                 keep_alive,
             });
         }
+        let github_label = raw.github.label.clone();
         Ok(Config {
             unknown_keys: Vec::new(),
             listen: raw.listen,
@@ -2764,11 +2786,11 @@ impl Config {
                             name,
                             path: expand_path(&r.path),
                             github: r.github.trim().to_string(),
-                            label: if r.label.trim().is_empty() {
-                                default_gh_label()
-                            } else {
-                                r.label
-                            },
+                            label: [&r.label, &github_label]
+                                .into_iter()
+                                .map(|l| parse_labels(l))
+                                .find(|l| !l.is_empty())
+                                .map_or_else(default_gh_label, |l| l.join(",")),
                             enabled: r.enabled,
                             branch_prefix: r.branch_prefix.trim().to_string(),
                             base: r.base.trim().to_string(),
@@ -2958,7 +2980,7 @@ impl Config {
             name: self.task_key_prefix.clone(),
             path: self.repo_path.clone(),
             github: self.github.repo.clone(),
-            label: self.github.label.clone(),
+            label: parse_labels(&self.github.label).join(","),
             enabled: true,
             branch_prefix: String::new(),
             base: String::new(),
@@ -4018,5 +4040,86 @@ kind = "grok"
             .unwrap_err()
             .to_string();
         assert!(err.contains("\"kimi\" is not a [[provider]]"), "{err}");
+    }
+
+    #[test]
+    fn parse_labels_trims_drops_empties_and_dedupes() {
+        assert_eq!(
+            parse_labels("for:atr, for:agnt"),
+            vec!["for:atr", "for:agnt"]
+        );
+        assert_eq!(
+            parse_labels(" for:atr ,, for:agnt ,FOR:ATR,"),
+            vec!["for:atr", "for:agnt"]
+        );
+        assert_eq!(parse_labels("for:atr"), vec!["for:atr"]);
+        assert!(parse_labels(" , ").is_empty());
+        assert!(parse_labels("").is_empty());
+    }
+
+    fn label_cfg(section: &str) -> Config {
+        let text = format!(
+            "repo_path = \"/tmp/r\"\ntask_key_prefix = \"demo\"\n{section}\n[[provider]]\nname = \"claude\"\nkind = \"claude\"\n"
+        );
+        Config::from_raw(toml::from_str::<RawConfig>(&text).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn repo_label_takes_a_list_and_empty_still_defaults() {
+        let list = "[[repo]]\nname = \"a\"\npath = \"/tmp/a\"\ngithub = \"o/a\"\nlabel = \"for:atr, for:agnt,,\"\n";
+        let cfg = label_cfg(list);
+        assert_eq!(cfg.repos[0].labels(), vec!["for:atr", "for:agnt"]);
+        assert_eq!(cfg.repos[0].label, "for:atr,for:agnt");
+        let blank =
+            "[[repo]]\nname = \"a\"\npath = \"/tmp/a\"\ngithub = \"o/a\"\nlabel = \" , \"\n";
+        assert_eq!(
+            label_cfg(blank).repos[0].labels(),
+            vec![DEFAULT_GITHUB_LABEL]
+        );
+    }
+
+    #[test]
+    fn github_label_shorthand_takes_a_list_and_empty_stays_off() {
+        let cfg = label_cfg("[github]\nrepo = \"o/a\"\nlabel = \"for:atr, for:agnt\"\n");
+        assert_eq!(cfg.shorthand_repo().labels(), vec!["for:atr", "for:agnt"]);
+        let off = label_cfg("[github]\nrepo = \"o/a\"\nlabel = \"\"\n");
+        assert!(off.shorthand_repo().labels().is_empty());
+        assert!(off.shorthand_repo().label.is_empty());
+    }
+
+    const LABEL_REPO: &str = "[[repo]]\nname = \"a\"\npath = \"/tmp/a\"\ngithub = \"o/a\"\n";
+
+    #[test]
+    fn repo_without_a_label_inherits_the_github_label() {
+        let absent = format!("[github]\nlabel = \"for:atr, for:agnt\"\n{LABEL_REPO}");
+        assert_eq!(
+            label_cfg(&absent).repos[0].labels(),
+            vec!["for:atr", "for:agnt"]
+        );
+        let empty = format!("[github]\nlabel = \"for:atr,for:agnt\"\n{LABEL_REPO}label = \" \"\n");
+        assert_eq!(
+            label_cfg(&empty).repos[0].labels(),
+            vec!["for:atr", "for:agnt"]
+        );
+    }
+
+    #[test]
+    fn repo_with_its_own_label_keeps_it() {
+        let own =
+            format!("[github]\nlabel = \"for:atr,for:agnt\"\n{LABEL_REPO}label = \"for:team\"\n");
+        assert_eq!(label_cfg(&own).repos[0].labels(), vec!["for:team"]);
+    }
+
+    #[test]
+    fn repo_label_defaults_when_both_are_empty() {
+        let explicit = format!("[github]\nlabel = \"\"\n{LABEL_REPO}");
+        assert_eq!(
+            label_cfg(&explicit).repos[0].labels(),
+            vec![DEFAULT_GITHUB_LABEL]
+        );
+        assert_eq!(
+            label_cfg(LABEL_REPO).repos[0].labels(),
+            vec![DEFAULT_GITHUB_LABEL]
+        );
     }
 }

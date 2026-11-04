@@ -96,8 +96,8 @@ enum Cmd {
         key: Option<String>,
         #[arg(long)]
         provider: Option<String>,
-        /// Model id for --provider. Applies only when the task runs on that
-        /// provider; a failover provider keeps its own model.
+        /// Model id for --provider. Pins the task strictly to that provider
+        /// (no fallback or failover); --provider alone stays a soft preference.
         #[arg(long, requires = "provider")]
         model: Option<String>,
         #[arg(long)]
