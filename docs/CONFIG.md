@@ -238,7 +238,23 @@ today's `allowed_chat_ids` keep working.
 `/add <prompt>` is still answer-only (no workspace). `/add <repo> <prompt>`
 submits a git repo task when `<repo>` is an enabled `[[repo]]` name, with
 the same workspace and verify path as `atr add --repo` / a GitHub-issue
-task (branch-only; no PR). A disabled repo is rejected.
+task (branch-only; no PR). A disabled repo is rejected. A typed `/add` from
+an allowed private chat queues immediately. An assistant-proposed
+`ATR: /add …` is posted with **Confirm** / **Cancel** and queued only after
+Confirm from an allowed private chat and user. Cancel or a stale button
+(pending proposals are keyed by id, expire after 2 minutes, and are
+dropped on restart) is a no-op with a short reply.
+
+Every outbound Telegram text (assistant replies, task output, notifications,
+`/config` and `/status`) is run through `redact_secrets`: GitHub
+`ghp_`/`github_pat_` tokens, long `sk-` keys, Telegram bot tokens
+(`digits:35+` alphanumerics), `KEY=`/`TOKEN=`/`SECRET=`/`PASSWORD=`
+assignments, and Bearer headers. Short or ordinary text is left alone.
+
+A Telegram assistant task (`tg<chat>`) that hits its timeout or stall fails
+only that run. The chat is told it timed out. The provider is not marked
+degraded and other tasks are not retried or failed over. Normal tasks keep
+today's stall degrade / resume / failover behaviour.
 
 ### Repos
 

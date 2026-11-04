@@ -264,7 +264,9 @@ Retry is for when this task would otherwise fail or sit on the same CLI
 quota with a reset already handled by `quota.rs`, and task-logic failures
 (`needs_attention`, tests failed) skip this path.
 Stall hangs still use `[[provider]].health.stall_resumes`. `atr retry` clears
-the persisted schedule.
+the persisted schedule. A Telegram assistant task (`tg<chat>`) that stalls
+or hits its run cap fails only that run (the chat is told it timed out)
+and does **not** mark the provider degraded or retry/failover other work.
 
 ## Task dependencies (`after`)
 

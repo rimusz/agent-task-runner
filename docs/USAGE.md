@@ -171,7 +171,7 @@ atr telegram test
 
 `/ui` replies with a dashboard link: `[dashboard] public_url` if set, else a detected Tailscale Serve `https://…ts.net/` URL, else the local `atr ui --print` address (marked local-only).
 
-If you type a normal sentence (not a `/command`), the assistant answers. It can only propose the same commands; each write still needs Confirm.
+If you type a normal sentence (not a `/command`), the assistant answers. It can only propose the same commands; each write still needs Confirm. An assistant-proposed `ATR: /add …` posts the task with Confirm / Cancel and queues only after Confirm from an allowed private chat. Cancel or a stale button is a short no-op (pending proposals expire after two minutes or a restart). Outbound Telegram text is redacted for common token shapes (GitHub PATs, `sk-` keys, bot tokens, `KEY=`/`TOKEN=`/`SECRET=`/`PASSWORD=`, Bearer headers). If the assistant times out, that chat is told so; grok (or whichever provider ran it) is not marked degraded and other work is unaffected.
 
 The assistant uses `[telegram.assistant] provider`, or the first available provider. To give it a fallback order, set `providers`: each turn takes the first listed provider that is enabled and not busy, cooling down, rate-limited or at quota, and moves down the list if a run fails. The "⏳ working" message, `atr status` and the dashboard name the provider actually used.
 
@@ -451,7 +451,7 @@ Commands (allowed private chats only; also registered in the `/` menu via setMyC
 | `/cancel <id>` | cancel a task (asks Confirm) |
 | `/doctor` | `atr doctor`, warn/FAIL lines only |
 | `/tokens` | GitHub tokens: owner, env var, ok/warn/fail, days left — never values |
-| `/add <prompt>`, `/add <repo> <prompt>` | answer-only task, or a git repo task when `<repo>` is an enabled `[[repo]]` name |
+| `/add <prompt>`, `/add <repo> <prompt>` | answer-only task, or a git repo task when `<repo>` is an enabled `[[repo]]` name. Typed `/add` queues immediately; an assistant-proposed `/add` waits for Confirm |
 | `/usage`, `/ui`, `/help` | spend, dashboard link, everything else |
 
 Buttons: GitHub auth-failure and token-expiry alerts carry **Run doctor**; the

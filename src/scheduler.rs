@@ -859,6 +859,70 @@ pub fn apply_task_model(provider: &mut Provider, task: &crate::db::Task) {
     provider.model = model.to_string();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StallFollowup {
+    Done,
+    Failover,
+}
+
+/// Assistant stalls fail only that chat's run. They must not mark the
+/// provider degraded or retry/failover (that would stall every other task).
+fn record_stall(
+    shared: &Shared,
+    cfg: &Config,
+    key: &str,
+    provider: &Provider,
+    run_id: i64,
+    assistant: bool,
+    shadow: bool,
+) -> Result<StallFollowup> {
+    if assistant {
+        shared.db.set_status(key, "failed")?;
+        tracing::warn!(
+            task = %key,
+            provider = %provider.name,
+            "assistant task stalled; not degrading provider"
+        );
+        return Ok(StallFollowup::Done);
+    }
+    shared.db.unconsume_run(run_id)?;
+    notify_run(
+        &cfg.telegram,
+        notify::Event::Stalled,
+        &format!(
+            "stalled {key} provider={} (CLI hang / heartbeat)",
+            provider.name
+        ),
+        shadow,
+    );
+    let retries = shared
+        .db
+        .get_task(key)?
+        .map(|t| t.stall_retries)
+        .unwrap_or(0);
+    shared.db.set_degraded_until(
+        &provider.name,
+        Some(&cooldown_rfc3339(provider.degraded_after_stall)),
+    )?;
+    if retries < i64::from(provider.health.stall_resumes) {
+        shared.db.set_stall_retries(key, retries + 1)?;
+        shared.db.set_status(key, "queued")?;
+        tracing::info!(
+            task = %key,
+            retries = retries + 1,
+            max = provider.health.stall_resumes,
+            "retrying same session after stall"
+        );
+        Ok(StallFollowup::Done)
+    } else {
+        shared.db.set_cooldown(
+            &provider.name,
+            &cooldown_rfc3339(provider.health.unhealthy_cooldown),
+        )?;
+        Ok(StallFollowup::Failover)
+    }
+}
+
 async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -> Result<()> {
     let cfg = shared.config.read().unwrap().clone();
     let assistant = crate::telegram::is_assistant_key(&key);
@@ -1700,39 +1764,16 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             }
         }
         "stalled" => {
-            shared.db.unconsume_run(run_id)?;
-            notify_run(
-                &cfg.telegram,
-                notify::Event::Stalled,
-                &format!(
-                    "stalled {key} provider={} (CLI hang / heartbeat)",
-                    provider.name
-                ),
+            if record_stall(
+                &shared,
+                &cfg,
+                &key,
+                &provider,
+                run_id,
+                assistant,
                 task.shadow,
-            );
-            let retries = shared
-                .db
-                .get_task(&key)?
-                .map(|t| t.stall_retries)
-                .unwrap_or(0);
-            shared.db.set_degraded_until(
-                &provider.name,
-                Some(&cooldown_rfc3339(provider.degraded_after_stall)),
-            )?;
-            if retries < i64::from(provider.health.stall_resumes) {
-                shared.db.set_stall_retries(&key, retries + 1)?;
-                shared.db.set_status(&key, "queued")?;
-                tracing::info!(
-                    task = %key,
-                    retries = retries + 1,
-                    max = provider.health.stall_resumes,
-                    "retrying same session after stall"
-                );
-            } else {
-                shared.db.set_cooldown(
-                    &provider.name,
-                    &cooldown_rfc3339(provider.health.unhealthy_cooldown),
-                )?;
+            )? == StallFollowup::Failover
+            {
                 handle_failover(&shared, &cfg, &key, &provider, &result, run_id, &wt).await?;
             }
         }
@@ -4322,5 +4363,88 @@ capabilities = ["browser", "desktop"]
             pick(&cfg, &db, &HashMap::new(), &t).as_deref(),
             Some("claude")
         );
+    }
+
+    #[test]
+    fn assistant_stall_leaves_provider_health_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("p.md"), "p\n").unwrap();
+        let cli = if std::path::Path::new("/bin/true").exists() {
+            "/bin/true"
+        } else {
+            "/usr/bin/true"
+        };
+        let text = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+[[provider]]
+name = "grok"
+kind = "grok"
+cli = "{cli}"
+"#,
+            db = dir.path().join("s.db").display(),
+            root = dir.path().display(),
+            cli = cli,
+        );
+        let raw: crate::config::RawConfig = toml::from_str(&text).unwrap();
+        let cfg = crate::config::Config::from_raw(raw).unwrap();
+        let shared =
+            crate::app::Shared::from_config(dir.path().join("c.toml"), cfg.clone()).unwrap();
+        shared.db.upsert_task("tg42", "/repo", None).unwrap();
+        shared.db.set_status("tg42", "running").unwrap();
+        let run = shared.db.start_run("tg42", "grok", "").unwrap();
+        shared.db.enqueue_message("tg42", "hi", "telegram").unwrap();
+        let ids: Vec<i64> = shared
+            .db
+            .pending_messages("tg42")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        shared.db.mark_consumed(&ids, run).unwrap();
+
+        let provider = cfg
+            .providers
+            .iter()
+            .find(|p| p.name == "grok")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            record_stall(&shared, &cfg, "tg42", &provider, run, true, false).unwrap(),
+            StallFollowup::Done
+        );
+        let (cooling, degraded) = shared.db.provider_blocked("grok").unwrap();
+        assert!(
+            !cooling && !degraded,
+            "assistant stall must not cool or degrade grok"
+        );
+        let t = shared.db.get_task("tg42").unwrap().unwrap();
+        assert_eq!(t.status, "failed");
+        assert_eq!(t.stall_retries, 0);
+
+        shared.db.upsert_task("work-1", "/repo", None).unwrap();
+        shared.db.set_status("work-1", "running").unwrap();
+        let run2 = shared.db.start_run("work-1", "grok", "").unwrap();
+        shared.db.enqueue_message("work-1", "do it", "cli").unwrap();
+        let ids: Vec<i64> = shared
+            .db
+            .pending_messages("work-1")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        shared.db.mark_consumed(&ids, run2).unwrap();
+        assert_eq!(
+            record_stall(&shared, &cfg, "work-1", &provider, run2, false, false).unwrap(),
+            StallFollowup::Done
+        );
+        let (_, degraded) = shared.db.provider_blocked("grok").unwrap();
+        assert!(degraded, "normal stall still degrades the provider");
+        let t = shared.db.get_task("work-1").unwrap().unwrap();
+        assert_eq!(t.status, "queued");
     }
 }
