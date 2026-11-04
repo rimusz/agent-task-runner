@@ -106,34 +106,190 @@ async fn task_without_override_keeps_the_provider_model() {
     assert!(h.shared.status_json()["tasks"][0].get("model").is_none());
 }
 
+fn pin_reason(reason: &str) -> String {
+    format!("model override grok-override-9 pins provider grok: {reason}")
+}
+
+fn set_provider(h: &Harness, name: &str, change: impl Fn(&mut atr::config::Provider)) {
+    change(
+        h.shared
+            .config
+            .write()
+            .unwrap()
+            .providers
+            .iter_mut()
+            .find(|p| p.name == name)
+            .unwrap(),
+    );
+}
+
+fn run_providers(h: &Harness, key: &str) -> Vec<String> {
+    runs(h, key).into_iter().map(|(p, _)| p).collect()
+}
+
+fn no_compare_side_effects(h: &Harness, key: &str) {
+    for r in h.shared.db.list_runs(Some(key)).unwrap() {
+        assert_ne!(r.outcome.as_deref(), Some("arm_unavailable"), "{key}");
+        let events = h.shared.db.events_for_run(r.id).unwrap();
+        assert!(events.iter().all(|e| e.kind != "arm_unavailable"), "{key}");
+    }
+}
+
 #[tokio::test]
-async fn failover_provider_does_not_get_the_override() {
-    let h = harness("rate_limit").await;
-    submit(&h, "demo-ov3", Some("grok"), Some("grok-override-9"));
-    h.wait_status("demo-ov3", &["waiting", "done"], 15000).await;
-    assert_eq!(
-        runs(&h, "demo-ov3"),
-        vec![
-            ("grok".to_string(), "grok-override-9".to_string()),
-            ("claude".to_string(), CONFIG_MODEL.to_string()),
-        ]
-    );
-    assert_eq!(
-        invoked_with(&h, "grok-override-9"),
-        h.invocations()
-            .iter()
-            .filter(|i| i["kind"] == "grok" && i.to_string().contains("grok-override-9"))
-            .count(),
-        "only grok is spawned with the override: {:?}",
-        h.invocations()
-    );
+async fn pin_fails_with_a_clear_reason_when_the_provider_cannot_run() {
+    let h = harness("success").await;
+    let missing = h.dir.path().join("no-such-cli");
+    let cases: [(&str, &str); 2] = [
+        ("demo-ov4", "provider grok is disabled"),
+        ("demo-ov5", "provider grok CLI is missing"),
+    ];
+    for (key, reason) in cases {
+        let original = h.shared.config.read().unwrap().clone();
+        if key == "demo-ov4" {
+            set_provider(&h, "grok", |p| p.enabled = false);
+        } else {
+            set_provider(&h, "grok", |p| p.cli = missing.clone());
+        }
+        submit(&h, key, Some("grok"), Some("grok-override-9"));
+        h.wait_status(key, &["failed"], 15000).await;
+        let t = h.shared.db.get_task(key).unwrap().unwrap();
+        let want = pin_reason(reason);
+        assert_eq!(t.result_text, want);
+        let text = atr::app::task_verbose_text(&h.shared, key).unwrap();
+        assert!(text.contains(&want), "{text}");
+        // Only the marker run: nothing was spawned, least of all elsewhere.
+        let rows = h.shared.db.list_runs(Some(key)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome.as_deref(), Some("model_pin_unavailable"));
+        no_compare_side_effects(&h, key);
+        *h.shared.config.write().unwrap() = original;
+    }
+    assert!(h.invocations().is_empty(), "{:?}", h.invocations());
+}
+
+#[tokio::test]
+async fn pin_fails_when_the_provider_is_gone_or_lacks_a_capability() {
+    let h = harness("success").await;
+    h.shared
+        .submit_with_model(
+            "demo-ov6",
+            "do it",
+            "cli",
+            None,
+            None,
+            false,
+            false,
+            atr::SubmitOpts {
+                workspace_kind: Some("none".into()),
+                output_kind: Some("text".into()),
+                allow_empty_repo: true,
+                provider_hint: Some("grok".into()),
+                needs: vec!["browser".into()],
+                ..Default::default()
+            },
+            Some("grok-override-9"),
+        )
+        .unwrap();
+    h.wait_status("demo-ov6", &["failed"], 15000).await;
+    let t = h.shared.db.get_task("demo-ov6").unwrap().unwrap();
+    assert_eq!(t.result_text, pin_reason("provider grok lacks browser"));
+
+    h.shared
+        .config
+        .write()
+        .unwrap()
+        .providers
+        .retain(|p| p.name != "grok");
+    submit(&h, "demo-ov7", Some("grok"), Some("grok-override-9"));
+    h.wait_status("demo-ov7", &["failed"], 15000).await;
+    let t = h.shared.db.get_task("demo-ov7").unwrap().unwrap();
+    assert_eq!(t.result_text, pin_reason("provider grok is not configured"));
+    assert!(h.invocations().is_empty(), "{:?}", h.invocations());
+}
+
+#[tokio::test]
+async fn pin_failure_on_the_provider_does_not_fail_over() {
+    let h = harness("auth").await;
+    submit(&h, "demo-ov8", Some("grok"), Some("grok-override-9"));
+    h.wait_status("demo-ov8", &["failed"], 15000).await;
+    assert_eq!(run_providers(&h, "demo-ov8"), vec!["grok".to_string()]);
     assert!(
-        h.invocations()
-            .iter()
-            .any(|i| i.to_string().contains(CONFIG_MODEL)),
-        "claude keeps its configured model: {:?}",
+        h.invocations().iter().all(|i| i["kind"] == "grok"),
+        "{:?}",
         h.invocations()
     );
+    let text = atr::app::task_verbose_text(&h.shared, "demo-ov8").unwrap();
+    assert!(
+        text.contains("model override grok-override-9 pins provider grok: grok ended with auth"),
+        "{text}"
+    );
+    no_compare_side_effects(&h, "demo-ov8");
+}
+
+#[tokio::test]
+async fn pin_transient_failure_retries_on_the_same_provider_only() {
+    let h = harness("rate_limit").await;
+    submit(&h, "demo-ov9", Some("grok"), Some("grok-override-9"));
+    h.wait_until("demo-ov9", 15000, |h| {
+        h.shared
+            .db
+            .get_task("demo-ov9")
+            .unwrap()
+            .is_some_and(|t| t.retry_attempt >= 1)
+    })
+    .await;
+    let t = h.shared.db.get_task("demo-ov9").unwrap().unwrap();
+    assert_eq!(t.status, "queued", "waits for its own provider");
+    assert_eq!(run_providers(&h, "demo-ov9"), vec!["grok".to_string()]);
+    assert_eq!(t.tried, None);
+}
+
+#[tokio::test]
+async fn pin_with_retries_off_fails_instead_of_moving() {
+    let h = harness("rate_limit").await;
+    h.shared.config.write().unwrap().retry.enabled = false;
+    submit(&h, "demo-ov10", Some("grok"), Some("grok-override-9"));
+    h.wait_status("demo-ov10", &["failed"], 15000).await;
+    assert_eq!(run_providers(&h, "demo-ov10"), vec!["grok".to_string()]);
+}
+
+#[tokio::test]
+async fn retry_after_a_pin_failure_runs_on_the_named_provider() {
+    let h = harness("success").await;
+    set_provider(&h, "grok", |p| p.enabled = false);
+    submit(&h, "demo-ov11", Some("grok"), Some("grok-override-9"));
+    h.wait_status("demo-ov11", &["failed"], 15000).await;
+    set_provider(&h, "grok", |p| p.enabled = true);
+    h.shared.retry("demo-ov11").unwrap();
+    h.wait_status("demo-ov11", &["waiting", "done"], 15000)
+        .await;
+    assert_eq!(
+        runs(&h, "demo-ov11").last().unwrap(),
+        &("grok".to_string(), "grok-override-9".to_string())
+    );
+    assert_eq!(invoked_with(&h, "grok-override-9"), 1);
+}
+
+#[tokio::test]
+async fn provider_without_a_model_still_fails_over() {
+    let h = harness("rate_limit").await;
+    submit(&h, "demo-ov12", Some("grok"), None);
+    h.wait_status("demo-ov12", &["waiting", "done"], 15000)
+        .await;
+    assert_eq!(
+        run_providers(&h, "demo-ov12"),
+        vec!["grok".to_string(), "claude".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn provider_without_a_model_falls_back_when_unusable() {
+    let h = harness("success").await;
+    set_provider(&h, "grok", |p| p.enabled = false);
+    submit(&h, "demo-ov13", Some("grok"), None);
+    h.wait_status("demo-ov13", &["waiting", "done"], 15000)
+        .await;
+    assert_eq!(run_providers(&h, "demo-ov13"), vec!["claude".to_string()]);
 }
 
 fn cli_setup() -> (tempfile::TempDir, std::path::PathBuf) {
