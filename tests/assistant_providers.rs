@@ -31,7 +31,7 @@ async fn harness(grok: &str, claude_on: bool, list: &[&str]) -> Harness {
 }
 
 fn ask(h: &Harness) -> String {
-    let upd = serde_json::json!({"message":{"chat":{"id":42},"text":"status please"}});
+    let upd = serde_json::json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"status please"}});
     let out = atr::telegram::handle_update(&h.shared, &upd).unwrap();
     out[0].text.clone()
 }

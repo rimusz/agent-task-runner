@@ -440,6 +440,12 @@ pub struct RawTelegram {
     pub bot_token_env: String,
     #[serde(default)]
     pub allowed_chat_ids: Vec<i64>,
+    /// When empty, `from.id` is checked against `allowed_chat_ids`.
+    #[serde(default)]
+    pub allowed_user_ids: Vec<i64>,
+    /// When empty, every task event is sent. Unknown names fail at load.
+    #[serde(default)]
+    pub events: Vec<String>,
     #[serde(default)]
     pub token_file: String,
     #[serde(default)]
@@ -498,6 +504,9 @@ pub struct TelegramConfig {
     pub enabled: bool,
     pub bot_token_env: String,
     pub allowed_chat_ids: Vec<i64>,
+    pub allowed_user_ids: Vec<i64>,
+    /// Canonical event names. Empty = send every task event.
+    pub events: Vec<String>,
     pub token_file: String,
     pub chat_id_file: String,
     pub prefix: String,
@@ -513,6 +522,8 @@ impl Default for TelegramConfig {
             enabled: false,
             bot_token_env: default_tg_token_env(),
             allowed_chat_ids: Vec::new(),
+            allowed_user_ids: Vec::new(),
+            events: Vec::new(),
             token_file: String::new(),
             chat_id_file: String::new(),
             prefix: default_tg_prefix(),
@@ -2586,6 +2597,8 @@ impl Config {
                         t.bot_token_env
                     },
                     allowed_chat_ids: t.allowed_chat_ids,
+                    allowed_user_ids: t.allowed_user_ids,
+                    events: crate::notify::parse_event_names(&t.events)?,
                     token_file: t.token_file,
                     chat_id_file: t.chat_id_file,
                     prefix: if t.prefix.is_empty() {
@@ -3463,6 +3476,42 @@ future_knob = true
     }
 
     #[test]
+    fn telegram_events_rejects_unknown_names() {
+        let err = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[telegram]
+events = ["failed", "nope"]
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown telegram.events"), "{err}");
+        assert!(err.contains("nope"), "{err}");
+
+        let cfg = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[telegram]
+events = ["failed", "needs_attention", "stalled", "failed"]
+allowed_user_ids = [7]
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.telegram.events,
+            vec!["failed", "needs_attention", "stalled"]
+        );
+        assert_eq!(cfg.telegram.allowed_user_ids, vec![7]);
+    }
+
+    #[test]
     fn known_field_names_cover_nested_tables() {
         let known = known_field_names();
         for k in [
@@ -3470,6 +3519,8 @@ future_knob = true
             "token_env",
             "max_parallel",
             "allowed_chat_ids",
+            "allowed_user_ids",
+            "events",
             "label",
             "backoff",
             "min_memory_mb",
@@ -3694,6 +3745,8 @@ kind = "claude"
         )
         .unwrap();
         assert_eq!(cfg.telegram.allowed_chat_ids, vec![42]);
+        assert!(cfg.telegram.allowed_user_ids.is_empty());
+        assert!(cfg.telegram.events.is_empty());
         assert!(!cfg.telegram.assistant.enabled);
         assert!(cfg.telegram.assistant.provider.is_empty());
         assert_eq!(cfg.telegram.assistant.timeout, Duration::from_secs(600));

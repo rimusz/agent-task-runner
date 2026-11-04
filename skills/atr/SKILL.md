@@ -61,6 +61,7 @@ Operators with a shell use the CLI; it shares the same code paths. `atr pause`/`
 | `/tasks [repo]` | `atr tasks [--repo R]` | `GET /dashboard.json` |
 | `/task <key>` | `atr tasks <key>` | `GET /tasks/<key>` |
 | `/add <prompt>` | `atr add <prompt>` | `POST /tasks` |
+| `/add <repo> <prompt>` | `atr add --repo <repo> <prompt>` | `POST /tasks` with `workspace=git` |
 | `/cancel <key> [force]` | `atr cancel <key> [--force]` | `POST /tasks/<key>/cancel` |
 | `/retry <key>` | `atr retry <key>` (fresh attempt: last consumed prompt is unconsumed so the scheduler can dispatch, wall clock restarts, provider re-picked from current config unless strictly pinned; on a `held` task also clears the hold and `after` list) | `POST /tasks/<key>/retry` |
 | `/pause` | `atr pause` | `POST /intake/pause` |
@@ -175,7 +176,7 @@ Custom OpenCode provider at `http://127.0.0.1:8091/v1`. `atr providers add spark
 
 ## Telegram
 
-Chat ids only in `telegram.allowed_chat_ids`. Token only `ATR_TELEGRAM_TOKEN` in `shadow.env`.
+Chat ids only in `telegram.allowed_chat_ids`. Token only `ATR_TELEGRAM_TOKEN` in `shadow.env`. Private chats only (`chat.type == private`); `from.id` must be in `allowed_user_ids` when set, else in `allowed_chat_ids`. Groups, supergroups and channels are ignored. `[telegram] events` (empty = all) filters task notifies; token-expiry, health, daily summary and command replies stay unfiltered. `/add <repo> <prompt>` is a git repo task when `<repo>` is an enabled `[[repo]]` name.
 
 ```bash
 atr telegram setup    # BotFather token + /start → allowed_chat_ids

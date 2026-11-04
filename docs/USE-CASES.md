@@ -92,6 +92,7 @@ atr telegram setup
 
 ```
 /add what is 2+2?
+/add demo fix the login
 /status
 /tasks
 ```
