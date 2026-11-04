@@ -209,6 +209,7 @@ fn ingest_file(shared: &Shared, inbox: &Path, path: &Path, max_bytes: u64) -> Re
             provider_hint: Some(spec.provider.trim().to_string()).filter(|s| !s.is_empty()),
             needs: spec.needs.clone(),
             after: spec.after.clone(),
+            agent: None,
         },
     )?;
     let _ = outcome;

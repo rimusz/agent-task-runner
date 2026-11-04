@@ -21,17 +21,17 @@ Watch
 • ui — dashboard link
 
 Work
-• add [repo] <prompt> — queue a task
+• add [repo|mini] [flags] <prompt> — queue (Confirm)
 • cancel / retry <id>
 
 Control
-• pause · resume · providers · repos
+• pause · resume · providers · repos · assistant
 • enable / disable · config · shadow
 • providers: add · enable · disable · move · model
 • config: get · set
 
 Prefix with / (e.g. /status).
-Plain text talks to the assistant when it is on; writes still need Confirm.";
+Plain text or @provider talks to the assistant; queued tasks need Confirm.";
 
 /// Marks an `Outgoing` text as Telegram HTML; stripped before sending.
 const HTML_MARK: &str = "\u{2063}html\u{2063}";
@@ -1011,7 +1011,11 @@ pub const BOT_COMMANDS: &[(&str, &str)] = &[
     ("doctor", "Health checks (warn/FAIL only)"),
     ("tokens", "GitHub tokens: state, days left"),
     ("usage", "Spend and cache"),
-    ("add", "Queue a task: /add [repo] <prompt>"),
+    (
+        "add",
+        "Queue a task: /add [repo|mini] [--provider] [--model] [--agent] <prompt>",
+    ),
+    ("assistant", "Chat assistant provider: /assistant [name]"),
     ("ui", "Dashboard link"),
     ("help", "All commands"),
 ];
@@ -1126,8 +1130,10 @@ pub fn handle_update(shared: &Shared, update: &Value) -> Result<Vec<Outgoing>> {
     }
     if text.starts_with('/') {
         Ok(vec![handle_command(shared, chat, text)])
+    } else if let Some((name, rest)) = parse_at_provider(text) {
+        Ok(vec![handle_at_provider(shared, chat, name, rest)])
     } else if cfg.assistant.enabled {
-        Ok(vec![handle_assistant(shared, chat, text)])
+        Ok(vec![handle_assistant(shared, chat, text, None)])
     } else {
         Ok(vec![assistant_off_outgoing(chat)])
     }
@@ -1186,7 +1192,8 @@ fn handle_command(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
                 markup: None,
             }
         }
-        "/add" => handle_add(shared, chat, text),
+        "/add" => propose_add(shared, chat, text),
+        "/assistant" => handle_assistant_cmd(shared, chat, &mut parts),
         "/usage" => {
             let a = parts.next();
             let b = parts.next();
@@ -1289,23 +1296,178 @@ fn handle_command(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
 }
 
 fn add_usage() -> String {
-    "usage: /add <prompt>   (answer-only; no workspace)\n\
-     usage: /add <repo> <prompt>   (repo task)"
+    "usage: /add [repo|mini] [--provider P] [--model M] [--agent A] <prompt>\n\
+     repo = enabled [[repo]] name (git worktree)\n\
+     mini = ops dir (telegram.mini_dir, default ~/atr-ops)\n\
+     omit workspace = answer-only"
         .into()
 }
 
-fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AddWorkspace {
+    None,
+    Mini,
+    Repo(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AddSpec {
+    workspace: AddWorkspace,
+    provider: Option<String>,
+    model: Option<String>,
+    agent: Option<String>,
+    prompt: String,
+}
+
+fn parse_add_command(cfg: &Config, raw: &str) -> std::result::Result<AddSpec, String> {
     let rest = raw
         .split_once(char::is_whitespace)
         .map(|(_, r)| r.trim())
         .unwrap_or("");
     if rest.is_empty() {
-        return Outgoing {
-            chat_id: chat,
-            text: add_usage(),
-            markup: None,
-        };
+        return Err(add_usage());
     }
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    let mut workspace = AddWorkspace::None;
+    let mut provider = None;
+    let mut model = None;
+    let mut agent = None;
+    let mut i = 0;
+    let mut saw_workspace = false;
+    while i < tokens.len() {
+        let tok = tokens[i];
+        if let Some(flag) = tok.strip_prefix("--") {
+            if flag.is_empty() || tok == "--" {
+                return Err(format!("unknown flag {tok}"));
+            }
+            let value = tokens.get(i + 1).copied().filter(|v| !v.starts_with("--"));
+            match flag {
+                "provider" => {
+                    let Some(v) = value else {
+                        return Err("usage: --provider <name>".into());
+                    };
+                    provider = Some(v.to_string());
+                    i += 2;
+                }
+                "model" => {
+                    let Some(v) = value else {
+                        return Err("usage: --model <id>".into());
+                    };
+                    model = Some(v.to_string());
+                    i += 2;
+                }
+                "agent" => {
+                    let Some(v) = value else {
+                        return Err("usage: --agent <name>".into());
+                    };
+                    agent = Some(v.to_string());
+                    i += 2;
+                }
+                _ => return Err(format!("unknown flag --{flag}")),
+            }
+            continue;
+        }
+        if tok.starts_with('-') {
+            return Err(format!("unknown flag {tok}"));
+        }
+        if !saw_workspace {
+            if tok == "mini" {
+                workspace = AddWorkspace::Mini;
+                saw_workspace = true;
+                i += 1;
+                continue;
+            }
+            if cfg.repo_by_name(tok).is_some() {
+                workspace = AddWorkspace::Repo(tok.to_string());
+                saw_workspace = true;
+                i += 1;
+                continue;
+            }
+        }
+        break;
+    }
+    let prompt = tokens[i..].join(" ");
+    if prompt.is_empty() {
+        return Err(add_usage());
+    }
+    if let Some(name) = provider.as_deref() {
+        if cfg.provider(name).is_none() {
+            let names: Vec<&str> = cfg.providers.iter().map(|p| p.name.as_str()).collect();
+            return Err(format!(
+                "unknown provider {name}; configured: {}",
+                names.join(", ")
+            ));
+        }
+    }
+    if let Err(e) =
+        crate::task::validate_overrides(cfg, provider.as_deref(), model.as_deref(), &[] as &[&str])
+    {
+        return Err(format!("{e:#}"));
+    }
+    if let Some(a) = agent.as_deref() {
+        let Some(pname) = provider.as_deref() else {
+            return Err("--agent requires --provider".into());
+        };
+        let kind = cfg.provider(pname).map(|p| p.kind.as_str()).unwrap_or("");
+        if !crate::deny::agent_supported(kind) {
+            return Err(crate::deny::agent_unsupported_message(kind, pname));
+        }
+        if a.starts_with('-') || a.chars().any(char::is_control) {
+            return Err(format!("invalid --agent {a}"));
+        }
+    }
+    if let AddWorkspace::Repo(name) = &workspace {
+        if let Some(entry) = cfg.repo_by_name(name) {
+            if !entry.enabled {
+                return Err(format!("repo {name} is disabled"));
+            }
+        }
+    }
+    Ok(AddSpec {
+        workspace,
+        provider,
+        model,
+        agent,
+        prompt,
+    })
+}
+
+fn add_summary(cfg: &Config, spec: &AddSpec) -> String {
+    let workspace = match &spec.workspace {
+        AddWorkspace::None => "answer-only".to_string(),
+        AddWorkspace::Mini => {
+            format!("mini ({})", cfg.telegram.mini_dir)
+        }
+        AddWorkspace::Repo(name) => format!("repo {name}"),
+    };
+    let provider = spec.provider.as_deref().unwrap_or("(default)");
+    let model = spec.model.as_deref().unwrap_or("(default)");
+    let agent = spec.agent.as_deref().unwrap_or("(none)");
+    let preview: String = spec.prompt.chars().take(200).collect();
+    format!(
+        "Queue this task?\n\nworkspace: {workspace}\nprovider: {provider}\nmodel: {model}\nagent: {agent}\nprompt: {preview}"
+    )
+}
+
+fn propose_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
+    let cfg = shared.config.read().unwrap().clone();
+    match parse_add_command(&cfg, raw) {
+        Ok(spec) => confirm(
+            chat,
+            Action::Add {
+                raw: raw.to_string(),
+            },
+            &add_summary(&cfg, &spec),
+        ),
+        Err(e) => Outgoing {
+            chat_id: chat,
+            text: e,
+            markup: None,
+        },
+    }
+}
+
+fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
     let cfg = shared.config.read().unwrap().clone();
     if !cfg.intake_allows(crate::task::SourceKind::Telegram) {
         return Outgoing {
@@ -1321,30 +1483,17 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
             markup: None,
         };
     }
-    let first = rest.split_whitespace().next().unwrap_or("");
-    let repo_entry = cfg.repo_by_name(first);
-    if let Some(entry) = repo_entry.as_ref() {
-        if !entry.enabled {
+    let spec = match parse_add_command(&cfg, raw) {
+        Ok(s) => s,
+        Err(e) => {
             return Outgoing {
                 chat_id: chat,
-                text: format!("repo {first} is disabled"),
+                text: e,
                 markup: None,
-            };
+            }
         }
-        let prompt = rest[first.len()..].trim();
-        if prompt.is_empty() {
-            return Outgoing {
-                chat_id: chat,
-                text: add_usage(),
-                markup: None,
-            };
-        }
-    }
-    let prompt = if let Some(entry) = repo_entry.as_ref() {
-        rest[entry.name.len()..].trim()
-    } else {
-        rest
     };
+    let prompt = spec.prompt.clone();
     let title: String = prompt
         .lines()
         .next()
@@ -1362,19 +1511,35 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
             }
         }
     };
-    let (workspace_kind, repo_path, allow_empty, kind_label) = match repo_entry {
-        Some(entry) => (
-            "git",
-            Some(entry.path.display().to_string()),
-            false,
-            format!("repo {}", entry.name),
-        ),
-        None => ("none", None, true, "answer-only".into()),
+    let (workspace_kind, repo_path, allow_empty, kind_label) = match &spec.workspace {
+        AddWorkspace::Repo(name) => {
+            let entry = cfg.repo_by_name(name).expect("validated");
+            (
+                "git",
+                Some(entry.path.display().to_string()),
+                false,
+                format!("repo {name}"),
+            )
+        }
+        AddWorkspace::Mini => match ensure_mini_dir(&cfg) {
+            Ok(p) => ("dir", Some(p.display().to_string()), false, "mini".into()),
+            Err(e) => {
+                return Outgoing {
+                    chat_id: chat,
+                    text: format!("{e:#}"),
+                    markup: None,
+                }
+            }
+        },
+        AddWorkspace::None => ("none", None, true, "answer-only".into()),
     };
+    let model = spec.model.clone();
+    let provider_hint = spec.provider.clone();
+    let agent = spec.agent.clone();
     drop(cfg);
-    match shared.submit_with(
+    match shared.submit_with_model(
         &key,
-        prompt,
+        &prompt,
         "telegram",
         repo_path.as_deref(),
         None,
@@ -1387,10 +1552,12 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
             source_kind: Some("telegram".into()),
             title: Some(title),
             allow_empty_repo: allow_empty,
-            provider_hint: None,
+            provider_hint: provider_hint.clone(),
             needs: Vec::new(),
             after: Vec::new(),
+            agent,
         },
+        model.as_deref(),
     ) {
         Ok(SubmitOutcome::Accepted) => Outgoing {
             chat_id: chat,
@@ -1445,7 +1612,7 @@ pub fn assistant_stable_suffix() -> String {
 You are answering in Telegram about atr.\n\
 Never use the shell, edit files, or run git/gh. Do not write config.toml or shadow.env.\n\
 Propose changes only as `ATR: /command …` lines (same commands as the Telegram bot / CLI).\n\
-atr will show Confirm before applying anything (config as old → new; /add as the proposed task).\n\n\
+atr will show Confirm before applying anything (config as old → new; /add as workspace / provider / model / agent / prompt).\n\n\
 ## atr skill\n\n{}\n",
         crate::skill::SKILL_MD
     )
@@ -1458,6 +1625,107 @@ pub fn apply_assistant_timeout(
     let mut p = provider.clone();
     p.run_timeout = timeout;
     p
+}
+
+pub fn ensure_mini_dir(cfg: &Config) -> Result<PathBuf> {
+    let path = crate::config::expand_path(&cfg.telegram.mini_dir);
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+fn assistant_pref_key(chat: i64) -> String {
+    format!("telegram.assistant.{chat}")
+}
+
+fn chat_assistant_provider(shared: &Shared, chat: i64) -> Option<String> {
+    shared
+        .db
+        .meta_get(&assistant_pref_key(chat))
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn parse_at_provider(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix('@')?;
+    let (name, tail) = rest
+        .split_once(char::is_whitespace)
+        .map(|(n, t)| (n, t.trim()))
+        .unwrap_or((rest, ""));
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    Some((name, tail))
+}
+
+fn handle_at_provider(shared: &Shared, chat: i64, name: &str, rest: &str) -> Outgoing {
+    let cfg = shared.config.read().unwrap().clone();
+    if cfg.provider(name).is_none() {
+        let names: Vec<&str> = cfg.providers.iter().map(|p| p.name.as_str()).collect();
+        return Outgoing {
+            chat_id: chat,
+            text: format!("unknown provider {name}; configured: {}", names.join(", ")),
+            markup: None,
+        };
+    }
+    if rest.is_empty() {
+        return Outgoing {
+            chat_id: chat,
+            text: format!("usage: @{name} <message>"),
+            markup: None,
+        };
+    }
+    if !cfg.telegram.assistant.enabled {
+        return assistant_off_outgoing(chat);
+    }
+    handle_assistant(shared, chat, rest, Some(name))
+}
+
+fn handle_assistant_cmd<'a>(
+    shared: &Shared,
+    chat: i64,
+    parts: &mut impl Iterator<Item = &'a str>,
+) -> Outgoing {
+    let cfg = shared.config.read().unwrap().clone();
+    match parts.next() {
+        None => {
+            let current = chat_assistant_provider(shared, chat).unwrap_or_else(|| {
+                format!("(config default: {})", cfg.telegram.assistant.display())
+            });
+            Outgoing {
+                chat_id: chat,
+                text: format!("assistant provider: {current}"),
+                markup: None,
+            }
+        }
+        Some(name) => {
+            if cfg.provider(name).is_none() {
+                let names: Vec<&str> = cfg.providers.iter().map(|p| p.name.as_str()).collect();
+                return Outgoing {
+                    chat_id: chat,
+                    text: format!("unknown provider {name}; configured: {}", names.join(", ")),
+                    markup: None,
+                };
+            }
+            if let Err(e) = shared.db.meta_set(&assistant_pref_key(chat), name) {
+                return Outgoing {
+                    chat_id: chat,
+                    text: format!("{e:#}"),
+                    markup: None,
+                };
+            }
+            Outgoing {
+                chat_id: chat,
+                text: format!("assistant provider → {name} (this chat)"),
+                markup: None,
+            }
+        }
+    }
 }
 
 pub fn ensure_assistant_repo(cfg: &Config) -> Result<PathBuf> {
@@ -1473,7 +1741,12 @@ pub fn ensure_assistant_repo(cfg: &Config) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn handle_assistant(shared: &Shared, chat: i64, text: &str) -> Outgoing {
+fn handle_assistant(
+    shared: &Shared,
+    chat: i64,
+    text: &str,
+    provider_override: Option<&str>,
+) -> Outgoing {
     let cfg = shared.config.read().unwrap().clone();
     let ast = &cfg.telegram.assistant;
     if !ast.enabled {
@@ -1496,14 +1769,20 @@ fn handle_assistant(shared: &Shared, chat: i64, text: &str) -> Outgoing {
         Ok(p) => p,
         Err(e) => return fail(chat, e),
     };
-    // `providers` (ordered, availability-aware) wins over the single pin.
-    let pin = crate::scheduler::assistant_provider_now(shared).unwrap_or_default();
+    let pin = provider_override
+        .map(str::to_string)
+        .or_else(|| chat_assistant_provider(shared, chat))
+        .or_else(|| crate::scheduler::assistant_provider_now(shared))
+        .unwrap_or_default();
     let existing_sid = if pin.is_empty() {
         None
     } else {
         shared.db.task_session(&key, &pin).ok().flatten()
     };
-    match shared.submit(
+    let hint = provider_override
+        .map(str::to_string)
+        .or_else(|| chat_assistant_provider(shared, chat));
+    match shared.submit_with(
         &key,
         text,
         "telegram",
@@ -1511,6 +1790,10 @@ fn handle_assistant(shared: &Shared, chat: i64, text: &str) -> Outgoing {
         None,
         false,
         true,
+        crate::app::SubmitOpts {
+            provider_hint: hint,
+            ..Default::default()
+        },
     ) {
         Ok(outcome) => {
             if !pin.is_empty() {
@@ -1564,6 +1847,7 @@ fn is_driveable_command(cmd: &str) -> bool {
             | "/tasks"
             | "/task"
             | "/add"
+            | "/assistant"
             | "/usage"
             | "/ui"
             | "/shadow"
@@ -1636,11 +1920,7 @@ pub fn assistant_reply(shared: &Shared, key: &str, run_id: i64, outcome: &str) -
     }];
     for cmd in cmds {
         if cmd == "/add" || cmd.starts_with("/add ") {
-            outs.push(confirm(
-                chat,
-                Action::Add { raw: cmd.clone() },
-                &format!("Queue this task?\n\n{cmd}"),
-            ));
+            outs.push(propose_add(shared, chat, &cmd));
         } else {
             outs.push(handle_command(shared, chat, &cmd));
         }
@@ -3278,9 +3558,21 @@ cli = "/bin/true"
             .iter()
             .map(|c| c["command"].as_str().unwrap())
             .collect();
-        for c in ["status", "doctor", "tokens", "tasks", "cancel", "help"] {
+        for c in [
+            "status",
+            "doctor",
+            "tokens",
+            "tasks",
+            "cancel",
+            "help",
+            "add",
+            "assistant",
+        ] {
             assert!(names.contains(&c), "{c}");
         }
+        assert!(!names.iter().any(|c| *c == "sh" || *c == "shell"));
+        assert!(!is_driveable_command("/sh"));
+        assert!(!COMMANDS.contains("/sh"));
         assert!(COMMANDS.contains("doctor") && COMMANDS.contains("tokens"));
         assert_eq!(
             doctor_markup()["inline_keyboard"][0][0]["callback_data"],
@@ -3578,19 +3870,28 @@ cli = "/bin/true"
         );
     }
 
+    fn add_and_confirm(shared: &Shared, text: &str) -> String {
+        confirm_and_apply(shared, text)
+    }
+
     #[test]
     fn add_command_queues_answer_only_task() {
         std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
         let shared = harness_shared();
         let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/add what is 2+2?"}});
         let out = handle_update(&shared, &upd).unwrap();
-        assert!(out[0].text.contains("queued"), "{}", out[0].text);
+        assert!(out[0].text.contains("Queue this task?"), "{}", out[0].text);
+        assert!(out[0].text.contains("answer-only"), "{}", out[0].text);
+        assert!(out[0].markup.is_some());
+        assert!(shared.db.list_tasks().unwrap().is_empty());
+        let body = add_and_confirm(&shared, "/add what is 2+2?");
+        assert!(body.contains("queued"), "{body}");
         let tasks = shared.db.list_tasks().unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].issue, None);
         assert_eq!(tasks[0].workspace_kind, "none");
         assert_eq!(tasks[0].source_kind, "telegram");
-        assert!(out[0].text.contains("answer-only"), "{}", out[0].text);
+        assert!(body.contains("answer-only"), "{body}");
     }
 
     #[test]
@@ -3619,8 +3920,12 @@ enabled = false
             .path;
         let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/add demo fix the login"}});
         let out = handle_update(&shared, &upd).unwrap();
-        assert!(out[0].text.contains("queued"), "{}", out[0].text);
+        assert!(out[0].text.contains("Queue this task?"), "{}", out[0].text);
         assert!(out[0].text.contains("repo demo"), "{}", out[0].text);
+        assert!(shared.db.list_tasks().unwrap().is_empty());
+        let body = add_and_confirm(&shared, "/add demo fix the login");
+        assert!(body.contains("queued"), "{body}");
+        assert!(body.contains("repo demo"), "{body}");
         let tasks = shared.db.list_tasks().unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].workspace_kind, "git");
@@ -3628,7 +3933,7 @@ enabled = false
         assert_eq!(tasks[0].repo.as_deref(), Some(root.to_str().unwrap()));
         assert!(tasks[0].provider_hint.is_empty());
         assert!(tasks[0].model_override.is_empty());
-        assert!(!out[0].text.contains("answer-only"), "{}", out[0].text);
+        assert!(!body.contains("answer-only"), "{body}");
     }
 
     #[test]
@@ -3645,6 +3950,8 @@ github = "o/demo"
         let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/add what is 2+2?"}});
         let out = handle_update(&shared, &upd).unwrap();
         assert!(out[0].text.contains("answer-only"), "{}", out[0].text);
+        assert!(shared.db.list_tasks().unwrap().is_empty());
+        let _ = add_and_confirm(&shared, "/add what is 2+2?");
         let tasks = shared.db.list_tasks().unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].workspace_kind, "none");
@@ -3667,6 +3974,173 @@ enabled = false
         let out = handle_update(&shared, &upd).unwrap();
         assert!(out[0].text.contains("disabled"), "{}", out[0].text);
         assert!(shared.db.list_tasks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_add_flags_mini_and_rejects_bad_values() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared_with(
+            r#"
+mini_dir = "{root}/ops"
+[[repo]]
+name = "demo"
+path = "{root}"
+github = "o/demo"
+enabled = true
+[[provider]]
+name = "grok"
+kind = "grok"
+cli = "/bin/true"
+"#,
+        );
+        let cfg = shared.config.read().unwrap().clone();
+        let spec = parse_add_command(
+            &cfg,
+            "/add mini --provider claude --model claude-sonnet-5-5 --agent ops fix login",
+        )
+        .unwrap();
+        assert_eq!(spec.workspace, AddWorkspace::Mini);
+        assert_eq!(spec.provider.as_deref(), Some("claude"));
+        assert_eq!(spec.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(spec.agent.as_deref(), Some("ops"));
+        assert_eq!(spec.prompt, "fix login");
+        let repo = parse_add_command(&cfg, "/add demo --provider grok ship it").unwrap();
+        assert_eq!(repo.workspace, AddWorkspace::Repo("demo".into()));
+        assert_eq!(repo.provider.as_deref(), Some("grok"));
+        assert!(parse_add_command(&cfg, "/add --provider nope hi")
+            .unwrap_err()
+            .contains("unknown provider"));
+        assert!(parse_add_command(&cfg, "/add --model claude-sonnet-5-5 hi")
+            .unwrap_err()
+            .contains("provider"));
+        assert!(parse_add_command(&cfg, "/add --provider claude --agent ops hi").is_ok());
+        assert!(parse_add_command(&cfg, "/add --provider grok --agent ops hi").is_ok());
+        let err = parse_add_command(&cfg, "/add --provider claude --banana x hi").unwrap_err();
+        assert!(err.contains("unknown flag"), "{err}");
+        let err = parse_add_command(&cfg, "/add --agent ops hi").unwrap_err();
+        assert!(err.contains("--agent requires --provider"), "{err}");
+        let err = parse_add_command(&cfg, "/add --provider claude --model nope hi").unwrap_err();
+        assert!(
+            err.to_lowercase().contains("model") || err.contains("nope"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn add_mini_and_provider_pin_queue_after_confirm() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared_with(
+            r#"
+mini_dir = "{root}/ops"
+"#,
+        );
+        let body = add_and_confirm(
+            &shared,
+            "/add mini --provider claude --model claude-sonnet-5-5 --agent ops do the thing",
+        );
+        assert!(body.contains("queued"), "{body}");
+        assert!(body.contains("mini"), "{body}");
+        let tasks = shared.db.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].workspace_kind, "dir");
+        assert!(tasks[0].repo.as_deref().unwrap().ends_with("/ops"));
+        assert_eq!(tasks[0].provider_hint, "claude");
+        assert_eq!(tasks[0].model_override, "claude-sonnet-5-5");
+        assert_eq!(shared.db.task_agent(&tasks[0].key).unwrap(), "ops");
+        assert!(shared
+            .config
+            .read()
+            .unwrap()
+            .telegram
+            .mini_dir
+            .contains("ops"));
+        assert!(std::path::Path::new(tasks[0].repo.as_deref().unwrap()).is_dir());
+    }
+
+    #[test]
+    fn add_agent_rejected_on_cursor() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared_with(
+            r#"
+[[provider]]
+name = "cursor"
+kind = "cursor"
+cli = "/bin/true"
+"#,
+        );
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/add --provider cursor --agent ops hi"}});
+        let out = handle_update(&shared, &upd).unwrap();
+        assert!(out[0].text.contains("not supported"), "{}", out[0].text);
+        assert!(out[0].markup.is_none());
+        assert!(shared.db.list_tasks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn typed_add_confirm_rejected_from_wrong_user_or_chat() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let upd = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/add what is 2+2?"}});
+        let out = handle_update(&shared, &upd).unwrap();
+        let yes = out[0].markup.as_ref().unwrap()["inline_keyboard"][0][0]["callback_data"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let stranger = json!({"callback_query":{"from":{"id":99},"data":yes,"message":{"chat":{"id":42,"type":"private"}}}});
+        assert!(handle_update(&shared, &stranger).unwrap().is_empty());
+        assert!(shared.db.list_tasks().unwrap().is_empty());
+        let other = json!({"callback_query":{"from":{"id":42},"data":yes,"message":{"chat":{"id":99,"type":"private"}}}});
+        assert!(handle_update(&shared, &other).unwrap().is_empty());
+        assert!(shared.db.list_tasks().unwrap().is_empty());
+        let ok = json!({"callback_query":{"from":{"id":42},"data":yes,"message":{"chat":{"id":42,"type":"private"}}}});
+        assert!(handle_update(&shared, &ok).unwrap()[0]
+            .text
+            .contains("queued"));
+        assert_eq!(shared.db.list_tasks().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn at_provider_routes_one_message_and_assistant_persists() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared_with(
+            r#"
+[telegram.assistant]
+enabled = true
+provider = "grok"
+[[provider]]
+name = "grok"
+kind = "grok"
+cli = "/bin/true"
+"#,
+        );
+        let show = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/assistant"}});
+        let out = handle_update(&shared, &show).unwrap();
+        assert!(out[0].text.contains("config default"), "{}", out[0].text);
+        let set = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/assistant claude"}});
+        let out = handle_update(&shared, &set).unwrap();
+        assert!(out[0].text.contains("claude"), "{}", out[0].text);
+        let show = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/assistant"}});
+        assert!(handle_update(&shared, &show).unwrap()[0]
+            .text
+            .contains("claude"));
+        let bad = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/assistant nope"}});
+        assert!(handle_update(&shared, &bad).unwrap()[0]
+            .text
+            .contains("unknown provider"));
+
+        let at = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"@grok how do I add kimi?"}});
+        let out = handle_update(&shared, &at).unwrap();
+        assert!(out[0].text.contains("on it"), "{}", out[0].text);
+        let t = shared.db.get_task("tg42").unwrap().unwrap();
+        assert_eq!(t.provider_hint, "grok");
+        let pending = shared.db.pending_messages("tg42").unwrap();
+        assert!(pending[0].body.contains("kimi"), "{}", pending[0].body);
+        assert!(!pending[0].body.contains("@grok"), "{}", pending[0].body);
+
+        let unknown = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"@nope hi"}});
+        assert!(handle_update(&shared, &unknown).unwrap()[0]
+            .text
+            .contains("unknown provider"));
+        assert!(is_driveable_command("/assistant"));
     }
 
     #[test]
@@ -3847,11 +4321,8 @@ enabled = false
             "{}",
             confirm.text
         );
-        assert!(
-            confirm.text.contains("/add what is 2+2?"),
-            "{}",
-            confirm.text
-        );
+        assert!(confirm.text.contains("what is 2+2?"), "{}", confirm.text);
+        assert!(confirm.text.contains("workspace:"), "{}", confirm.text);
         assert!(yes.starts_with("y:"), "{yes}");
         assert!(no.starts_with("n:"), "{no}");
         assert!(

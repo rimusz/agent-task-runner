@@ -192,6 +192,7 @@ const TELEGRAM: &[&str] = &[
     "/tasks",
     "/task",
     "/add",
+    "/assistant",
     "/cancel",
     "/retry",
     "/usage",
@@ -433,6 +434,7 @@ fn readme_headings_and_commands_match_help() {
 
     const IGNORE_SLASH: &[&str] = &[
         "/command",
+        "/sh",
         "/newbot",
         "/connect",
         "/review",

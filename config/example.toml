@@ -167,6 +167,14 @@ chat_id_file = ""
 prefix = "atr:"
 notify_interval = "20s"
 daily_summary = ""
+# Plain-dir ops workspace for `/add mini` (created if missing).
+mini_dir = "~/atr-ops"
+# Best-effort deny for Telegram-originated runs and mini. Empty rules =
+# built-in defaults. wrapper (off) PATH-prepends git/rm/launchctl/sudo shims.
+# Not a guarantee — GitHub branch protection is the hard backstop.
+# [telegram.deny]
+# rules = []
+# wrapper = false
 
 # Free-text (not a /command) from an allowed chat. /help lists commands.
 [telegram.assistant]

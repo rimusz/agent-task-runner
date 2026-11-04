@@ -416,6 +416,7 @@ pub fn create(shared: &Shared, spec: CreateIn) -> Result<CreateOut, CreateError>
             provider_hint: spec.provider.clone(),
             needs: spec.needs.clone(),
             after: spec.after.clone(),
+            agent: None,
         },
         spec.model.as_deref(),
     ) {

@@ -185,9 +185,22 @@ owner's env var, ok/warn/fail and days left without printing values.
 - Groups / channels silent: the bot only accepts private chats. A group that
   happens to share an allowed id is dropped (debug log).
 - Free text not answered: `[telegram.assistant] enabled = true`.
-- Assistant proposed `/add` but nothing queued: that path waits for
-  **Confirm** from an allowed private chat. Cancel or a stale button
-  (2 minutes or after a restart) is a no-op.
+- `@nope …` or `/assistant nope` / `/add --provider nope`: the name must be
+  a configured `[[provider]]`. Unknown `--model`, `--agent`, or other flags
+  fail fast with a usage reply and do not queue.
+- `--agent` on cursor, codex, or spark: rejected (only grok and claude
+  accept `--agent`).
+- Typed `/add` or an assistant-proposed `/add` but nothing queued: every
+  queue path waits for **Confirm** from an allowed private chat and user.
+  Cancel or a stale button (2 minutes or after a restart) is a no-op.
+  Plain Q&A and `@provider` questions do not need Confirm.
+- `/add mini` folder missing: atr creates `telegram.mini_dir` (default
+  `~/atr-ops`). It is a plain directory, not a git worktree.
+- Agent still ran `rm -rf` / force-push: deny rules are best-effort (grok
+  `--deny`, claude `--disallowedTools`, codex workspace-write). cursor-agent
+  and spark have no deny flag. Optional `[telegram.deny] wrapper = true`
+  installs PATH shims. GitHub branch protection is the hard backstop.
+- There is no `/sh`. Telegram never execs a shell command you type.
 - Token-looking text in `/status`, `/config`, assistant replies or
   notifies is redacted (`ghp_`/`github_pat_`, long `sk-` keys, Telegram
   bot tokens, `KEY=`/`TOKEN=`/`SECRET=`/`PASSWORD=`, Bearer). Ordinary

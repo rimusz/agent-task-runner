@@ -220,6 +220,18 @@ allowed_chat_ids = [123456789]
 # Empty = every task event (today). Unknown names fail at load.
 # Live Mini: only problems.
 events = ["failed", "needs_attention", "stalled"]
+# Plain-dir ops workspace for `/add mini` (created if missing). Not a git
+# worktree; separate from repo worktrees and the assistant throwaway repo.
+mini_dir = "~/atr-ops"
+
+# Best-effort deny rules for Telegram-originated runs and the mini dir.
+# Empty `rules` uses the built-in defaults (rm -rf, launchctl bootout/unload,
+# git push --force/-f, git push --delete, git branch -D of main/develop/
+# rimas-develop, sudo). `wrapper` (off) PATH-prepends git/rm/launchctl/sudo
+# shims. Not a hard guarantee — GitHub branch protection is the backstop.
+# [telegram.deny]
+# rules = []
+# wrapper = false
 ```
 
 `events` filters task-lifecycle Telegram notifies (`start`, `finished`,
@@ -235,15 +247,50 @@ The bot accepts updates only from a **private** chat whose `chat.id` is in
 channels are ignored. In a private chat `chat.id` equals the user id, so
 today's `allowed_chat_ids` keep working.
 
-`/add <prompt>` is still answer-only (no workspace). `/add <repo> <prompt>`
-submits a git repo task when `<repo>` is an enabled `[[repo]]` name, with
-the same workspace and verify path as `atr add --repo` / a GitHub-issue
-task (branch-only; no PR). A disabled repo is rejected. A typed `/add` from
-an allowed private chat queues immediately. An assistant-proposed
-`ATR: /add …` is posted with **Confirm** / **Cancel** and queued only after
-Confirm from an allowed private chat and user. Cancel or a stale button
-(pending proposals are keyed by id, expire after 2 minutes, and are
-dropped on restart) is a no-op with a short reply.
+There is no `/sh` (or any other Telegram path that execs a shell).
+
+`/add [repo|mini] [--provider P] [--model M] [--agent A] <prompt>` queues a
+task after **Confirm**. Omit the workspace for answer-only. `mini` uses
+`telegram.mini_dir` (default `~/atr-ops`): a plain directory, created if
+missing, stored as workspace kind `dir`. `<repo>` must be an enabled
+`[[repo]]` name (same git worktree and verify path as `atr add --repo` /
+a GitHub-issue task; branch-only, no PR). A disabled repo is rejected.
+`--provider` must be a configured `[[provider]]` name (typically grok,
+claude, codex, cursor, spark). `--model` needs `--provider` and uses the
+v0.1.41 strict-pin path (`submit_with_model`, `provider_hint` plus
+`model_override`). `--provider` alone is a soft hint. `--agent` needs
+`--provider` and is passed as `--agent` on grok and claude; other kinds
+are rejected with a clear reply (never ignored). Unknown provider, model,
+agent, or flag values fail fast.
+
+Every Telegram path that queues a task (typed `/add`, an assistant-proposed
+`ATR: /add …`) posts a summary (workspace, provider, model, agent, prompt
+preview) with **Confirm** / **Cancel**. It queues only after Confirm from
+an allowed private chat and user. Cancel or a stale button (pending
+proposals are keyed by id, expire after 2 minutes, and are dropped on
+restart) is a no-op with a short reply. Plain assistant Q&A (including
+`@provider …`) does not need Confirm.
+
+`@claude …` / `@codex …` (any configured provider name) runs that one
+assistant turn on that provider. `/assistant <provider>` persists the
+chat's default assistant provider in the state db; `/assistant` with no
+argument shows it. The config default stays empty (= first available /
+`telegram.assistant.providers` / `provider`; typically grok when that is
+first).
+
+`[telegram.deny]` is applied when atr builds the CLI command for a
+Telegram-originated run (and for the mini workspace at minimum):
+
+| kind | mapping |
+|---|---|
+| grok | `--deny <rule>` per rule |
+| claude | `--disallowedTools Bash(<rule>:*)` |
+| codex | `-s workspace-write` (replaces `danger-full-access`) |
+| cursor, spark / opencode | no vendor flag; optional `wrapper` shims still apply |
+
+These flags and shims are best-effort. A vendor CLI can ignore them.
+**GitHub branch protection is the hard backstop** for force-push and
+branch deletion. Do not treat deny rules as a guarantee.
 
 Every outbound Telegram text (assistant replies, task output, notifications,
 `/config` and `/status`) is run through `redact_secrets`: GitHub

@@ -81,6 +81,8 @@ pub struct SubmitOpts {
     pub needs: Vec<String>,
     /// Task keys this one waits for (`after:`). Empty = none.
     pub after: Vec<String>,
+    /// Optional CLI `--agent` for grok/claude (Telegram `/add --agent`).
+    pub agent: Option<String>,
 }
 
 impl Shared {
@@ -246,6 +248,14 @@ impl Shared {
         }
         if let Some(m) = model {
             self.db.set_model_override(key, m)?;
+        }
+        if let Some(a) = opts
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            self.db.set_task_agent(key, a)?;
         }
         if !opts.needs.is_empty() {
             let needs = crate::task::parse_needs(&opts.needs)?;

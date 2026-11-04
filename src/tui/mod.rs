@@ -1440,6 +1440,7 @@ pub(crate) fn enqueue_turn(
             provider_hint: launch_pin.map(|s| s.to_string()),
             needs: Vec::new(),
             after: Vec::new(),
+            agent: None,
         },
     )?;
     if shared.db.get_task(key)?.is_some_and(|t| t.role == "plan") {

@@ -875,6 +875,7 @@ async fn serve_dispatch_skips_tui_session() {
                     provider_hint: Some("claude".into()),
                     needs: Vec::new(),
                     after: Vec::new(),
+                    agent: None,
                 },
             )
             .unwrap()

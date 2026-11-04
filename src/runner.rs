@@ -200,6 +200,15 @@ pub async fn run_cli(
     if dir_workspace {
         crate::providers::apply_dir_confinement(provider, &mut spec, worktree);
     }
+    if let Ok(Some(task)) = db.get_task(task_key) {
+        if crate::deny::applies(cfg, &task) {
+            crate::deny::apply_to_spec(
+                &provider.kind,
+                &mut spec,
+                &crate::deny::effective_rules(&cfg.telegram.deny),
+            );
+        }
+    }
     tracing::info!(
         provider = %provider.name,
         program = %spec.program.display(),
