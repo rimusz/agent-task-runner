@@ -6,6 +6,9 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
+/// Verify output kept per check in a handoff block (default `max_bytes`: 16 KiB).
+const HANDOFF_VERIFY_OUTPUT_BYTES: usize = 4000;
+
 /// Persist stream events that can later seed a provider-switch brief.
 pub fn should_store_event(value: &Value) -> bool {
     if !value.is_object() {
@@ -587,8 +590,11 @@ pub fn build_for_switch(
     let test_output = test_output_from_events(&all_events);
     let notes = provider_written_notes(worktree);
     let (git_status, git_stat, git_diff) = git_snapshot(worktree, &cfg.repo_default_branch);
+    // Verify output can be far larger than the whole block; uncapped, it would
+    // push this section and everything after it out in `pack_sections`.
     let verify = outgoing_run_id
-        .and_then(|id| db.verify_summary_for_run(id).ok())
+        .and_then(|id| db.verify_checks_for_run(id).ok())
+        .map(|c| crate::verify::format_checks_capped(&c, HANDOFF_VERIFY_OUTPUT_BYTES))
         .filter(|s| !s.is_empty());
     let checklist = if cfg.checklist.enabled {
         crate::checklist::load(worktree, cfg.checklist.max_bytes)
@@ -968,6 +974,47 @@ cli = "/bin/true"
         );
         assert!(brief.contains("also check the tests"), "{brief}");
         assert!(brief.contains("Original:"), "{brief}");
+    }
+
+    #[test]
+    fn huge_verify_output_does_not_push_sections_out_of_the_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::open(&dir.path().join("s.db")).unwrap();
+        db.upsert_task("acme-4", "/repo", Some(4)).unwrap();
+        crate::worktree::init_sample_repo(dir.path()).unwrap();
+        let run = db.start_run("acme-4", "claude", "m").unwrap();
+        db.insert_verify_check(
+            run,
+            "acme-4",
+            &crate::db::VerifyCheck {
+                command: "cargo test".into(),
+                passed: false,
+                exit_code: 101,
+                duration_ms: 1,
+                output: format!("{}THE-FAILURE", "x".repeat(60_000)),
+                recorded: crate::db::now_rfc3339(),
+            },
+        )
+        .unwrap();
+        let cfg = crate::config::parse_config_toml(
+            "repo_path = \"/tmp\"\n[[provider]]\nname = \"claude\"\nkind = \"claude\"\n",
+        )
+        .unwrap();
+        let task = db.get_task("acme-4").unwrap().unwrap();
+        let brief = build_for_switch(
+            &cfg,
+            &db,
+            "acme-4",
+            &task,
+            dir.path(),
+            "claude",
+            "verify_failed",
+            None,
+            Some(run),
+        )
+        .unwrap();
+        assert!(brief.contains("THE-FAILURE"), "{brief}");
+        assert!(brief.contains("### Worktree git status"), "{brief}");
     }
 }
 
