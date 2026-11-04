@@ -241,6 +241,11 @@ github = "owner/website"
 label = "for:atr"
 ```
 
+`label` (here and in `[github]`) may be a comma-separated list meaning any of
+them: `label = "for:atr,for:agnt"`. An issue with several of them is one task.
+A `[[repo]]` with no `label` inherits `[github] label`; if both are empty it uses
+`for:atr`. A repo's own non-empty `label` wins.
+
 Optional per-repo: `branch_prefix`, `base`, `system_prompt_file`, `max_parallel`,
 `lessons` (`true`/`false`, overrides `[lessons] enabled` for that repo).
 
@@ -567,16 +572,17 @@ Set or change it:
   `/config set telegram.assistant.providers ["grok","claude"]` (CLI: `atr config set telegram.assistant.providers '["grok","codex","claude"]'`).
 - Per task: `atr add --provider codex --model gpt-5.6-sol "…"`, `"provider"`
   and `"model"` in `POST /tasks` JSON or on the MCP `add_task` tool, or the
-  issue labels `provider:codex` and `model:gpt-5.6-sol`. It's a preference
-  checked at intake; a failover provider keeps its own model. See
+  issue labels `provider:codex` and `model:gpt-5.6-sol`. Checked at intake.
+  Setting a model pins the task strictly to the named provider (no fallback);
+  `--provider` alone stays a soft preference. See
   [USAGE.md](USAGE.md#per-task-provider-and-model).
 
 Examples: `atr driver set grok` (recommended; enables Grok extras),
 `atr driver set claude --model opus`, `atr driver set cursor`,
 `atr driver set codex --model gpt-5-codex`.
 
-Fallback: a preferred provider (driver, or a per-task `provider`) that is
-disabled or has no CLI is skipped and the next provider in order is used; if
+Fallback (not for a task that set a model): a preferred provider (driver, or a
+per-task `provider`) that is disabled or has no CLI is skipped and the next provider in order is used; if
 it's busy (`max_parallel`, counted across every live TUI and serve owner
 in `state.db`) the task waits. A TUI turn shows `provider at limit` rather
 than starting a second CLI. Quota or rate-limit failures during

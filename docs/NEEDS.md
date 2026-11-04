@@ -55,6 +55,9 @@ config_overrides = [
   dropped with a warning and the `needs` stay. An inbox `provider` stays a soft
   hint: it is ignored and the next capable provider is used. See
   [USAGE.md](USAGE.md#per-task-provider-and-model).
+- Setting a model pins the task strictly to the named provider (no fallback);
+  `--provider` alone stays a soft preference. If that provider loses a needed
+  capability after intake, the task fails with the reason instead of moving.
 - If no capable provider is free, the task stays **queued** instead of running
   on an incapable one.
 - `desktop` tasks also wait until the user running atr has a logged-in, local,
