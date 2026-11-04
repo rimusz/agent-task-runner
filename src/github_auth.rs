@@ -552,6 +552,15 @@ fn token_len_at(text: &str, i: usize) -> Option<usize> {
     if !text.is_char_boundary(i) {
         return None;
     }
+    let rest = text.as_bytes().get(i..)?;
+    github_token_len(rest)
+        .or_else(|| sk_key_len(text, i, rest))
+        .or_else(|| telegram_bot_token_len(rest))
+        .or_else(|| bearer_len(text, i, rest))
+        .or_else(|| env_assignment_value_len(text, i))
+}
+
+fn github_token_len(rest: &[u8]) -> Option<usize> {
     const PREFIXES: &[&str] = &[
         "github_pat_",
         "gho_",
@@ -561,7 +570,6 @@ fn token_len_at(text: &str, i: usize) -> Option<usize> {
         "ghp_",
         "ghy_",
     ];
-    let rest = text.as_bytes().get(i..)?;
     for p in PREFIXES {
         let pb = p.as_bytes();
         if rest
@@ -578,6 +586,127 @@ fn token_len_at(text: &str, i: usize) -> Option<usize> {
         }
     }
     None
+}
+
+fn sk_key_len(text: &str, i: usize, rest: &[u8]) -> Option<usize> {
+    if i > 0 {
+        let prev = text[..i].chars().next_back()?;
+        if prev.is_ascii_alphanumeric() {
+            return None;
+        }
+    }
+    if !rest
+        .get(..3)
+        .is_some_and(|b| b.eq_ignore_ascii_case(b"sk-"))
+    {
+        return None;
+    }
+    let mut n = 3;
+    while n < rest.len() && (rest[n].is_ascii_alphanumeric() || rest[n] == b'_' || rest[n] == b'-')
+    {
+        n += 1;
+    }
+    (n >= 23).then_some(n)
+}
+
+fn telegram_bot_token_len(rest: &[u8]) -> Option<usize> {
+    if rest.first().is_none_or(|b| !b.is_ascii_digit()) {
+        return None;
+    }
+    let mut n = 0;
+    while n < rest.len() && rest[n].is_ascii_digit() {
+        n += 1;
+    }
+    if rest.get(n) != Some(&b':') {
+        return None;
+    }
+    let mut m = n + 1;
+    while m < rest.len() && (rest[m].is_ascii_alphanumeric() || rest[m] == b'_' || rest[m] == b'-')
+    {
+        m += 1;
+    }
+    (m - (n + 1) >= 35).then_some(m)
+}
+
+fn bearer_len(text: &str, i: usize, rest: &[u8]) -> Option<usize> {
+    if i > 0 {
+        let prev = text[..i].chars().next_back()?;
+        if prev.is_ascii_alphanumeric() {
+            return None;
+        }
+    }
+    const HEAD: &[u8] = b"bearer";
+    if rest.len() < HEAD.len() + 1 || !rest[..HEAD.len()].eq_ignore_ascii_case(HEAD) {
+        return None;
+    }
+    if !rest[HEAD.len()].is_ascii_whitespace() {
+        return None;
+    }
+    let mut n = HEAD.len() + 1;
+    while n < rest.len() && rest[n].is_ascii_whitespace() {
+        n += 1;
+    }
+    let start = n;
+    while n < rest.len() && is_bearer_char(rest[n]) {
+        n += 1;
+    }
+    (n - start >= 16).then_some(n)
+}
+
+fn is_bearer_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'/' | b'=')
+}
+
+fn env_assignment_value_len(text: &str, i: usize) -> Option<usize> {
+    if i == 0 {
+        return None;
+    }
+    let before = &text[..i];
+    if !before.ends_with('=') {
+        return None;
+    }
+    let ident_end = before.len() - 1;
+    let ident_start = before[..ident_end]
+        .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let ident = &before[ident_start..ident_end];
+    if ident.is_empty() {
+        return None;
+    }
+    let up = ident.to_ascii_uppercase();
+    let keyish = matches!(
+        up.as_str(),
+        "KEY" | "TOKEN" | "SECRET" | "PASSWORD" | "API_KEY"
+    ) || up.ends_with("_TOKEN")
+        || up.ends_with("_SECRET")
+        || up.ends_with("_PASSWORD")
+        || up.ends_with("_API_KEY");
+    if !keyish {
+        return None;
+    }
+    let rest = text.as_bytes().get(i..)?;
+    let (skip, quote) = match rest.first() {
+        Some(q @ (b'"' | b'\'')) => (1usize, *q),
+        _ => (0, 0),
+    };
+    let mut n = skip;
+    if quote != 0 {
+        while n < rest.len() && rest[n] != quote && rest[n] != b'\n' && rest[n] != b'\r' {
+            n += 1;
+        }
+        if n < skip + 8 {
+            return None;
+        }
+        if n < rest.len() && rest[n] == quote {
+            n += 1;
+        }
+        return Some(n);
+    }
+    while n < rest.len() && !rest[n].is_ascii_whitespace() && rest[n] != b';' && rest[n] != b',' {
+        n += 1;
+    }
+    (n >= 8).then_some(n)
 }
 
 pub fn looks_like_secret(text: &str) -> bool {
@@ -627,6 +756,37 @@ mod tests {
         );
         assert!(utf.contains("***"), "{utf}");
         assert!(!utf.contains("ghp_"), "{utf}");
+    }
+
+    #[test]
+    fn redact_secrets_covers_common_token_shapes() {
+        let s = redact_secrets(
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789 \
+             github_pat_11AAAA_bbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+             sk-abcdefghijklmnopqrstuvwxyz012345 \
+             123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawA \
+             TOKEN=supersecretvalue KEY=abcdefghijkl \
+             SECRET=abcdefghijkl PASSWORD=abcdefghijkl \
+             Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        );
+        assert!(!s.contains("ghp_"), "{s}");
+        assert!(!s.contains("github_pat_11"), "{s}");
+        assert!(!s.contains("sk-abcdefgh"), "{s}");
+        assert!(!s.contains("AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawA"), "{s}");
+        assert!(!s.contains("supersecretvalue"), "{s}");
+        assert!(!s.contains("abcdefghijkl"), "{s}");
+        assert!(!s.contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"), "{s}");
+        assert!(s.contains("***"), "{s}");
+        assert_eq!(
+            redact_secrets("listen=127.0.0.1:9 and task_key=acme-1 ask-them later"),
+            "listen=127.0.0.1:9 and task_key=acme-1 ask-them later"
+        );
+        assert!(!looks_like_secret("what is 2+2?"));
+        assert!(!looks_like_secret("sk-short"));
+        assert_eq!(
+            redact_secrets("queued task-derive-a-title-from-this"),
+            "queued task-derive-a-title-from-this"
+        );
     }
 
     #[test]

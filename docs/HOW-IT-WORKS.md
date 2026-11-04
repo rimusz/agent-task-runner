@@ -260,7 +260,8 @@ When the time comes, atr resumes the provider session with a short “continue
 where you left off” prompt if the provider supports resume and a session id is
 still stored; otherwise it reruns the last prompt on a new session.
 `atr status` and Telegram `/status` show the wait. Notify fires once per
-scheduled retry (`retry <key> in 2m (provider overloaded, resume)`).
+scheduled retry (`retry <key> in 2m (provider overloaded, resume)`),
+unless `[telegram] events` is set and does not include `retry`.
 When the wait is over the scheduler starts through `try_start_run` (same
 cross-process `max_parallel` as serve and TUI).
 
@@ -270,7 +271,9 @@ Retry is for when this task would otherwise fail or sit on the same CLI
 quota with a reset already handled by `quota.rs`, and task-logic failures
 (`needs_attention`, tests failed) skip this path.
 Stall hangs still use `[[provider]].health.stall_resumes`. `atr retry` clears
-the persisted schedule.
+the persisted schedule. A Telegram assistant task (`tg<chat>`) that stalls
+or hits its run cap fails only that run (the chat is told it timed out)
+and does **not** mark the provider degraded or retry/failover other work.
 
 ## Task dependencies (`after`)
 

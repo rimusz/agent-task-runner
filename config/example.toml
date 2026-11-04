@@ -157,6 +157,11 @@ enabled = false
 # (`atr init` / `atr telegram setup` write both).
 bot_token_env = "ATR_TELEGRAM_TOKEN"
 allowed_chat_ids = []
+# Optional. Empty = from.id is checked against allowed_chat_ids.
+allowed_user_ids = []
+# Empty = send every task event. Unknown names fail at load.
+# Example (problems only): events = ["failed", "needs_attention", "stalled"]
+events = []
 token_file = ""
 chat_id_file = ""
 prefix = "atr:"

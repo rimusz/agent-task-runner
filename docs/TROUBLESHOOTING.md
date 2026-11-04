@@ -183,7 +183,22 @@ owner's env var, ok/warn/fail and days left without printing values.
 - `atr doctor` → `telegram*` lines; `atr telegram setup` redoes token + chat id; `atr telegram test` sends a test message.
 - No alerts arriving: `[telegram] enabled = true` and `allowed_chat_ids` set;
   first id is the owner chat that gets alerts. Logs show `telegram notify failed`.
+  If `events` is set, only those task kinds are sent (`failed`,
+  `needs_attention`, `stalled`, …). Token-expiry, health, daily summary and
+  command replies are never filtered.
+- Groups / channels silent: the bot only accepts private chats. A group that
+  happens to share an allowed id is dropped (debug log).
 - Free text not answered: `[telegram.assistant] enabled = true`.
+- Assistant proposed `/add` but nothing queued: that path waits for
+  **Confirm** from an allowed private chat. Cancel or a stale button
+  (2 minutes or after a restart) is a no-op.
+- Token-looking text in `/status`, `/config`, assistant replies or
+  notifies is redacted (`ghp_`/`github_pat_`, long `sk-` keys, Telegram
+  bot tokens, `KEY=`/`TOKEN=`/`SECRET=`/`PASSWORD=`, Bearer). Ordinary
+  lines such as `listen=127.0.0.1:9` stay intact.
+- Assistant timed out / "⏳ working" never finished: that chat's
+  `tg<chat>` run failed only. The provider is **not** marked degraded
+  (other grok/claude tasks keep running). Send the message again.
 - `telegram reachability` / `telegram:` status line / dashboard banner:
   `warn` = 3+ getUpdates failures in a row; `FAIL` = unreachable 15+ min
   (the `[notify]` hook got `telegram_unreachable`). Check the host's network,

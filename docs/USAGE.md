@@ -95,7 +95,7 @@ curl -s -X POST http://127.0.0.1:7420/tasks \
   -d '{"title":"Read brief","body":"summarize brief.md","workspace":"none","output":"text","files":[{"name":"brief.md","text":"hello attach"}]}'
 ```
 
-**Telegram.** Send `/add` followed by a prompt, for example `/add what is 2+2?`. Telegram tasks are answer-only and the reply comes back to the chat.
+**Telegram.** Send `/add` followed by a prompt, for example `/add what is 2+2?` (answer-only). `/add <repo> <prompt>` runs a git repo task when `<repo>` is an enabled `[[repo]]` name. The reply comes back to the chat.
 
 **Inbox folder.** A folder atr watches. Any script or agent can drop a `.toml` or `.json` task file into it, and atr runs it like any other task. It is **off by default**. To turn it on, add this to your config and restart atr:
 
@@ -163,6 +163,7 @@ atr telegram test
 /repos
 /task my-task
 /add what is 2+2?
+/add demo fix the login
 /usage month
 /cancel my-task
 /ui
@@ -170,7 +171,7 @@ atr telegram test
 
 `/ui` replies with a dashboard link: `[dashboard] public_url` if set, else a detected Tailscale Serve `https://…ts.net/` URL, else the local `atr ui --print` address (marked local-only).
 
-If you type a normal sentence (not a `/command`), the assistant answers. It can only propose the same commands; each write still needs Confirm.
+If you type a normal sentence (not a `/command`), the assistant answers. It can only propose the same commands; each write still needs Confirm. An assistant-proposed `ATR: /add …` posts the task with Confirm / Cancel and queues only after Confirm from an allowed private chat. Cancel or a stale button is a short no-op (pending proposals expire after two minutes or a restart). Outbound Telegram text is redacted for common token shapes (GitHub PATs, `sk-` keys, bot tokens, `KEY=`/`TOKEN=`/`SECRET=`/`PASSWORD=`, Bearer headers). If the assistant times out, that chat is told so; grok (or whichever provider ran it) is not marked degraded and other work is unaffected.
 
 The assistant uses `[telegram.assistant] provider`, or the first available provider. To give it a fallback order, set `providers`: each turn takes the first listed provider that is enabled and not busy, cooling down, rate-limited or at quota, and moves down the list if a run fails. The "⏳ working" message, `atr status` and the dashboard name the provider actually used.
 
@@ -438,9 +439,10 @@ Read-only page. Do not add buttons. Ask in a comment if the empty copy should ma
 4. Open the bot and send `/start`.
 5. atr remembers that chat and sends a test message.
 
-Later: `atr telegram test` to ping. Unknown chats get no reply. Full command list: `/help`.
+Later: `atr telegram test` to ping. Unknown chats, groups, and a private chat
+whose `from.id` is not allowed get no reply. Full command list: `/help`.
 
-Commands (allowed chats only; also registered in the `/` menu via setMyCommands):
+Commands (allowed private chats only; also registered in the `/` menu via setMyCommands):
 
 | Command | What it does |
 |---|---|
@@ -449,11 +451,13 @@ Commands (allowed chats only; also registered in the `/` menu via setMyCommands)
 | `/cancel <id>` | cancel a task (asks Confirm) |
 | `/doctor` | `atr doctor`, warn/FAIL lines only |
 | `/tokens` | GitHub tokens: owner, env var, ok/warn/fail, days left — never values |
-| `/add`, `/usage`, `/ui`, `/help` | queue work, spend, dashboard link, everything else |
+| `/add <prompt>`, `/add <repo> <prompt>` | answer-only task, or a git repo task when `<repo>` is an enabled `[[repo]]` name. Typed `/add` queues immediately; an assistant-proposed `/add` waits for Confirm |
+| `/usage`, `/ui`, `/help` | spend, dashboard link, everything else |
 
 Buttons: GitHub auth-failure and token-expiry alerts carry **Run doctor**; the
 assistant's "⏳ working" message carries **Cancel** (only cancels that chat's
-own assistant task). Button presses are checked against `allowed_chat_ids`.
+own assistant task). Button presses need a private chat and an allowed
+`from.id`.
 
 Long replies are split at paragraph / code-fence boundaries (each part stays
 valid formatting, under Telegram's 4096-char limit). Replies that would need

@@ -46,7 +46,7 @@ You are answering in Telegram about atr. You already have a read-only snapshot o
 
   `ATR: /retry acme-12`
 
-- atr will show an inline **Confirm** (old → new) before anything is applied.
+- atr will show an inline **Confirm** before anything is applied (config as old → new; a proposed `/add` as the task text). Cancel or a stale button is a no-op.
 - Read-only questions (“how do I add kimi?”, “why did task X fail?”) get a short answer from this skill + the snapshot. Do not invent keys or tokens.
 
 Allowed command families: `/status` `/tasks` `/task` `/add` `/usage` `/shadow` `/providers` `/config` `/repos` `/cancel` `/retry` `/pause` `/resume` `/enable` `/disable` `/ui` `/help`.
@@ -61,6 +61,7 @@ Operators with a shell use the CLI; it shares the same code paths. `atr pause`/`
 | `/tasks [repo]` | `atr tasks [--repo R]` | `GET /dashboard.json` |
 | `/task <key>` | `atr tasks <key>` | `GET /tasks/<key>` |
 | `/add <prompt>` | `atr add <prompt>` | `POST /tasks` |
+| `/add <repo> <prompt>` | `atr add --repo <repo> <prompt>` | `POST /tasks` with `workspace=git` |
 | `/cancel <key> [force]` | `atr cancel <key> [--force]` | `POST /tasks/<key>/cancel` |
 | `/retry <key>` | `atr retry <key>` (fresh attempt: last consumed prompt is unconsumed so the scheduler can dispatch, wall clock restarts, provider re-picked from current config unless strictly pinned; on a `held` task also clears the hold and `after` list) | `POST /tasks/<key>/retry` |
 | `/pause` | `atr pause` | `POST /intake/pause` |
@@ -175,7 +176,7 @@ Custom OpenCode provider at `http://127.0.0.1:8091/v1`. `atr providers add spark
 
 ## Telegram
 
-Chat ids only in `telegram.allowed_chat_ids`. Token only `ATR_TELEGRAM_TOKEN` in `shadow.env`.
+Chat ids only in `telegram.allowed_chat_ids`. Token only `ATR_TELEGRAM_TOKEN` in `shadow.env`. Private chats only (`chat.type == private`); `from.id` must be in `allowed_user_ids` when set, else in `allowed_chat_ids`. Groups, supergroups and channels are ignored. `[telegram] events` (empty = all) filters task notifies; token-expiry, health, daily summary and command replies stay unfiltered. `/add <repo> <prompt>` is a git repo task when `<repo>` is an enabled `[[repo]]` name. Typed `/add` queues immediately; an assistant `ATR: /add …` is posted with Confirm / Cancel and queued only after Confirm from an allowed private chat (Cancel or a stale id expires after 2 minutes or a restart). Outbound Telegram text is redacted (`ghp_`/`github_pat_`, long `sk-` keys, bot tokens, `KEY=`/`TOKEN=`/`SECRET=`/`PASSWORD=`, Bearer). An assistant stall/timeout fails only that `tg<chat>` run and does not degrade the provider.
 
 ```bash
 atr telegram setup    # BotFather token + /start → allowed_chat_ids
@@ -184,7 +185,7 @@ atr telegram test
 
 `/help` lists commands; they are also registered in the `/` menu. `/status`, `/tasks`, `/cancel <id>` (Confirm), `/doctor` (warn/FAIL only), `/tokens` (GitHub token owner/env var/state/days left, never values). GitHub auth/expiry alerts have a **Run doctor** button; the "⏳ working" message has **Cancel** (that chat's assistant task only). Long replies are split cleanly; >4 parts arrive as `reply.md`. Telegram reachability: debug on single timeouts, WARN after 3 in a row, `[notify]` hook `telegram_unreachable` after 15 min, shown in doctor (`telegram reachability`), `atr status` and the dashboard. Free-text (not a `/command`) from an allowed chat goes to the Telegram assistant when `[telegram.assistant] enabled = true`: first listed available provider in `telegram.assistant.providers`, else `telegram.assistant.provider`, else first available in order; the "⏳ working" message, `atr status` and the dashboard name the provider actually used, this skill + redacted status/doctor/config, one conversation per chat with resume, `telegram.assistant.timeout` as the run cap. Usage is counted like any other run.
 
-Every change or destructive action still needs inline **Confirm** (old → new).
+Every change or destructive action still needs inline **Confirm** (config as old → new; a proposed `/add` as the task text).
 
 ## Other agents (MCP)
 

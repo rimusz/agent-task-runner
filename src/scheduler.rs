@@ -14,14 +14,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-fn notify_run(cfg: &crate::config::TelegramConfig, body: &str, shadow: bool) {
+fn notify_run(cfg: &crate::config::TelegramConfig, event: notify::Event, body: &str, shadow: bool) {
     if body
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
         .any(|k| crate::telegram::is_assistant_key(k) || crate::tui::is_tui_key(k))
     {
         return;
     }
-    notify::notify_unless_shadow(cfg, body, shadow);
+    notify::notify_event(cfg, event, body, shadow);
 }
 
 /// Held for the whole `run_claimed` (including verify). Dropped on every
@@ -147,6 +147,7 @@ async fn dispatch_matching(shared: &Arc<Shared>, only: Option<&str>) -> Result<(
             shared.db.set_status(&key, "failed")?;
             notify_run(
                 &cfg.telegram,
+                notify::Event::Failed,
                 &format!("failed {key} (task timeout)"),
                 task.shadow,
             );
@@ -421,6 +422,7 @@ fn fail_model_pin(
     let _ = crate::output::capture_with(shared, key, Some(&text));
     notify_run(
         &cfg.telegram,
+        notify::Event::Failed,
         &format!("failed {key} ({text})"),
         task.shadow,
     );
@@ -457,6 +459,7 @@ pub fn fail_strict_arm(
     let _ = crate::output::capture(shared, key);
     notify_run(
         &cfg.telegram,
+        notify::Event::Failed,
         &format!("failed {key} (compare arm: {reason})"),
         task.shadow,
     );
@@ -764,6 +767,7 @@ fn log_skips(
             if reason == "quota" {
                 notify_run(
                     &cfg.telegram,
+                    notify::Event::QuotaSkip,
                     &format!(
                         "quota skip {} task={} overflow={}",
                         p.name, task.key, chosen.name
@@ -853,6 +857,70 @@ pub fn apply_task_model(provider: &mut Provider, task: &crate::db::Task) {
         return;
     }
     provider.model = model.to_string();
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StallFollowup {
+    Done,
+    Failover,
+}
+
+/// Assistant stalls fail only that chat's run. They must not mark the
+/// provider degraded or retry/failover (that would stall every other task).
+fn record_stall(
+    shared: &Shared,
+    cfg: &Config,
+    key: &str,
+    provider: &Provider,
+    run_id: i64,
+    assistant: bool,
+    shadow: bool,
+) -> Result<StallFollowup> {
+    if assistant {
+        shared.db.set_status(key, "failed")?;
+        tracing::warn!(
+            task = %key,
+            provider = %provider.name,
+            "assistant task stalled; not degrading provider"
+        );
+        return Ok(StallFollowup::Done);
+    }
+    shared.db.unconsume_run(run_id)?;
+    notify_run(
+        &cfg.telegram,
+        notify::Event::Stalled,
+        &format!(
+            "stalled {key} provider={} (CLI hang / heartbeat)",
+            provider.name
+        ),
+        shadow,
+    );
+    let retries = shared
+        .db
+        .get_task(key)?
+        .map(|t| t.stall_retries)
+        .unwrap_or(0);
+    shared.db.set_degraded_until(
+        &provider.name,
+        Some(&cooldown_rfc3339(provider.degraded_after_stall)),
+    )?;
+    if retries < i64::from(provider.health.stall_resumes) {
+        shared.db.set_stall_retries(key, retries + 1)?;
+        shared.db.set_status(key, "queued")?;
+        tracing::info!(
+            task = %key,
+            retries = retries + 1,
+            max = provider.health.stall_resumes,
+            "retrying same session after stall"
+        );
+        Ok(StallFollowup::Done)
+    } else {
+        shared.db.set_cooldown(
+            &provider.name,
+            &cooldown_rfc3339(provider.health.unhealthy_cooldown),
+        )?;
+        Ok(StallFollowup::Failover)
+    }
 }
 
 async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -> Result<()> {
@@ -1230,6 +1298,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
 
     notify_run(
         &cfg.telegram,
+        notify::Event::Start,
         &format!("start {key} provider={}", provider.name),
         task.shadow,
     );
@@ -1337,6 +1406,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             )?;
             notify_run(
                 &cfg.telegram,
+                notify::Event::Fallback,
                 &format!("fallback {key} {} (spawn)", provider.name),
                 task.shadow,
             );
@@ -1601,7 +1671,12 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             shared.db.set_task_result(&key, &report, &diff, None)?;
             shared.db.set_status(&key, "needs_attention")?;
             tracing::warn!(task = %key, "{report}");
-            notify_run(&cfg.telegram, &report, task.shadow);
+            notify_run(
+                &cfg.telegram,
+                notify::Event::NeedsAttention,
+                &report,
+                task.shadow,
+            );
         }
         "success" => {
             shared.db.set_stall_retries(&key, 0)?;
@@ -1613,6 +1688,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 shared.db.set_status(&key, "needs_attention")?;
                 notify_run(
                     &cfg.telegram,
+                    notify::Event::NeedsAttention,
                     &format!("needs_attention {key} (tests_modified)"),
                     task.shadow,
                 );
@@ -1630,6 +1706,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                     shared.db.set_status(&key, "queued")?;
                     notify_run(
                         &cfg.telegram,
+                        notify::Event::VerifyRetry,
                         &format!("verify retry {key} provider={}", provider.name),
                         task.shadow,
                     );
@@ -1638,6 +1715,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                     shared.db.set_status(&key, "needs_attention")?;
                     notify_run(
                         &cfg.telegram,
+                        notify::Event::NeedsAttention,
                         &format!("needs_attention {key} (verify failed)"),
                         task.shadow,
                     );
@@ -1649,6 +1727,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                         .set_status(&key, if more { "queued" } else { "waiting" })?;
                     notify_run(
                         &cfg.telegram,
+                        notify::Event::Finished,
                         &format!(
                             "finished {key} provider={} (verify recorded)",
                             provider.name
@@ -1673,6 +1752,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                         shared.db.set_status(&key, "needs_attention")?;
                         notify_run(
                             &cfg.telegram,
+                            notify::Event::NeedsAttention,
                             &format!("needs_attention {key} (review)"),
                             task.shadow,
                         );
@@ -1684,38 +1764,16 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             }
         }
         "stalled" => {
-            shared.db.unconsume_run(run_id)?;
-            notify_run(
-                &cfg.telegram,
-                &format!(
-                    "stalled {key} provider={} (CLI hang / heartbeat)",
-                    provider.name
-                ),
+            if record_stall(
+                &shared,
+                &cfg,
+                &key,
+                &provider,
+                run_id,
+                assistant,
                 task.shadow,
-            );
-            let retries = shared
-                .db
-                .get_task(&key)?
-                .map(|t| t.stall_retries)
-                .unwrap_or(0);
-            shared.db.set_degraded_until(
-                &provider.name,
-                Some(&cooldown_rfc3339(provider.degraded_after_stall)),
-            )?;
-            if retries < i64::from(provider.health.stall_resumes) {
-                shared.db.set_stall_retries(&key, retries + 1)?;
-                shared.db.set_status(&key, "queued")?;
-                tracing::info!(
-                    task = %key,
-                    retries = retries + 1,
-                    max = provider.health.stall_resumes,
-                    "retrying same session after stall"
-                );
-            } else {
-                shared.db.set_cooldown(
-                    &provider.name,
-                    &cooldown_rfc3339(provider.health.unhealthy_cooldown),
-                )?;
+            )? == StallFollowup::Failover
+            {
                 handle_failover(&shared, &cfg, &key, &provider, &result, run_id, &wt).await?;
             }
         }
@@ -1728,6 +1786,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 shared.db.unconsume_run(run_id)?;
                 notify_run(
                     &cfg.telegram,
+                    notify::Event::Fallback,
                     &format!("fallback {key} {} (unavailable)", provider.name),
                     task.shadow,
                 );
@@ -1750,6 +1809,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 shared.db.unconsume_run(run_id)?;
                 notify_run(
                     &cfg.telegram,
+                    notify::Event::Fallback,
                     &format!("fallback {key} {} ({})", provider.name, result.outcome),
                     task.shadow,
                 );
@@ -1758,13 +1818,19 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         }
         "cancelled" => {
             shared.db.set_status(&key, "failed")?;
-            notify_run(&cfg.telegram, &format!("cancelled {key}"), task.shadow);
+            notify_run(
+                &cfg.telegram,
+                notify::Event::Cancelled,
+                &format!("cancelled {key}"),
+                task.shadow,
+            );
             notify_held_dependents(&shared, &cfg, &key, task.shadow);
         }
         "needs_attention" => {
             shared.db.unconsume_run(run_id)?;
             notify_run(
                 &cfg.telegram,
+                notify::Event::Fallback,
                 &format!("fallback {key} {} (blocked or unfinished)", provider.name),
                 task.shadow,
             );
@@ -1793,6 +1859,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 shared.db.set_status(&key, "failed")?;
                 notify_run(
                     &cfg.telegram,
+                    notify::Event::Failed,
                     &format!("failed {key} provider={}", provider.name),
                     task.shadow,
                 );
@@ -1903,6 +1970,7 @@ async fn handle_failover(
         } else {
             notify_run(
                 &cfg.telegram,
+                notify::Event::Failed,
                 &format!("failed {key} (no remaining provider)"),
                 task.shadow,
             );
@@ -2046,6 +2114,7 @@ fn try_transient_retry(
     let how = if resume { "resume" } else { "rerun" };
     notify_run(
         &cfg.telegram,
+        notify::Event::Retry,
         &format!("retry {key} in {wait} ({}, {how})", class.reason),
         task.shadow,
     );
@@ -2073,6 +2142,7 @@ fn hold_blocked(shared: &Shared, cfg: &Config, task: &crate::db::Task, reason: &
     }
     notify_run(
         &cfg.telegram,
+        notify::Event::Held,
         &format!("held {} ({reason})", task.key),
         task.shadow,
     );
@@ -2097,7 +2167,12 @@ fn notify_held_dependents(shared: &Shared, cfg: &Config, key: &str, shadow: bool
         if already {
             continue;
         }
-        notify_run(&cfg.telegram, &format!("held {child} ({reason})"), shadow);
+        notify_run(
+            &cfg.telegram,
+            notify::Event::Held,
+            &format!("held {child} ({reason})"),
+            shadow,
+        );
         let _ = shared.db.set_hold(&child, &reason, true);
     }
 }
@@ -2115,6 +2190,7 @@ fn finish_waiting(
         .set_status(key, if more { "queued" } else { "waiting" })?;
     notify_run(
         &cfg.telegram,
+        notify::Event::Finished,
         &format!("finished {key} provider={provider}"),
         shadow,
     );
@@ -2193,6 +2269,7 @@ fn finish_plan(
             } else {
                 notify_run(
                     &cfg.telegram,
+                    notify::Event::Planned,
                     &format!("planned {key} → {} subtasks", kids.len()),
                     task.shadow,
                 );
@@ -2273,6 +2350,7 @@ async fn maybe_review(
             shared.db.enqueue_message(key, &body, "review")?;
             notify_run(
                 &cfg.telegram,
+                notify::Event::Review,
                 &format!("review changes {key} round {}", used + 1),
                 task.shadow,
             );
@@ -4293,5 +4371,88 @@ capabilities = ["browser", "desktop"]
             pick(&cfg, &db, &HashMap::new(), &t).as_deref(),
             Some("claude")
         );
+    }
+
+    #[test]
+    fn assistant_stall_leaves_provider_health_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("p.md"), "p\n").unwrap();
+        let cli = if std::path::Path::new("/bin/true").exists() {
+            "/bin/true"
+        } else {
+            "/usr/bin/true"
+        };
+        let text = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+[[provider]]
+name = "grok"
+kind = "grok"
+cli = "{cli}"
+"#,
+            db = dir.path().join("s.db").display(),
+            root = dir.path().display(),
+            cli = cli,
+        );
+        let raw: crate::config::RawConfig = toml::from_str(&text).unwrap();
+        let cfg = crate::config::Config::from_raw(raw).unwrap();
+        let shared =
+            crate::app::Shared::from_config(dir.path().join("c.toml"), cfg.clone()).unwrap();
+        shared.db.upsert_task("tg42", "/repo", None).unwrap();
+        shared.db.set_status("tg42", "running").unwrap();
+        let run = shared.db.start_run("tg42", "grok", "").unwrap();
+        shared.db.enqueue_message("tg42", "hi", "telegram").unwrap();
+        let ids: Vec<i64> = shared
+            .db
+            .pending_messages("tg42")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        shared.db.mark_consumed(&ids, run).unwrap();
+
+        let provider = cfg
+            .providers
+            .iter()
+            .find(|p| p.name == "grok")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            record_stall(&shared, &cfg, "tg42", &provider, run, true, false).unwrap(),
+            StallFollowup::Done
+        );
+        let (cooling, degraded) = shared.db.provider_blocked("grok").unwrap();
+        assert!(
+            !cooling && !degraded,
+            "assistant stall must not cool or degrade grok"
+        );
+        let t = shared.db.get_task("tg42").unwrap().unwrap();
+        assert_eq!(t.status, "failed");
+        assert_eq!(t.stall_retries, 0);
+
+        shared.db.upsert_task("work-1", "/repo", None).unwrap();
+        shared.db.set_status("work-1", "running").unwrap();
+        let run2 = shared.db.start_run("work-1", "grok", "").unwrap();
+        shared.db.enqueue_message("work-1", "do it", "cli").unwrap();
+        let ids: Vec<i64> = shared
+            .db
+            .pending_messages("work-1")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        shared.db.mark_consumed(&ids, run2).unwrap();
+        assert_eq!(
+            record_stall(&shared, &cfg, "work-1", &provider, run2, false, false).unwrap(),
+            StallFollowup::Done
+        );
+        let (_, degraded) = shared.db.provider_blocked("grok").unwrap();
+        assert!(degraded, "normal stall still degrades the provider");
+        let t = shared.db.get_task("work-1").unwrap().unwrap();
+        assert_eq!(t.status, "queued");
     }
 }
