@@ -100,6 +100,9 @@ enum Action {
         name: String,
         model: String,
     },
+    Add {
+        raw: String,
+    },
 }
 
 struct Pending {
@@ -275,7 +278,7 @@ pub fn sanitize_full(text: &str, secrets: &[&str]) -> String {
     if s.contains("----- atr variable -----") || s.contains("## Messages") {
         s = "(prompt omitted)".into();
     }
-    s
+    crate::github_auth::redact_secrets(&s)
 }
 
 pub fn enqueue_notify(cfg: &TelegramConfig, body: &str) {
@@ -1442,7 +1445,7 @@ pub fn assistant_stable_suffix() -> String {
 You are answering in Telegram about atr.\n\
 Never use the shell, edit files, or run git/gh. Do not write config.toml or shadow.env.\n\
 Propose changes only as `ATR: /command …` lines (same commands as the Telegram bot / CLI).\n\
-atr will show Confirm (old → new) before applying anything.\n\n\
+atr will show Confirm before applying anything (config as old → new; /add as the proposed task).\n\n\
 ## atr skill\n\n{}\n",
         crate::skill::SKILL_MD
     )
@@ -1595,12 +1598,14 @@ pub fn assistant_reply(shared: &Shared, key: &str, run_id: i64, outcome: &str) -
         return Vec::new();
     };
     if outcome != "success" {
+        let text = if outcome == "stalled" {
+            "assistant timed out. Try again or /status.".into()
+        } else {
+            format!("assistant run {outcome}. Try again or /status.")
+        };
         return vec![Outgoing {
             chat_id: chat,
-            text: sanitize(
-                &format!("assistant run {outcome}. Try again or /status."),
-                &[],
-            ),
+            text: sanitize(&text, &[]),
             markup: None,
         }];
     }
@@ -1630,7 +1635,15 @@ pub fn assistant_reply(shared: &Shared, key: &str, run_id: i64, outcome: &str) -
         markup: None,
     }];
     for cmd in cmds {
-        outs.push(handle_command(shared, chat, &cmd));
+        if cmd == "/add" || cmd.starts_with("/add ") {
+            outs.push(confirm(
+                chat,
+                Action::Add { raw: cmd.clone() },
+                &format!("Queue this task?\n\n{cmd}"),
+            ));
+        } else {
+            outs.push(handle_command(shared, chat, &cmd));
+        }
     }
     outs
 }
@@ -1953,7 +1966,7 @@ fn confirm(chat: i64, action: Action, prompt: &str) -> Outgoing {
     );
     Outgoing {
         chat_id: chat,
-        text: prompt.to_string(),
+        text: sanitize(prompt, &[]),
         markup: Some(json!({
             "inline_keyboard": [[
                 {"text": "Confirm", "callback_data": format!("y:{id}")},
@@ -2086,6 +2099,7 @@ fn handle_callback(shared: &Shared, chat: i64, data: &str) -> Outgoing {
             crate::providers_edit::set_model(&shared.config_path, &name, &model)
                 .map(|()| format!("set provider.{name}.model → {model}"))
         }),
+        Action::Add { raw } => return handle_add(shared, chat, &raw),
     };
     let secrets: Vec<&str> = redact.iter().map(String::as_str).collect();
     Outgoing {
@@ -3292,6 +3306,24 @@ cli = "/bin/true"
     }
 
     #[test]
+    fn sanitize_full_redacts_common_token_shapes() {
+        let s = sanitize_full(
+            "bot 123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawA \
+             sk-abcdefghijklmnopqrstuvwxyz012345 \
+             TOKEN=supersecretvalue Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            &[],
+        );
+        assert!(!s.contains("AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawA"), "{s}");
+        assert!(!s.contains("sk-abcdefgh"), "{s}");
+        assert!(!s.contains("supersecretvalue"), "{s}");
+        assert!(!s.contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"), "{s}");
+        assert_eq!(
+            sanitize_full("listen=127.0.0.1:9 task_key=acme-1", &[]),
+            "listen=127.0.0.1:9 task_key=acme-1"
+        );
+    }
+
+    #[test]
     fn sanitize_truncates() {
         let s = sanitize(&"x".repeat(5000), &[]);
         assert!(s.len() <= MAX_TEXT + 5);
@@ -3766,6 +3798,111 @@ enabled = false
             "{}",
             confirm.text
         );
+    }
+
+    fn queued_non_assistant(shared: &Shared) -> Vec<String> {
+        shared
+            .db
+            .list_tasks()
+            .unwrap()
+            .into_iter()
+            .filter(|t| !is_assistant_key(&t.key))
+            .map(|t| t.key)
+            .collect()
+    }
+
+    fn assistant_add_proposal(shared: &Shared) -> (Vec<Outgoing>, String, String) {
+        shared.db.upsert_task("tg42", "/repo", None).unwrap();
+        let run = shared.db.start_run("tg42", "claude", "opus").unwrap();
+        shared
+            .db
+            .insert_event(
+                run,
+                "assistant",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Sure.\nATR: /add what is 2+2?"}]}}"#,
+            )
+            .unwrap();
+        let outs = assistant_reply(shared, "tg42", run, "success");
+        let confirm = outs
+            .iter()
+            .find(|o| o.markup.is_some())
+            .expect("confirm button");
+        let kb = &confirm.markup.as_ref().unwrap()["inline_keyboard"][0];
+        let yes = kb[0]["callback_data"].as_str().unwrap().to_string();
+        let no = kb[1]["callback_data"].as_str().unwrap().to_string();
+        (outs, yes, no)
+    }
+
+    #[test]
+    fn assistant_add_queues_only_after_confirm() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let (outs, yes, no) = assistant_add_proposal(&shared);
+        let confirm = outs
+            .iter()
+            .find(|o| o.markup.is_some())
+            .expect("confirm button");
+        assert!(
+            confirm.text.contains("Queue this task?"),
+            "{}",
+            confirm.text
+        );
+        assert!(
+            confirm.text.contains("/add what is 2+2?"),
+            "{}",
+            confirm.text
+        );
+        assert!(yes.starts_with("y:"), "{yes}");
+        assert!(no.starts_with("n:"), "{no}");
+        assert!(
+            queued_non_assistant(&shared).is_empty(),
+            "proposed /add must not queue until Confirm"
+        );
+
+        let cancel = json!({"callback_query":{"from":{"id":42},"data":no,"message":{"chat":{"id":42,"type":"private"}}}});
+        let out = handle_update(&shared, &cancel).unwrap();
+        assert!(out[0].text.contains("cancelled"), "{}", out[0].text);
+        assert!(queued_non_assistant(&shared).is_empty());
+
+        let stale = json!({"callback_query":{"from":{"id":42},"data":"y:999999","message":{"chat":{"id":42,"type":"private"}}}});
+        let out = handle_update(&shared, &stale).unwrap();
+        assert!(out[0].text.contains("expired"), "{}", out[0].text);
+        assert!(queued_non_assistant(&shared).is_empty());
+
+        let (_, yes, _) = assistant_add_proposal(&shared);
+        let ok = json!({"callback_query":{"from":{"id":42},"data":yes,"message":{"chat":{"id":42,"type":"private"}}}});
+        let out = handle_update(&shared, &ok).unwrap();
+        assert!(out[0].text.contains("queued"), "{}", out[0].text);
+        assert_eq!(queued_non_assistant(&shared).len(), 1);
+    }
+
+    #[test]
+    fn assistant_add_confirm_rejected_from_wrong_user_or_chat() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        let (_, yes, _) = assistant_add_proposal(&shared);
+        let stranger = json!({"callback_query":{"from":{"id":99},"data":yes,"message":{"chat":{"id":42,"type":"private"}}}});
+        assert!(handle_update(&shared, &stranger).unwrap().is_empty());
+        assert!(queued_non_assistant(&shared).is_empty());
+        let other_chat = json!({"callback_query":{"from":{"id":42},"data":yes,"message":{"chat":{"id":99,"type":"private"}}}});
+        assert!(handle_update(&shared, &other_chat).unwrap().is_empty());
+        assert!(queued_non_assistant(&shared).is_empty());
+
+        let ok = json!({"callback_query":{"from":{"id":42},"data":yes,"message":{"chat":{"id":42,"type":"private"}}}});
+        let out = handle_update(&shared, &ok).unwrap();
+        assert!(out[0].text.contains("queued"), "{}", out[0].text);
+        assert_eq!(queued_non_assistant(&shared).len(), 1);
+    }
+
+    #[test]
+    fn assistant_reply_stalled_says_timed_out() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        shared.db.upsert_task("tg42", "/repo", None).unwrap();
+        let run = shared.db.start_run("tg42", "claude", "opus").unwrap();
+        let outs = assistant_reply(&shared, "tg42", run, "stalled");
+        assert!(outs[0].text.contains("timed out"), "{outs:?}");
+        assert!(!outs[0].text.contains("stalled"), "{outs:?}");
     }
 
     #[test]
