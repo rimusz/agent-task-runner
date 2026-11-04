@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const LAUNCHD_LABEL: &str = "dev.atr.serve";
 const PLIST_TEMPLATE: &str = include_str!("../contrib/dev.atr.serve.plist");
@@ -103,8 +104,18 @@ pub fn decide_service_install(
     Ok(InstallDecision::Install)
 }
 
+/// Test seam: integration tests run on hosts where the real `dev.atr.serve`
+/// may be loaded, and must not see it.
+static IGNORE_HOST_SERVICE: AtomicBool = AtomicBool::new(false);
+
+/// Make `service_loaded` answer false in this process. For tests.
+#[doc(hidden)]
+pub fn ignore_host_service() {
+    IGNORE_HOST_SERVICE.store(true, Ordering::Relaxed);
+}
+
 pub fn service_loaded(label: &str) -> bool {
-    if skip_load() {
+    if skip_load() || IGNORE_HOST_SERVICE.load(Ordering::Relaxed) {
         return false;
     }
     if cfg!(target_os = "macos") {

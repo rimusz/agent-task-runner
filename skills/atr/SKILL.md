@@ -167,7 +167,7 @@ Rules for agents:
 - **Configure `[[verify.repo]]` commands first.** Verify is the model's only test loop (it gets `no_shell_extra_retries`, default 1, extra follow-ups).
 - **Use triage for labels and comments, and never auto-approve.** Show the suggestion (`atr triage show <id>`) and let the user approve.
 - **Read the PR notes.** "Dropped scratch files" and "Reverted unrequested edits" list what atr removed. A `NO-OP <key>` or `BLOCKED <key>` result means nothing was delivered; report it, don't retry in a loop.
-- **Guards that apply only to no-shell providers:** `[scratch]` cleanup (`scope = "no_shell"`), a main-checkout guard that withholds the result, and a fresh session on `atr retry`. Claude, Codex, Cursor and Grok keep their files and docs edits, get only a warning for a main-checkout change, and resume their session on retry.
+- **Guards that apply only to no-shell providers:** `[scratch]` cleanup (`scope = "no_shell"`), a main-checkout guard that withholds the result, and a fresh session on `atr retry`. Claude, Codex, Cursor and Grok keep their files and docs edits, get only a warning for a main-checkout change, and resume their session on retry (except a planning run, which starts fresh). A worker that follows a planner always starts a fresh session; the original task reaches it through the handoff block.
 - **Known limits:** run-to-run quality varies, triage label accuracy is weak, and docs revert only covers docs-style files.
 
 ### spark (local)

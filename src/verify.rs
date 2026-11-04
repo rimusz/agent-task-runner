@@ -182,12 +182,17 @@ pub async fn run(
     } else {
         changed_protected_tests(worktree, &cfg.repo_default_branch, globs)
     };
+    let scrub = scrubbed_env(
+        cfg,
+        std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()),
+    );
     let (passed, checks, tests_modified, reason) = if changed.is_empty() {
         let (p, c) = run_cmds(
             &cmds,
             worktree,
             cfg.verify.timeout,
             cfg.verify.max_output_bytes,
+            &scrub,
         )
         .await;
         (p, c, Vec::new(), None)
@@ -198,6 +203,7 @@ pub async fn run(
             worktree,
             cfg.verify.timeout,
             cfg.verify.max_output_bytes,
+            &scrub,
         )
         .await;
         drop(guard);
@@ -209,6 +215,7 @@ pub async fn run(
                 worktree,
                 cfg.verify.timeout,
                 cfg.verify.max_output_bytes,
+                &scrub,
             )
             .await;
             if agent_ok {
@@ -253,11 +260,12 @@ async fn run_cmds(
     cwd: &Path,
     limit: Duration,
     max_output: usize,
+    scrub: &[String],
 ) -> (bool, Vec<VerifyCheck>) {
     let mut checks = Vec::with_capacity(cmds.len());
     let mut passed = true;
     for cmd in cmds {
-        let check = run_one(cmd, cwd, limit, max_output).await;
+        let check = run_one(cmd, cwd, limit, max_output, scrub).await;
         if !check.passed {
             passed = false;
         }
@@ -435,7 +443,28 @@ impl Drop for TestRestore {
     }
 }
 
-async fn run_one(command: &str, cwd: &Path, limit: Duration, max_output: usize) -> VerifyCheck {
+/// Env names to drop from a verify command: it runs the repo's code, so it gets
+/// neither atr's own settings nor its tokens unless `[verify] pass_env` lists them.
+fn scrubbed_env(cfg: &Config, names: impl Iterator<Item = String>) -> Vec<String> {
+    names
+        .filter(|k| {
+            k.starts_with("ATR_")
+                || crate::gh_token::is_token_var(k)
+                || *k == cfg.shadow.gh_token_env
+                || *k == cfg.telegram.bot_token_env
+                || *k == cfg.mcp.token_env
+        })
+        .filter(|k| !cfg.verify.pass_env.contains(k))
+        .collect()
+}
+
+async fn run_one(
+    command: &str,
+    cwd: &Path,
+    limit: Duration,
+    max_output: usize,
+    scrub: &[String],
+) -> VerifyCheck {
     let started = Instant::now();
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
@@ -445,6 +474,9 @@ async fn run_one(command: &str, cwd: &Path, limit: Duration, max_output: usize) 
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .stdin(Stdio::null());
+    for k in scrub {
+        cmd.env_remove(k);
+    }
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -519,17 +551,34 @@ pub fn format_checks(checks: &[VerifyCheck]) -> String {
     out
 }
 
+/// `format_checks` for a size-limited block: each check's output keeps its tail.
+pub fn format_checks_capped(checks: &[VerifyCheck], max_output: usize) -> String {
+    let capped: Vec<VerifyCheck> = checks
+        .iter()
+        .map(|c| VerifyCheck {
+            output: trim_output(&c.output, max_output),
+            ..c.clone()
+        })
+        .collect();
+    format_checks(&capped)
+}
+
+/// Keep the last bytes: test runners and compilers print the failure at the end.
+/// The result, marker included, is at most `max` bytes (for any `max` that fits
+/// the marker), so trimming twice changes nothing.
 fn trim_output(s: &str, max: usize) -> String {
     let t = s.trim_end();
     if t.len() <= max {
         return t.to_string();
     }
-    let keep = max.saturating_sub(14);
-    let mut end = keep;
-    while end > 0 && !t.is_char_boundary(end) {
-        end -= 1;
+    let marker = |n: usize| format!("…[truncated {n} bytes]…\n");
+    // Sized for the largest count: the real one can only have fewer digits.
+    let keep = max.saturating_sub(marker(t.len()).len());
+    let mut start = t.len() - keep.min(t.len());
+    while !t.is_char_boundary(start) {
+        start += 1;
     }
-    format!("{}…[truncated]", &t[..end])
+    format!("{}{}", marker(start), &t[start..])
 }
 
 #[cfg(test)]
@@ -852,6 +901,111 @@ cli = "/bin/true"
     }
 
     #[test]
+    fn trim_output_keeps_the_tail_with_a_byte_count() {
+        assert_eq!(trim_output("short\n", 100), "short");
+
+        let text = format!("{}FAILED tests::the_one", "x".repeat(1000));
+        let out = trim_output(&text, 256);
+        assert!(out.len() <= 256, "{}", out.len());
+        assert!(out.ends_with("FAILED tests::the_one"), "{out}");
+        let kept = out.split_once('\n').unwrap().1.len();
+        assert!(
+            out.starts_with(&format!("…[truncated {} bytes]…\n", text.len() - kept)),
+            "{out}"
+        );
+        assert!(!out.contains(&"x".repeat(300)), "head was kept");
+        assert_eq!(
+            trim_output(&out, 256),
+            out,
+            "trimming twice changes nothing"
+        );
+    }
+
+    #[test]
+    fn trim_output_cuts_on_a_utf8_boundary() {
+        // Every start offset lands inside or on a multi-byte char at some max.
+        let text = "é€😀".repeat(100);
+        for max in 40..120 {
+            let out = trim_output(&text, max);
+            assert!(out.len() <= max, "max {max}: {}", out.len());
+            let body = out.split_once('\n').unwrap().1;
+            assert!(text.ends_with(body), "max {max}: {out}");
+        }
+    }
+
+    #[test]
+    fn capped_checks_keep_each_tail() {
+        let check = VerifyCheck {
+            command: "cargo test".into(),
+            passed: false,
+            exit_code: 101,
+            duration_ms: 1,
+            output: format!("{}the failure", "x".repeat(70_000)),
+            recorded: String::new(),
+        };
+        let text = format_checks_capped(&[check], 300);
+        assert!(text.starts_with("[FAIL] cargo test (exit 101)"), "{text}");
+        assert!(text.ends_with("the failure"), "{text}");
+        assert!(text.len() < 400, "{}", text.len());
+    }
+
+    fn scrub_cfg(pass_env: &[&str]) -> Config {
+        let mut cfg = crate::config::parse_config_toml(
+            "repo_path = \"/tmp\"\n[[provider]]\nname = \"grok\"\nkind = \"grok\"\n",
+        )
+        .unwrap();
+        cfg.verify.pass_env = pass_env.iter().map(|s| s.to_string()).collect();
+        cfg
+    }
+
+    #[test]
+    fn scrub_drops_atr_and_token_vars_unless_passed() {
+        let names = [
+            "ATR_CONFIG",
+            "ATR_SHADOW_GH_TOKEN",
+            "ATR_TELEGRAM_TOKEN",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "MY_BOT_TOKEN",
+            "PATH",
+            "HOME",
+        ]
+        .map(String::from);
+        let mut cfg = scrub_cfg(&[]);
+        cfg.telegram.bot_token_env = "MY_BOT_TOKEN".into();
+        let all = scrubbed_env(&cfg, names.iter().cloned());
+        assert_eq!(all, names[..6].to_vec());
+
+        cfg.verify.pass_env = vec!["GH_TOKEN".into(), "ATR_CONFIG".into()];
+        let kept = scrubbed_env(&cfg, names.iter().cloned());
+        assert!(!kept.iter().any(|k| k == "GH_TOKEN" || k == "ATR_CONFIG"));
+        assert!(kept.iter().any(|k| k == "GITHUB_TOKEN"));
+    }
+
+    #[tokio::test]
+    async fn verify_child_does_not_inherit_scrubbed_env() {
+        std::env::set_var("ATR_VERIFY_SCRUB_TEST", "junk");
+        std::env::set_var("ATR_VERIFY_PASS_TEST", "kept");
+        let cfg = scrub_cfg(&["ATR_VERIFY_PASS_TEST"]);
+        let scrub = scrubbed_env(
+            &cfg,
+            ["ATR_VERIFY_SCRUB_TEST", "ATR_VERIFY_PASS_TEST"]
+                .into_iter()
+                .map(String::from),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let check = run_one(
+            "echo \"${ATR_VERIFY_SCRUB_TEST:-unset} ${ATR_VERIFY_PASS_TEST:-unset}\"",
+            dir.path(),
+            Duration::from_secs(10),
+            4000,
+            &scrub,
+        )
+        .await;
+        assert_eq!(check.output, "unset kept");
+    }
+
+    #[test]
     fn skip_protect_flag_and_label() {
         let mut cfg = crate::config::VerifyConfig {
             enabled: true,
@@ -864,6 +1018,7 @@ cli = "/bin/true"
             protect_tests: true,
             protect_tests_skip_label: "atr:tests-ok".into(),
             test_globs: crate::config::default_test_globs(),
+            pass_env: Vec::new(),
             repos: Vec::new(),
         };
         assert!(!skip_protect(&cfg, &dummy_task(false, "")));

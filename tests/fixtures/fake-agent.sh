@@ -259,6 +259,23 @@ PY
   exit 0
 fi
 
+# atr planner run (its --json-schema names "subtasks"): reply with
+# $DIR/plan.json when the test wrote one.
+PLAN=0
+for a in "${args[@]}"; do
+  if [[ "$a" == *'"subtasks"'* ]]; then
+    PLAN=1
+  fi
+done
+if [[ "$PLAN" == "1" && -f "$DIR/plan.json" ]]; then
+  python3 - "$(cat "$DIR/plan.json")" "$sid" <<'PY'
+import json, sys
+text, sid = sys.argv[1], sys.argv[2]
+print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":text,"text":text,"session_id":sid,"sessionId":sid,"total_cost_usd":0.001,"usage":{"input_tokens":30,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":9}}), flush=True)
+PY
+  exit 0
+fi
+
 case "$ACTION" in
   stall)
     # Real Grok only prints the session id on the final result. A killed

@@ -326,14 +326,15 @@ impl Shared {
         self.db.clear_retry(key)?;
         // Fresh session for a provider without a shell: a resumed local-model
         // session tends to say "already done" and stop. Providers with a shell
-        // resume their session as in v0.1.34. The worktree is kept.
+        // resume their session as in v0.1.34, except a planning run: its session
+        // is read-only and the next run must not inherit it. The worktree is kept.
         let no_shell = self
             .config
             .read()
             .unwrap()
             .provider(t.provider.as_deref().unwrap_or_default())
             .is_some_and(|p| !p.has_shell());
-        if no_shell && !crate::telegram::is_assistant_key(key) {
+        if (no_shell || t.role == "plan") && !crate::telegram::is_assistant_key(key) {
             self.db.clear_task_sessions(key)?;
         }
         if t.status == "held" {
@@ -1716,6 +1717,22 @@ cli = "/bin/true"
                 .any(|k| k == "real-1"),
             "retry must leave an unconsumed message so the scheduler can dispatch"
         );
+        std::mem::forget(dir);
+    }
+
+    #[test]
+    fn retry_of_a_planning_run_drops_its_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = test_shared(&dir);
+        shared.db.upsert_task("plan-1", "/repo", None).unwrap();
+        shared.db.set_task_role("plan-1", "plan").unwrap();
+        shared
+            .db
+            .set_provider_session("plan-1", Some("claude"), Some("ses_plan"))
+            .unwrap();
+        shared.db.set_status("plan-1", "failed").unwrap();
+        shared.retry("plan-1").unwrap();
+        assert_eq!(shared.db.task_session("plan-1", "claude").unwrap(), None);
         std::mem::forget(dir);
     }
 
