@@ -129,7 +129,7 @@ enum Cmd {
         #[command(flatten)]
         sess: CliSessionArgs,
     },
-    /// Show providers (with order numbers), inflight tasks, and usage.
+    /// Show providers, inflight tasks, and grouped task health.
     Status {
         /// Print the machine-readable JSON snapshot.
         #[arg(long)]
@@ -137,6 +137,39 @@ enum Cmd {
         /// Limit tasks to this watch repo (name, owner/name, or path).
         #[arg(long)]
         repo: Option<String>,
+        /// Only the failing section (failed, needs_attention, cancelled).
+        #[arg(long)]
+        failed: bool,
+        /// Only running tasks.
+        #[arg(long)]
+        running: bool,
+        /// Only waiting tasks (queued + held).
+        #[arg(long)]
+        waiting: bool,
+        /// Only done tasks (stored waiting + done).
+        #[arg(long)]
+        done: bool,
+        /// Drop tasks whose updated is older than now minus this duration (`7d`, `48h`).
+        #[arg(long, value_name = "DUR", value_parser = parse_cli_duration)]
+        since: Option<std::time::Duration>,
+        /// Cap each shown section at N (0 means no rows; counts still print).
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+        /// Reprint the human view every SECS (default 2) until stdin closes or Ctrl-C.
+        #[arg(
+            long,
+            value_name = "SECS",
+            num_args = 0..=1,
+            default_missing_value = "2",
+            conflicts_with = "json"
+        )]
+        watch: Option<u64>,
+        /// Include role=reflect tasks and lift the done/waiting caps.
+        #[arg(long)]
+        all: bool,
+        /// Exit 1 when a shown failing section is non-empty.
+        #[arg(long)]
+        check: bool,
     },
     /// List or edit watched git repos (preserves comments; SIGHUP the daemon).
     Repos {
@@ -627,6 +660,10 @@ enum ShadowCmd {
     },
 }
 
+fn parse_cli_duration(s: &str) -> Result<std::time::Duration, String> {
+    atr::duration::parse_duration(s).map_err(|e| e.to_string())
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -908,10 +945,36 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             atr::tui::run(shared, sess.into_tui_opts(prompt, false)).await
         }
-        Cmd::Status { json, repo } => {
+        Cmd::Status {
+            json,
+            repo,
+            failed,
+            running,
+            waiting,
+            done,
+            since,
+            limit,
+            watch,
+            all,
+            check,
+        } => {
             let shared = open_after_init(path, "atr status").await?;
-            app::print_status(&shared, json, repo.as_deref());
-            Ok(ExitCode::SUCCESS)
+            Ok(app::run_status(
+                &shared,
+                &atr::StatusCli {
+                    json,
+                    repo,
+                    failed,
+                    running,
+                    waiting,
+                    done,
+                    since,
+                    limit,
+                    watch,
+                    all,
+                    check,
+                },
+            ))
         }
         Cmd::Repos { cmd } => {
             match cmd.unwrap_or(ReposCmd::List) {
@@ -1749,5 +1812,56 @@ mod tests {
             msg.contains("unexpected argument") || msg.contains("--nope"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn status_watch_conflicts_with_json() {
+        let err = Cli::try_parse_from(["atr", "status", "--watch", "--json"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--watch") && msg.contains("--json"), "{msg}");
+    }
+
+    #[test]
+    fn status_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "atr",
+            "status",
+            "--failed",
+            "--running",
+            "--since",
+            "7d",
+            "--limit",
+            "0",
+            "--check",
+        ])
+        .expect("status flags");
+        match cli.cmd {
+            Some(Cmd::Status {
+                failed,
+                running,
+                waiting,
+                done,
+                since,
+                limit,
+                watch,
+                all,
+                check,
+                json,
+                ..
+            }) => {
+                assert!(failed && running && check);
+                assert!(!waiting && !done && !all && !json);
+                assert_eq!(since, Some(std::time::Duration::from_secs(7 * 86400)));
+                assert_eq!(limit, Some(0));
+                assert!(watch.is_none());
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+        let cli =
+            Cli::try_parse_from(["atr", "status", "--watch"]).expect("status --watch default");
+        match cli.cmd {
+            Some(Cmd::Status { watch, .. }) => assert_eq!(watch, Some(2)),
+            other => panic!("expected Status, got {other:?}"),
+        }
     }
 }

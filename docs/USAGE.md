@@ -173,6 +173,8 @@ atr telegram test
 /ui
 ```
 
+`/status [repo]` uses the same failing → running → waiting → done grouping as `atr status` (phone layout: Title Case section names and bullets). Running and failing tasks are listed; a stored `waiting` row is under Done. Caps are tighter than the CLI (10 / 8 / 5 / 3). If the body would exceed the Telegram length cap, Done is dropped first, then Waiting is truncated; Failing and Running stay. `/status` has no `--watch` / `--check` / `--json`.
+
 `/ui` replies with a dashboard link: `[dashboard] public_url` if set, else a detected Tailscale Serve `https://…ts.net/` URL, else the local `atr ui --print` address (marked local-only).
 
 If you type a normal sentence (not a `/command`), the assistant answers. Prefix the sentence with `@claude` / `@codex` / `@grok` (any configured provider) to use that provider for that one message. `/assistant <provider>` sets this chat's default assistant provider (persisted); `/assistant` shows it. The config default stays grok / first available. The assistant can only propose the same commands; each write still needs Confirm. Every queued task (typed `/add` and an assistant-proposed `ATR: /add …`) posts a workspace / provider / model / agent / prompt summary with Confirm / Cancel and queues only after Confirm from an allowed private chat. Cancel or a stale button is a short no-op (pending proposals expire after two minutes or a restart). Plain Q&A does not need Confirm. There is no `/sh`. Outbound Telegram text is redacted for common token shapes (GitHub PATs, `sk-` keys, bot tokens, `KEY=`/`TOKEN=`/`SECRET=`/`PASSWORD=`, Bearer headers). If the assistant times out, that chat is told so; grok (or whichever provider ran it) is not marked degraded and other work is unaffected.
@@ -195,6 +197,11 @@ atr config get telegram.assistant.providers
 ```bash
 atr status
 atr status --repo demo-1
+atr status --failed
+atr status --running --waiting
+atr status --check
+atr status --watch
+atr status --json
 atr tasks
 atr tasks my-task
 atr usage --repo demo-1 --period 7d
@@ -207,6 +214,15 @@ atr resume
 atr config get github.label
 atr config set github.label for:atr
 ```
+
+`atr status` is a health screen. After the daemon/provider header it groups tasks as **failing**, then **running**, then **waiting**, then **done**. Empty sections are omitted. Counts are the full filtered set; default caps are 20 / 20 / 8 / 5 with `… N more` when a section overflows.
+
+- **failing** — stored `failed`, `needs_attention`, `cancelled`
+- **running** — stored `running`, or in-flight, or an open run whose owner is still alive
+- **waiting** — `queued` or `held` (hold reason, retry time, or `after` deps). atr's stored `waiting` is idle/finished and is listed under **done**, not here
+- **done** — stored `waiting` or `done`
+
+Flags: `--failed` / `--running` / `--waiting` / `--done` show only those sections (several combine, still in that order). `--since 7d` drops older `updated` rows before caps (same duration parser as `atr gc`). `--limit N` caps each shown section (`0` prints counts and no rows). `--all` includes hidden `role=reflect` tasks and lifts the done/waiting caps (still honors `--limit`). `--watch [SECS]` reprints the human view (default 2) until stdin closes or Ctrl-C; it cannot be combined with `--json`. `--check` exits 0 when the shown failing count is 0, 1 when it is greater, 2 for bad flags or an unknown `--repo`. Default (no `--check`) is exit 0 whenever the snapshot prints. `--json` keeps the existing `tasks[]` (every non-reflect task, `updated DESC`, unless `--all`) and adds `groups`. Worktree and branch stay on `atr tasks` / `atr tasks KEY`.
 
 `atr retry` starts a fresh attempt: the last consumed prompt is marked pending again so the scheduler can dispatch (no extra `atr submit` needed), the `task_timeout` wall clock restarts, and the provider is chosen again from the current config (a Telegram assistant task follows `[telegram.assistant]` as it is now; a compare arm keeps its pinned provider). `atr pause` / `atr resume` / `atr retry` call the running `atr serve` (bearer token, read from the same token file as `atr cancel`). If the service is not reachable they write the state database instead and the change applies at the next start. `atr config get/set` use the same keys and validation as Telegram `/config` (secret keys refused, comments kept, `config.toml.bak` written, service reloaded with SIGHUP).
 

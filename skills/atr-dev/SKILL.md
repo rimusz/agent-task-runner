@@ -7,7 +7,7 @@ description: Develop atr itself (rimusz/agent-task-runner) — repo map, build/t
 
 For agents and contributors changing the atr source. To *operate* an installed atr, use `skills/atr/SKILL.md` instead.
 
-atr is a single Rust binary (`atr`, edition 2021, MSRV 1.85) that runs as a long-lived service and drives official agent CLIs (claude, grok, cursor, codex, opencode) on subscription plans.
+atr is a single Rust binary (`atr`, edition 2021, MSRV 1.89) that runs as a long-lived service and drives official agent CLIs (claude, grok, cursor, codex, opencode) on subscription plans.
 
 ## Repo map
 

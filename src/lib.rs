@@ -53,6 +53,7 @@ pub mod scratch;
 pub mod service;
 pub mod shadow;
 pub mod skill;
+pub mod status;
 pub mod task;
 pub mod telegram;
 pub mod telegram_health;
@@ -68,7 +69,8 @@ pub mod verify;
 pub mod worktree;
 
 pub use app::{
-    serve, serve_background, InterruptOutcome, Shared, SubmitOpts, SubmitOutcome, EX_TEMPFAIL,
+    serve, serve_background, InterruptOutcome, Shared, StatusCli, SubmitOpts, SubmitOutcome,
+    EX_TEMPFAIL,
 };
 pub use config::{default_config_path, load_config, Config};
 pub use providers::new_session_uuid;

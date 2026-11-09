@@ -57,11 +57,11 @@ pub fn parse_bytes(raw: &str) -> Result<u64> {
 
 pub fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
-    if secs % 86400 == 0 && secs >= 86400 {
+    if secs.is_multiple_of(86400) && secs >= 86400 {
         format!("{}d", secs / 86400)
-    } else if secs % 3600 == 0 && secs >= 3600 {
+    } else if secs.is_multiple_of(3600) && secs >= 3600 {
         format!("{}h", secs / 3600)
-    } else if secs % 60 == 0 && secs >= 60 {
+    } else if secs.is_multiple_of(60) && secs >= 60 {
         format!("{}m", secs / 60)
     } else {
         format!("{secs}s")

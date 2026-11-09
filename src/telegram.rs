@@ -1,6 +1,7 @@
 use crate::app::{Shared, SubmitOutcome};
 use crate::config::{Config, TelegramConfig};
 use crate::providers::hit_ratio_from_sums;
+use crate::status;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -2519,37 +2520,12 @@ fn format_status_body(v: &Value, tz: &str, paused: bool, repo: Option<&str>) -> 
         out.push_str(line);
         out.push('\n');
     }
-    if let Some(tasks) = v.get("tasks").and_then(|x| x.as_array()) {
-        let held = tasks
-            .iter()
-            .filter(|t| t.get("status").and_then(|x| x.as_str()) == Some("held"))
-            .count();
-        let retrying = tasks
-            .iter()
-            .filter(|t| {
-                t.get("retry_reason")
-                    .and_then(|x| x.as_str())
-                    .is_some_and(|s| !s.is_empty())
-            })
-            .count();
-        if held > 0 || retrying > 0 {
-            out.push_str(&format!("\nTasks held={held} retrying={retrying}\n"));
-            for t in tasks.iter().filter(|t| {
-                t.get("status").and_then(|x| x.as_str()) == Some("held")
-                    || t.get("retry_reason")
-                        .and_then(|x| x.as_str())
-                        .is_some_and(|s| !s.is_empty())
-            }) {
-                let key = t.get("key").and_then(|x| x.as_str()).unwrap_or("-");
-                let why = t
-                    .get("hold_reason")
-                    .and_then(|x| x.as_str())
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| t.get("retry_reason").and_then(|x| x.as_str()))
-                    .unwrap_or("-");
-                out.push_str(&format!("• {key} — {why}\n"));
-            }
-        }
+    let groups = status::groups_view(v);
+    let budget = MAX_TEXT.saturating_sub(out.len().saturating_add(1));
+    let tasks = status::format_telegram_task_sections(&groups, budget);
+    if !tasks.is_empty() {
+        out.push('\n');
+        out.push_str(&tasks);
     }
     out
 }
@@ -3469,6 +3445,59 @@ cli = "/bin/true"
         let claude = text.lines().find(|l| l.contains("claude")).unwrap();
         assert!(!claude.contains("cooling"), "{claude}");
         assert!(!claude.contains("skipping"), "{claude}");
+    }
+
+    #[test]
+    fn format_status_groups_mixed_tasks_on_phone() {
+        let shared = harness_shared();
+        shared.db.upsert_task("bad-1", "/repo", None).unwrap();
+        shared.db.set_status("bad-1", "failed").unwrap();
+        shared
+            .db
+            .set_task_result("bad-1", "compile error\nstack", "", None)
+            .unwrap();
+        shared.db.upsert_task("live-1", "/repo", None).unwrap();
+        shared.db.set_status("live-1", "running").unwrap();
+        let run = shared.db.start_run("live-1", "claude", "opus").unwrap();
+        shared
+            .db
+            .insert_event(run, "tool", r#"{"tool":"Read","text":"src/lib.rs"}"#)
+            .unwrap();
+        shared.db.upsert_task("hold-1", "/repo", None).unwrap();
+        shared.db.set_status("hold-1", "held").unwrap();
+        shared
+            .db
+            .set_hold("hold-1", "after x failed", false)
+            .unwrap();
+        shared.db.upsert_task("queue-1", "/repo", None).unwrap();
+        shared
+            .db
+            .set_retry("queue-1", 1, Some("2026-11-09T16:02:00Z"), "rate limit")
+            .unwrap();
+        shared.db.upsert_task("idle-1", "/repo", None).unwrap();
+        shared.db.set_status("idle-1", "waiting").unwrap();
+        shared.db.upsert_task("done-1", "/repo", None).unwrap();
+        shared.db.set_status("done-1", "done").unwrap();
+
+        let v = shared.status_json();
+        assert!(v.get("groups").is_some(), "{v}");
+        let text = format_status_body(&v, "UTC", false, None);
+        let fail = text.find("Failing (").expect(&text);
+        let run = text.find("Running (").expect(&text);
+        let wait = text.find("Waiting (").expect(&text);
+        let done = text.find("Done (").expect(&text);
+        assert!(fail < run && run < wait && wait < done, "{text}");
+        assert!(text.contains("• bad-1 — failed"), "{text}");
+        assert!(text.contains("• live-1 —"), "{text}");
+        assert!(text.contains("• hold-1 — held"), "{text}");
+        assert!(text.contains("• idle-1 — waiting"), "{text}");
+        let idle = text.find("• idle-1").unwrap();
+        assert!(
+            idle > done,
+            "stored waiting must be under Done, not Waiting:\n{text}"
+        );
+        assert!(!text.contains("Tasks held="), "{text}");
+        assert!(text.len() < MAX_TEXT, "{}", text.len());
     }
 
     #[test]

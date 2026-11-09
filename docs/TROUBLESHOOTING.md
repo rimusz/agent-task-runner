@@ -57,7 +57,8 @@ still read):
 
 ## 2. `atr status` and the dashboard
 
-`atr status` (or `--json`) shows providers, running/queued tasks, and a
+`atr status` (or `--json`) shows providers, then tasks grouped as failing,
+running, waiting, and done, plus a
 `github auth:` line (`ok`, `warn`, `FAIL`). The dashboard
 (`atr ui`, or your Tailscale Serve URL) shows a **red banner** when GitHub auth
 is failing and an **amber banner** when the token expires within 14 days.

@@ -90,6 +90,7 @@ async fn override_reaches_the_named_provider_and_runs_model() {
         "gpt-5.6-sol",
         "status JSON shows the override"
     );
+    assert!(h.shared.status_json().get("groups").is_some());
 }
 
 #[tokio::test]
