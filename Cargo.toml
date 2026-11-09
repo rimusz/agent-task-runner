@@ -3,7 +3,7 @@ name = "atr"
 # First-release floor. Do not bump for shipping — tags inject ATR_RELEASE_VERSION.
 version = "0.1.1"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "Agent task runner — drives official agent CLIs on existing subscription plans"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rimusz/agent-task-runner"
@@ -18,7 +18,7 @@ clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.28"
 libc = "0.2"
 ratatui = "0.29"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 sysinfo = "0.33"
