@@ -85,6 +85,18 @@ fn pause_resume_and_retry_without_service() {
         out.contains("\"intake_paused\": true") || out.contains("\"intake_paused\":true"),
         "{out}"
     );
+    assert!(
+        out.contains("\"groups\"")
+            && out.contains("\"failing\"")
+            && out.contains("\"running\"")
+            && out.contains("\"waiting\"")
+            && out.contains("\"done\""),
+        "{out}"
+    );
+    let (ok, out) = atr(&dir, &cfg, &["status", "--watch", "--json"]);
+    assert!(!ok, "watch+json must fail: {out}");
+    let (ok, out) = atr(&dir, &cfg, &["status", "--check"]);
+    assert!(ok, "{out}");
     let (ok, out) = atr(&dir, &cfg, &["resume"]);
     assert!(ok, "{out}");
     assert!(out.contains("intake resumed"), "{out}");

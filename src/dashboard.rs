@@ -564,7 +564,7 @@ fn start_of_local_day(tz: &crate::tz::DisplayTz, now: chrono::DateTime<chrono::U
     start.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn first_line(body: &str, max: usize) -> String {
+pub(crate) fn first_line(body: &str, max: usize) -> String {
     let line = body
         .lines()
         .map(str::trim)
@@ -578,7 +578,7 @@ fn first_line(body: &str, max: usize) -> String {
 }
 
 /// One-line hint from the latest event of the task's open run.
-fn progress_for(shared: &Shared, t: &crate::db::Task, secrets: &[String]) -> String {
+pub(crate) fn progress_for(shared: &Shared, t: &crate::db::Task, secrets: &[String]) -> String {
     let Some(run) = shared
         .db
         .list_runs(Some(&t.key))
@@ -623,7 +623,7 @@ fn short_repo(repo: Option<&str>) -> String {
         .to_string()
 }
 
-fn format_elapsed(started: &str) -> String {
+pub(crate) fn format_elapsed(started: &str) -> String {
     let Ok(ts) = chrono::DateTime::parse_from_rfc3339(started) else {
         return "-".into();
     };
@@ -684,7 +684,7 @@ fn tail_logs(cfg: &Config, secrets: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn collect_secrets(cfg: &Config) -> Vec<String> {
+pub(crate) fn collect_secrets(cfg: &Config) -> Vec<String> {
     let mut s = Vec::new();
     if let Some(t) = crate::telegram::bot_token(&cfg.telegram) {
         s.push(t);

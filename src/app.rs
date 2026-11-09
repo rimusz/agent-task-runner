@@ -4,13 +4,17 @@ use crate::http;
 use crate::providers::{check_version, hit_ratio_from_sums, VersionCheck};
 use crate::runner::terminate_tree_now;
 use crate::scheduler::{self, reconcile};
+use crate::status::{self, Caps, Enrich, GroupFilter, GroupRow};
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::{self, IsTerminal, Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
@@ -45,6 +49,48 @@ pub enum InterruptOutcome {
     /// The provider cannot resume a session, so killing the turn would lose
     /// its work. Left running; pending messages wait for it to finish.
     NotResumable,
+}
+
+/// Filters applied when building `status_json` (CLI `--all` / `--since` / `--repo`).
+#[derive(Debug, Clone, Default)]
+pub struct StatusJsonOpts<'a> {
+    pub repo: Option<&'a str>,
+    pub include_reflect: bool,
+    pub since: Option<Duration>,
+}
+
+/// CLI flags for `atr status` (human view, `--json`, `--check`, `--watch`).
+#[derive(Debug, Clone, Default)]
+pub struct StatusCli {
+    pub json: bool,
+    pub repo: Option<String>,
+    pub failed: bool,
+    pub running: bool,
+    pub waiting: bool,
+    pub done: bool,
+    pub since: Option<Duration>,
+    pub limit: Option<usize>,
+    pub watch: Option<u64>,
+    pub all: bool,
+    pub check: bool,
+}
+
+impl StatusCli {
+    fn query(&self) -> StatusJsonOpts<'_> {
+        StatusJsonOpts {
+            repo: self.repo.as_deref(),
+            include_reflect: self.all,
+            since: self.since,
+        }
+    }
+
+    fn filter(&self) -> GroupFilter {
+        GroupFilter::from_flags(self.failed, self.running, self.waiting, self.done)
+    }
+
+    fn caps(&self) -> Caps {
+        status::cli_caps(self.all, self.limit)
+    }
 }
 
 impl InterruptOutcome {
@@ -493,9 +539,20 @@ impl Shared {
     }
 
     pub fn status_json_filtered(&self, repo: Option<&str>) -> Value {
+        self.status_json_opts(&StatusJsonOpts {
+            repo,
+            ..StatusJsonOpts::default()
+        })
+    }
+
+    pub fn status_json_opts(&self, opts: &StatusJsonOpts<'_>) -> Value {
         let cfg = self.config.read().unwrap().clone();
         let inflight = self.inflight.lock().unwrap().clone();
-        let tasks = self.db.list_tasks().unwrap_or_default();
+        let tasks = if opts.include_reflect {
+            self.db.list_all_tasks().unwrap_or_default()
+        } else {
+            self.db.list_tasks().unwrap_or_default()
+        };
         let totals = self.db.usage_totals(1).unwrap_or_default();
         let clock = crate::clock::Clock::system();
         let mut top_reset: Option<chrono::DateTime<chrono::Utc>> = None;
@@ -624,6 +681,131 @@ impl Shared {
             "waiting": crate::host::decide(&cfg.host, &host_snap).map(|w| w.reason),
             "line": crate::host::format_line(&cfg.host, &host_snap),
         });
+        let cutoff = opts.since.map(|d| {
+            chrono::Utc::now()
+                - chrono::Duration::from_std(d).unwrap_or_else(|_| chrono::Duration::days(30))
+        });
+        let inflight_keys: HashSet<String> = inflight.keys().cloned().collect();
+        let live_open: HashSet<String> = self
+            .db
+            .live_open_runs(None)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.task_key)
+            .collect();
+        let mut open_by_key: HashMap<String, crate::db::RunRow> = HashMap::new();
+        for r in self.db.open_runs().unwrap_or_default() {
+            open_by_key.entry(r.task_key.clone()).or_insert(r);
+        }
+        let secrets = crate::dashboard::collect_secrets(&cfg);
+        let tz = &cfg.display_timezone;
+        let mut task_vals = Vec::new();
+        let mut grouped = Vec::new();
+        for t in &tasks {
+            if let Some(f) = opts.repo {
+                if !cfg.task_matches_repo(t, f) {
+                    continue;
+                }
+            }
+            if let Some(cut) = cutoff {
+                if let Ok(u) = chrono::DateTime::parse_from_rfc3339(&t.updated) {
+                    if u.with_timezone(&chrono::Utc) < cut {
+                        continue;
+                    }
+                }
+            }
+            let val = crate::output::with_task_model(
+                json!({
+                    "key": t.key,
+                    "status": t.status,
+                    "provider": t.provider,
+                    "session_id": t.session_id,
+                    "shadow": t.shadow,
+                    "repo": cfg.task_repo_name(t),
+                    "parent": t.parent_key,
+                    "role": t.role,
+                    "title": t.title,
+                    "deps": t.deps,
+                    "after": crate::deps::split_deps(&t.deps),
+                    "issue": t.issue,
+                    "workspace": t.workspace_kind,
+                    "output": t.output_kind,
+                    "source": t.source_kind,
+                    "retry_attempt": t.retry_attempt,
+                    "retry_next_at": t.retry_next_at,
+                    "retry_reason": t.retry_reason,
+                    "hold_reason": t.hold_reason,
+                }),
+                t,
+            );
+            task_vals.push(val.clone());
+            let live = status::is_live(&t.status, &t.key, &inflight_keys, &live_open);
+            let bucket = status::classify(&t.status, live);
+            let last = self
+                .db
+                .list_runs(Some(&t.key))
+                .ok()
+                .and_then(|rs| rs.into_iter().last());
+            let open = open_by_key.get(&t.key);
+            let why = match bucket {
+                status::Bucket::Failing => status::failing_why(
+                    &t.result_text,
+                    last.as_ref().and_then(|r| r.outcome.as_deref()),
+                ),
+                status::Bucket::Waiting => status::waiting_why(t),
+                status::Bucket::Running | status::Bucket::Done | status::Bucket::Other => {
+                    String::new()
+                }
+            };
+            let (elapsed, elapsed_s) = match open {
+                Some(r) => (
+                    Some(crate::dashboard::format_elapsed(&r.started)),
+                    status::elapsed_secs(&r.started),
+                ),
+                None => (None, None),
+            };
+            let progress = crate::dashboard::first_line(
+                &crate::dashboard::progress_for(self, t, &secrets),
+                80,
+            );
+            let model = if bucket == status::Bucket::Running {
+                let from_run = open.and_then(|r| r.model.clone()).filter(|s| !s.is_empty());
+                Some(from_run.unwrap_or_else(|| {
+                    if t.model_override.is_empty() {
+                        "-".into()
+                    } else {
+                        t.model_override.clone()
+                    }
+                }))
+            } else {
+                None
+            };
+            let item = status::enrich_item(
+                val,
+                Enrich {
+                    exit_code: last.as_ref().and_then(|r| r.exit_code),
+                    last_outcome: last.as_ref().and_then(|r| r.outcome.clone()),
+                    elapsed,
+                    elapsed_s,
+                    progress: if progress.is_empty() {
+                        None
+                    } else {
+                        Some(progress)
+                    },
+                    why,
+                    updated: tz.format_str(&t.updated),
+                    model,
+                    stall_retries: t.stall_retries,
+                },
+            );
+            grouped.push(GroupRow {
+                bucket,
+                updated: t.updated.clone(),
+                status: t.status.clone(),
+                item,
+            });
+        }
+        let groups = status::assemble_groups(grouped);
         json!({
             "version": crate::VERSION,
             "listen": cfg.listen,
@@ -641,29 +823,8 @@ impl Shared {
             },
             "repos": crate::dashboard::repo_rows(&cfg, &self.config_path),
             "telegram_assistant": crate::dashboard::telegram_assistant(&cfg, &self.db),
-            "tasks": tasks.iter().filter(|t| {
-                repo.map(|f| cfg.task_matches_repo(t, f)).unwrap_or(true)
-            }).map(|t| crate::output::with_task_model(json!({
-                "key": t.key,
-                "status": t.status,
-                "provider": t.provider,
-                "session_id": t.session_id,
-                "shadow": t.shadow,
-                "repo": cfg.task_repo_name(t),
-                "parent": t.parent_key,
-                "role": t.role,
-                "title": t.title,
-                "deps": t.deps,
-                "after": crate::deps::split_deps(&t.deps),
-                "issue": t.issue,
-                "workspace": t.workspace_kind,
-                "output": t.output_kind,
-                "source": t.source_kind,
-                "retry_attempt": t.retry_attempt,
-                "retry_next_at": t.retry_next_at,
-                "retry_reason": t.retry_reason,
-                "hold_reason": t.hold_reason,
-            }), t)).collect::<Vec<_>>(),
+            "tasks": task_vals,
+            "groups": groups,
             "host": host,
             "retry": {
                 "enabled": cfg.retry.enabled,
@@ -1133,44 +1294,18 @@ fn print_task_detail(shared: &Shared, key: &str, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn task_status_note(t: &Value) -> String {
-    let status = t.get("status").and_then(|x| x.as_str()).unwrap_or("");
-    if status == "held" {
-        if let Some(r) = t
-            .get("hold_reason")
-            .and_then(|x| x.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            return format!("  {r}");
-        }
-    }
-    if let Some(r) = t
-        .get("retry_reason")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        let when = t
-            .get("retry_next_at")
-            .and_then(|x| x.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("");
-        return if when.is_empty() {
-            format!("  retry ({r})")
-        } else {
-            format!("  retry {when} ({r})")
-        };
-    }
-    if let Some(after) = t.get("after").and_then(|x| x.as_array()) {
-        let keys: Vec<&str> = after.iter().filter_map(|x| x.as_str()).collect();
-        if !keys.is_empty() && status == "queued" {
-            return format!("  after {}", keys.join(","));
-        }
-    }
-    String::new()
+pub fn format_status_table(shared: &Shared, repo: Option<&str>) -> String {
+    format_status_table_opts(
+        shared,
+        &StatusCli {
+            repo: repo.map(str::to_string),
+            ..StatusCli::default()
+        },
+    )
 }
 
-pub fn format_status_table(shared: &Shared, repo: Option<&str>) -> String {
-    let v = shared.status_json_filtered(repo);
+pub fn format_status_table_opts(shared: &Shared, cli: &StatusCli) -> String {
+    let v = snapshot_for_cli(shared, cli);
     let cfg = shared.config.read().unwrap().clone();
     let tz = cfg.display_timezone.label.clone();
     let listen = v.get("listen").and_then(|x| x.as_str()).unwrap_or("-");
@@ -1366,41 +1501,128 @@ pub fn format_status_table(shared: &Shared, repo: Option<&str>) -> String {
             ));
         }
     }
-    let tasks = v
-        .get("tasks")
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
-    out.push_str(&format!("tasks: {}\n", tasks.len()));
-    for t in tasks.iter().take(8) {
-        let extra = task_status_note(t);
-        out.push_str(&format!(
-            "  {}  {}  {}  {}{}\n",
-            t.get("key").and_then(|x| x.as_str()).unwrap_or("-"),
-            t.get("repo").and_then(|x| x.as_str()).unwrap_or("-"),
-            t.get("status").and_then(|x| x.as_str()).unwrap_or("-"),
-            t.get("provider").and_then(|x| x.as_str()).unwrap_or("-"),
-            extra
-        ));
-    }
-    if tasks.len() > 8 {
-        out.push_str(&format!("  … {} more\n", tasks.len() - 8));
-    }
+    let groups = v.get("groups").cloned().unwrap_or_else(|| json!({}));
+    out.push_str(&status::format_cli_task_sections(
+        &groups,
+        cli.filter(),
+        cli.caps(),
+    ));
     if let Some(c) = v.get("cache") {
         out.push_str(&crate::usage::format_status_cache_line(c));
     }
     out
 }
 
-pub fn print_status(shared: &Shared, as_json: bool, repo: Option<&str>) {
-    if as_json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&shared.status_json_filtered(repo)).unwrap()
-        );
-    } else {
-        print!("{}", format_status_table(shared, repo));
+fn snapshot_for_cli(shared: &Shared, cli: &StatusCli) -> Value {
+    let mut v = shared.status_json_opts(&cli.query());
+    if let Some(groups) = v.get("groups").cloned() {
+        v["groups"] = status::apply_group_filter(&groups, cli.filter());
     }
+    v
+}
+
+fn unknown_repo_message(shared: &Shared, repo: &str) -> String {
+    let names: Vec<String> = shared
+        .config
+        .read()
+        .unwrap()
+        .effective_repos()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    format!("unknown repo {repo:?}; configured: {}", names.join(", "))
+}
+
+fn check_exit(cli: &StatusCli, v: &Value) -> ExitCode {
+    if !cli.check {
+        return ExitCode::SUCCESS;
+    }
+    let n = if cli.filter().shows(status::Bucket::Failing) {
+        status::failing_count(v.get("groups").unwrap_or(&Value::Null))
+    } else {
+        0
+    };
+    if n > 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn print_status_once(shared: &Shared, cli: &StatusCli) -> Value {
+    let v = snapshot_for_cli(shared, cli);
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&v).unwrap());
+    } else {
+        print!("{}", format_status_table_opts(shared, cli));
+        let _ = io::stdout().flush();
+    }
+    v
+}
+
+fn sleep_or_stdin_eof(dur: Duration, eof: &std::sync::mpsc::Receiver<()>, tty: bool) -> bool {
+    if tty {
+        let wait = if dur.is_zero() {
+            Duration::from_secs(1)
+        } else {
+            dur
+        };
+        std::thread::sleep(wait);
+        false
+    } else {
+        match eof.recv_timeout(dur) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+        }
+    }
+}
+
+/// Print `atr status`. Exit 2 for unknown `--repo`; `--check` is 1 when a
+/// shown failing section is non-empty.
+pub fn run_status(shared: &Shared, cli: &StatusCli) -> ExitCode {
+    if let Some(repo) = cli.repo.as_deref() {
+        if shared
+            .config
+            .read()
+            .unwrap()
+            .resolve_repo_filter(repo)
+            .is_none()
+        {
+            eprintln!("{}", unknown_repo_message(shared, repo));
+            return ExitCode::from(2);
+        }
+    }
+    if let Some(secs) = cli.watch {
+        if cli.json {
+            eprintln!("--watch cannot be combined with --json");
+            return ExitCode::from(2);
+        }
+        let tty = io::stdin().is_terminal();
+        let (tx, rx) = std::sync::mpsc::channel();
+        if !tty {
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8];
+                loop {
+                    match io::stdin().read(&mut buf) {
+                        Ok(0) | Err(_) => {
+                            let _ = tx.send(());
+                            break;
+                        }
+                        Ok(_) => {}
+                    }
+                }
+            });
+        }
+        let interval = Duration::from_secs(secs);
+        loop {
+            let last = print_status_once(shared, cli);
+            if sleep_or_stdin_eof(interval, &rx, tty) {
+                return check_exit(cli, &last);
+            }
+        }
+    }
+    let v = print_status_once(shared, cli);
+    check_exit(cli, &v)
 }
 
 pub fn print_usage(
@@ -1615,6 +1837,192 @@ cli = "/bin/true"
         assert!(text.contains("acme-1"), "{text}");
         assert!(text.contains("cache headline="), "{text}");
         assert!(!text.trim_start().starts_with('{'), "{text}");
+        assert!(text.contains("waiting (1)"), "{text}");
+        std::mem::forget(dir);
+    }
+
+    fn seed_status_groups(shared: &Shared) {
+        shared.db.upsert_task("fail-1", "/repo", None).unwrap();
+        shared.db.set_status("fail-1", "failed").unwrap();
+        shared
+            .db
+            .set_task_result("fail-1", "boom\nmore", "", None)
+            .unwrap();
+        let run = shared.db.start_run("fail-1", "claude", "").unwrap();
+        shared.db.finish_run(run, "error", Some(1)).unwrap();
+
+        shared.db.upsert_task("run-1", "/repo", None).unwrap();
+        shared.db.set_status("run-1", "running").unwrap();
+        let rid = shared.db.start_run("run-1", "claude", "sonnet").unwrap();
+        shared
+            .db
+            .insert_event(rid, "tool", r#"{"tool":"Read","text":"src/app.rs"}"#)
+            .unwrap();
+
+        shared.db.upsert_task("hold-1", "/repo", None).unwrap();
+        shared.db.set_status("hold-1", "held").unwrap();
+        shared
+            .db
+            .set_hold("hold-1", "after x failed", false)
+            .unwrap();
+
+        shared.db.upsert_task("idle-1", "/repo", None).unwrap();
+        shared.db.set_status("idle-1", "waiting").unwrap();
+
+        shared.db.upsert_task("done-1", "/repo", None).unwrap();
+        shared.db.set_status("done-1", "done").unwrap();
+    }
+
+    #[test]
+    fn status_groups_order_and_json_keeps_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = test_shared(&dir);
+        seed_status_groups(&shared);
+        let text = format_status_table(&shared, None);
+        let fail = text.find("failing (").expect(&text);
+        let run = text.find("running (").expect(&text);
+        let wait = text.find("waiting (").expect(&text);
+        let done = text.find("done (").expect(&text);
+        assert!(fail < run && run < wait && wait < done, "{text}");
+        assert!(text.contains("fail-1"), "{text}");
+        assert!(text.contains("run-1"), "{text}");
+        assert!(text.contains("hold-1"), "{text}");
+        assert!(text.contains("idle-1"), "{text}");
+        let idle = text.find("idle-1").unwrap();
+        assert!(idle > done, "stored waiting belongs in done:\n{text}");
+        assert!(!text.contains("tasks:"), "{text}");
+
+        let json = shared.status_json();
+        assert!(json.get("groups").is_some(), "{json}");
+        let tasks = json["tasks"].as_array().unwrap();
+        let keys: Vec<&str> = tasks.iter().map(|t| t["key"].as_str().unwrap()).collect();
+        assert!(keys.contains(&"fail-1") && keys.contains(&"idle-1"));
+        assert!(tasks[0].get("why").is_none(), "{json}");
+        assert!(tasks[0].get("groups").is_none(), "{json}");
+        assert_eq!(json["groups"]["failing"][0]["key"], "fail-1");
+        assert_eq!(json["groups"]["failing"][0]["exit_code"], 1);
+        assert_eq!(json["groups"]["done"].as_array().unwrap().len(), 2);
+        assert!(json["groups"]["done"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["key"] == "idle-1" && t["status"] == "waiting"));
+
+        let failed_only = format_status_table_opts(
+            &shared,
+            &StatusCli {
+                failed: true,
+                ..StatusCli::default()
+            },
+        );
+        assert!(failed_only.contains("failing ("), "{failed_only}");
+        assert!(!failed_only.contains("running ("), "{failed_only}");
+        assert!(!failed_only.contains("waiting ("), "{failed_only}");
+        assert!(!failed_only.contains("done ("), "{failed_only}");
+
+        let running_only = format_status_table_opts(
+            &shared,
+            &StatusCli {
+                running: true,
+                ..StatusCli::default()
+            },
+        );
+        assert!(running_only.contains("running ("), "{running_only}");
+        assert!(!running_only.contains("failing ("), "{running_only}");
+
+        let combo = format_status_table_opts(
+            &shared,
+            &StatusCli {
+                failed: true,
+                done: true,
+                ..StatusCli::default()
+            },
+        );
+        let f = combo.find("failing (").expect(&combo);
+        let d = combo.find("done (").expect(&combo);
+        assert!(f < d, "{combo}");
+        assert!(!combo.contains("running ("), "{combo}");
+        std::mem::forget(dir);
+    }
+
+    #[test]
+    fn status_check_and_unknown_repo_exit_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = test_shared(&dir);
+        seed_status_groups(&shared);
+        let ok = run_status(
+            &shared,
+            &StatusCli {
+                running: true,
+                check: true,
+                ..StatusCli::default()
+            },
+        );
+        assert_eq!(ok, ExitCode::SUCCESS);
+        let fail = run_status(
+            &shared,
+            &StatusCli {
+                check: true,
+                ..StatusCli::default()
+            },
+        );
+        assert_eq!(fail, ExitCode::from(1));
+        let unknown = run_status(
+            &shared,
+            &StatusCli {
+                repo: Some("nope".into()),
+                check: true,
+                ..StatusCli::default()
+            },
+        );
+        assert_eq!(unknown, ExitCode::from(2));
+        std::mem::forget(dir);
+    }
+
+    #[test]
+    fn status_json_all_includes_reflect_and_since_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = test_shared(&dir);
+        shared.db.upsert_task("work-1", "/repo", None).unwrap();
+        shared.db.set_status("work-1", "done").unwrap();
+        shared
+            .db
+            .upsert_task("work-1-reflect", "/repo", None)
+            .unwrap();
+        shared
+            .db
+            .set_task_role("work-1-reflect", "reflect")
+            .unwrap();
+        shared.db.set_status("work-1-reflect", "done").unwrap();
+        let old = "2020-01-01T00:00:00.000Z";
+        shared.db.set_timestamps("work-1", old, old).unwrap();
+
+        let default = shared.status_json();
+        let keys: Vec<&str> = default["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["key"].as_str())
+            .collect();
+        assert!(!keys.contains(&"work-1-reflect"), "{keys:?}");
+
+        let all = shared.status_json_opts(&StatusJsonOpts {
+            include_reflect: true,
+            ..StatusJsonOpts::default()
+        });
+        let keys: Vec<&str> = all["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["key"].as_str())
+            .collect();
+        assert!(keys.contains(&"work-1-reflect"), "{keys:?}");
+
+        let since = shared.status_json_opts(&StatusJsonOpts {
+            since: Some(Duration::from_secs(86400)),
+            ..StatusJsonOpts::default()
+        });
+        assert!(since["tasks"].as_array().unwrap().is_empty(), "{since}");
         std::mem::forget(dir);
     }
 
@@ -1757,6 +2165,7 @@ cli = "/bin/true"
         let json = shared.status_json();
         let reset = json["providers"][0]["quota_reset"].as_str().unwrap_or("");
         assert!(!reset.is_empty(), "{json}");
+        assert!(json.get("groups").is_some(), "{json}");
         std::mem::forget(dir);
     }
 
