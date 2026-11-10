@@ -46,6 +46,7 @@ pub fn with_task_model(mut view: Value, task: &Task) -> Value {
     if !task.model_override.is_empty() {
         view["model"] = json!(task.model_override);
     }
+    view["check_only"] = json!(task.check_only);
     view
 }
 
@@ -116,6 +117,9 @@ pub fn finalize_with_text(shared: &Shared, key: &str, text: Option<&str>) -> Res
         return Ok(());
     };
     if task.shadow {
+        return Ok(());
+    }
+    if task.check_only {
         return Ok(());
     }
     let output = OutputKind::parse(&task.output_kind).unwrap_or(OutputKind::Reply);
@@ -214,6 +218,18 @@ pub fn noop_reason(cfg: &crate::config::Config, task: &Task, text: &str) -> Opti
         }
         _ => None,
     }
+}
+
+/// Why a check-only run that edited files is parked in `needs_attention`.
+pub fn check_only_modified_report(text: &str) -> String {
+    let said = crate::triage::sanitize_comment(text);
+    let said: String = said.chars().take(600).collect();
+    let mut out = "check-only task modified files".to_string();
+    if !said.trim().is_empty() {
+        out.push_str("\nLast model text: ");
+        out.push_str(said.trim());
+    }
+    out
 }
 
 /// The text atr stores as a no-op task's result.
@@ -940,6 +956,12 @@ cli = "/bin/true"
             r.starts_with("NO-OP n1: no usable triage suggestion. Nothing was delivered."),
             "{r}"
         );
+        let check = check_only_modified_report("looks fine");
+        assert!(
+            check.starts_with("check-only task modified files"),
+            "{check}"
+        );
+        assert!(check.contains("looks fine"), "{check}");
     }
 
     #[test]

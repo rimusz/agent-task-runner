@@ -17,7 +17,7 @@ const COMMANDS: &str = "\
 atr Telegram
 
 Watch
-• status · tasks / task <id> — running & recent
+• status [done|failed|running|waiting|all] · tasks / task <id>
 • doctor · tokens — health, GitHub tokens
 • usage [period] — spend & cache
 • ui — dashboard link
@@ -1006,7 +1006,10 @@ fn answer_callback(cfg: &TelegramConfig, token: &str, id: &str) {
 
 /// Commands registered with BotFather via setMyCommands (shown in the `/` menu).
 pub const BOT_COMMANDS: &[(&str, &str)] = &[
-    ("status", "What's running"),
+    (
+        "status",
+        "What's running; /status done|failed|running|waiting|all",
+    ),
     ("tasks", "Recent and running tasks"),
     ("task", "One task: /task <id>"),
     ("cancel", "Cancel a task: /cancel <id>"),
@@ -1015,7 +1018,7 @@ pub const BOT_COMMANDS: &[(&str, &str)] = &[
     ("usage", "Spend and cache"),
     (
         "add",
-        "Queue a task: /add [repo|host] [--provider] [--model] [--agent] <prompt>",
+        "Queue a task: /add [repo|host] [--provider] [--model] [--agent] [--check-only] <prompt>",
     ),
     ("assistant", "Chat assistant provider: /assistant [name]"),
     ("ui", "Dashboard link"),
@@ -1131,7 +1134,12 @@ pub fn handle_update(shared: &Shared, update: &Value) -> Result<Vec<Outgoing>> {
         return Ok(Vec::new());
     }
     if text.starts_with('/') {
-        Ok(vec![handle_command(shared, chat, text)])
+        let cmd = text.split('@').next().unwrap_or(text).trim();
+        if cmd == "/status" || cmd.starts_with("/status ") {
+            Ok(status_messages(shared, chat, cmd))
+        } else {
+            Ok(vec![handle_command(shared, chat, text)])
+        }
     } else if let Some((name, rest)) = parse_at_provider(text) {
         Ok(vec![handle_at_provider(shared, chat, name, rest)])
     } else if cfg.assistant.enabled {
@@ -1156,10 +1164,10 @@ fn handle_command(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
             }
         }
         "/status" => {
-            let repo = parts.next();
+            let rest: Vec<&str> = parts.collect();
             Outgoing {
                 chat_id: chat,
-                text: format_status(shared, repo),
+                text: format_status(shared, &rest),
                 markup: None,
             }
         }
@@ -1298,7 +1306,7 @@ fn handle_command(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
 }
 
 fn add_usage() -> String {
-    "usage: /add [repo|host] [--provider P] [--model M] [--agent A] <prompt>\n\
+    "usage: /add [repo|host] [--provider P] [--model M] [--agent A] [--check-only] <prompt>\n\
      repo = enabled [[repo]] name (git worktree)\n\
      host = ops dir (telegram.host_dir, default ~/atr-ops)\n\
      omit workspace = answer-only"
@@ -1331,6 +1339,7 @@ struct AddSpec {
     provider: Option<String>,
     model: Option<String>,
     agent: Option<String>,
+    check_only: bool,
     prompt: String,
 }
 
@@ -1347,6 +1356,7 @@ fn parse_add_command(cfg: &Config, raw: &str) -> std::result::Result<AddSpec, St
     let mut provider = None;
     let mut model = None;
     let mut agent = None;
+    let mut check_only = false;
     let mut i = 0;
     let mut saw_workspace = false;
     while i < tokens.len() {
@@ -1381,6 +1391,10 @@ fn parse_add_command(cfg: &Config, raw: &str) -> std::result::Result<AddSpec, St
                     };
                     agent = Some(v.to_string());
                     i += 2;
+                }
+                "check-only" | "check_only" => {
+                    check_only = true;
+                    i += 1;
                 }
                 _ => return Err(format!("unknown flag --{flag}")),
             }
@@ -1447,6 +1461,7 @@ fn parse_add_command(cfg: &Config, raw: &str) -> std::result::Result<AddSpec, St
         provider,
         model,
         agent,
+        check_only,
         prompt,
     })
 }
@@ -1462,9 +1477,10 @@ fn add_summary(cfg: &Config, spec: &AddSpec) -> String {
     let provider = spec.provider.as_deref().unwrap_or("(default)");
     let model = spec.model.as_deref().unwrap_or("(default)");
     let agent = spec.agent.as_deref().unwrap_or("(none)");
+    let check_only = if spec.check_only { "yes" } else { "no" };
     let preview: String = spec.prompt.chars().take(200).collect();
     format!(
-        "Queue this task?\n\nworkspace: {workspace}\nprovider: {provider}\nmodel: {model}\nagent: {agent}\nprompt: {preview}"
+        "Queue this task?\n\nworkspace: {workspace}\nprovider: {provider}\nmodel: {model}\nagent: {agent}\ncheck-only: {check_only}\nprompt: {preview}"
     )
 }
 
@@ -1579,6 +1595,7 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
             needs: Vec::new(),
             after: Vec::new(),
             agent,
+            check_only: spec.check_only,
         },
         model.as_deref(),
     ) {
@@ -1977,7 +1994,7 @@ pub fn deliver_assistant_result(shared: &Shared, key: &str, run_id: i64, outcome
 
 pub async fn assistant_snapshot(shared: &Shared) -> String {
     let cfg = shared.config.read().unwrap().clone();
-    let status = format_status(shared, None);
+    let status = format_status(shared, &[]);
     let doctor = crate::doctor::run(&cfg, &shared.config_path, true)
         .await
         .format();
@@ -2483,16 +2500,75 @@ fn retry_task(shared: &Shared, key: &str) -> Result<()> {
     shared.retry(key)
 }
 
-fn format_status(shared: &Shared, repo: Option<&str>) -> String {
-    let v = shared.status_json_filtered(repo);
+struct TgStatusQuery {
+    filter: status::GroupFilter,
+    full: bool,
+    repo: Option<String>,
+}
+
+fn parse_status_args(rest: &[&str]) -> TgStatusQuery {
+    let Some(first) = rest.first().copied().filter(|s| !s.is_empty()) else {
+        return TgStatusQuery {
+            filter: status::GroupFilter::all(),
+            full: false,
+            repo: None,
+        };
+    };
+    if let Some(filter) = status::GroupFilter::from_name(first) {
+        let full = true;
+        let repo = rest
+            .get(1)
+            .copied()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        return TgStatusQuery { filter, full, repo };
+    }
+    TgStatusQuery {
+        filter: status::GroupFilter::all(),
+        full: false,
+        repo: Some(first.to_string()),
+    }
+}
+
+fn format_status(shared: &Shared, args: &[&str]) -> String {
+    let q = parse_status_args(args);
+    format_status_query(shared, &q)
+}
+
+fn status_messages(shared: &Shared, chat: i64, cmd: &str) -> Vec<Outgoing> {
+    let rest: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+    let q = parse_status_args(&rest);
+    let body = format_status_query(shared, &q);
+    status::split_telegram_text(&body, status::TG_MSG_LIMIT)
+        .into_iter()
+        .map(|text| Outgoing {
+            chat_id: chat,
+            text,
+            markup: None,
+        })
+        .collect()
+}
+
+fn format_status_query(shared: &Shared, q: &TgStatusQuery) -> String {
+    let v = shared.status_json_filtered(q.repo.as_deref());
     let tz = shared.config.read().unwrap().display_timezone.label.clone();
     let paused = shared.intake_paused.load(Ordering::Relaxed);
-    sanitize(&format_status_body(&v, &tz, paused, repo), &[])
+    sanitize(
+        &format_status_body(&v, &tz, paused, q.repo.as_deref(), q.filter, q.full),
+        &[],
+    )
 }
 
 /// Phone-readable `/status` body. Facts come from `status_json`; this only
 /// changes presentation (no `en=` / `in=` jargon, human dates, usage indented).
-fn format_status_body(v: &Value, tz: &str, paused: bool, repo: Option<&str>) -> String {
+fn format_status_body(
+    v: &Value,
+    tz: &str,
+    paused: bool,
+    repo: Option<&str>,
+    filter: status::GroupFilter,
+    full: bool,
+) -> String {
     let mut out = format!(
         "atr · {tz} · intake {}\n",
         if paused { "paused" } else { "on" }
@@ -2522,7 +2598,7 @@ fn format_status_body(v: &Value, tz: &str, paused: bool, repo: Option<&str>) -> 
     }
     let groups = status::groups_view(v);
     let budget = MAX_TEXT.saturating_sub(out.len().saturating_add(1));
-    let tasks = status::format_telegram_task_sections(&groups, budget);
+    let tasks = status::format_telegram_task_sections_opts(&groups, filter, full, budget);
     if !tasks.is_empty() {
         out.push('\n');
         out.push_str(&tasks);
@@ -3342,6 +3418,64 @@ cli = "/bin/true"
     }
 
     #[test]
+    fn status_filters_match_cli_group_flags() {
+        std::env::set_var("ATR_TEST_TG_TOKEN", "tok-secret");
+        let shared = harness_shared();
+        shared.db.upsert_task("bad-1", "/repo", None).unwrap();
+        shared.db.set_status("bad-1", "failed").unwrap();
+        shared.db.upsert_task("idle-1", "/repo", None).unwrap();
+        shared.db.set_status("idle-1", "waiting").unwrap();
+        shared.db.upsert_task("hold-1", "/repo", None).unwrap();
+        shared.db.set_status("hold-1", "held").unwrap();
+
+        let done = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/status done"}});
+        let out = handle_update(&shared, &done).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].text.contains("Done ("), "{}", out[0].text);
+        assert!(out[0].text.contains("• idle-1 — done"), "{}", out[0].text);
+        assert!(!out[0].text.contains("Failing ("), "{}", out[0].text);
+        assert!(!out[0].text.contains("Waiting ("), "{}", out[0].text);
+
+        let failed = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/status failed"}});
+        let out = handle_update(&shared, &failed).unwrap();
+        assert!(out[0].text.contains("Failing ("), "{}", out[0].text);
+        assert!(out[0].text.contains("• bad-1 — failed"), "{}", out[0].text);
+        assert!(!out[0].text.contains("Done ("), "{}", out[0].text);
+
+        let waiting = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/status waiting"}});
+        let out = handle_update(&shared, &waiting).unwrap();
+        assert!(out[0].text.contains("Waiting ("), "{}", out[0].text);
+        assert!(out[0].text.contains("• hold-1 — held"), "{}", out[0].text);
+        assert!(!out[0].text.contains("Done ("), "{}", out[0].text);
+
+        let running = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/status running"}});
+        let out = handle_update(&shared, &running).unwrap();
+        assert!(out[0].text.contains("Running ("), "{}", out[0].text);
+        assert!(!out[0].text.contains("Done ("), "{}", out[0].text);
+
+        let all = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/status all"}});
+        let out = handle_update(&shared, &all).unwrap();
+        assert!(out[0].text.contains("Failing ("), "{}", out[0].text);
+        assert!(out[0].text.contains("Waiting ("), "{}", out[0].text);
+        assert!(out[0].text.contains("Done ("), "{}", out[0].text);
+    }
+
+    #[test]
+    fn parse_status_args_treats_group_names_not_as_repo() {
+        let done = parse_status_args(&["done"]);
+        assert!(done.full);
+        assert_eq!(done.filter, status::GroupFilter::from_name("done").unwrap());
+        assert!(done.repo.is_none());
+        let repo = parse_status_args(&["nixer"]);
+        assert!(!repo.full);
+        assert_eq!(repo.repo.as_deref(), Some("nixer"));
+        let both = parse_status_args(&["failed", "nixer"]);
+        assert!(both.full);
+        assert!(both.filter.failing && !both.filter.done);
+        assert_eq!(both.repo.as_deref(), Some("nixer"));
+    }
+
+    #[test]
     fn format_status_is_readable_on_phone() {
         let v = json!({
             "repos": [
@@ -3402,7 +3536,14 @@ cli = "/bin/true"
                 "short_hit": 0.47
             }
         });
-        let text = format_status_body(&v, "Europe/Vilnius", false, None);
+        let text = format_status_body(
+            &v,
+            "Europe/Vilnius",
+            false,
+            None,
+            status::GroupFilter::all(),
+            false,
+        );
         assert!(
             text.starts_with("atr · Europe/Vilnius · intake on"),
             "{text}"
@@ -3481,7 +3622,7 @@ cli = "/bin/true"
 
         let v = shared.status_json();
         assert!(v.get("groups").is_some(), "{v}");
-        let text = format_status_body(&v, "UTC", false, None);
+        let text = format_status_body(&v, "UTC", false, None, status::GroupFilter::all(), false);
         let fail = text.find("Failing (").expect(&text);
         let run = text.find("Running (").expect(&text);
         let wait = text.find("Waiting (").expect(&text);
@@ -3490,7 +3631,7 @@ cli = "/bin/true"
         assert!(text.contains("• bad-1 — failed"), "{text}");
         assert!(text.contains("• live-1 —"), "{text}");
         assert!(text.contains("• hold-1 — held"), "{text}");
-        assert!(text.contains("• idle-1 — waiting"), "{text}");
+        assert!(text.contains("• idle-1 — done"), "{text}");
         let idle = text.find("• idle-1").unwrap();
         assert!(
             idle > done,
@@ -3625,6 +3766,12 @@ cli = "/bin/true"
         assert!(!is_driveable_command("/sh"));
         assert!(!COMMANDS.contains("/sh"));
         assert!(COMMANDS.contains("doctor") && COMMANDS.contains("tokens"));
+        assert!(COMMANDS.contains("status [done|failed|running|waiting|all]"));
+        let status_desc = BOT_COMMANDS.iter().find(|(c, _)| *c == "status").unwrap().1;
+        assert!(
+            status_desc.contains("done|failed|running|waiting|all"),
+            "{status_desc}"
+        );
         assert_eq!(
             doctor_markup()["inline_keyboard"][0][0]["callback_data"],
             "doctor"
@@ -4055,6 +4202,11 @@ cli = "/bin/true"
         assert_eq!(spec.model.as_deref(), Some("claude-sonnet-5-5"));
         assert_eq!(spec.agent.as_deref(), Some("ops"));
         assert_eq!(spec.prompt, "fix login");
+        assert!(!spec.check_only);
+        let proof = parse_add_command(&cfg, "/add demo --check-only verify the pr").unwrap();
+        assert!(proof.check_only);
+        assert_eq!(proof.prompt, "verify the pr");
+        assert_eq!(proof.workspace, AddWorkspace::Repo("demo".into()));
         let repo = parse_add_command(&cfg, "/add demo --provider grok ship it").unwrap();
         assert_eq!(repo.workspace, AddWorkspace::Repo("demo".into()));
         assert_eq!(repo.provider.as_deref(), Some("grok"));

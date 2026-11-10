@@ -86,6 +86,9 @@ pub struct RawConfig {
     /// Optional TUI / ask provider order (bare `atr` / `atr tui` / `atr ask`). Empty = global `[[provider]]`.
     #[serde(default)]
     pub tui: RawTui,
+    /// Display timezone for status / Telegram (`[ui] timezone`). Empty = `display_timezone` / local.
+    #[serde(default)]
+    pub ui: RawUi,
     /// Repeatable intake sources. Empty = current defaults (GitHub if `[github]
     /// enabled`, MCP/CLI/HTTP always, Telegram if enabled, inbox off).
     #[serde(rename = "source", default)]
@@ -125,6 +128,13 @@ impl Default for RawCache {
             headline_min_input: default_headline_min_input(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RawUi {
+    /// IANA zone, or empty/`local` for the host local zone.
+    #[serde(default)]
+    pub timezone: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -713,6 +723,9 @@ pub struct Config {
     pub dry_run: bool,
     pub task_key_prefix: String,
     pub display_timezone: crate::tz::DisplayTz,
+    /// Set when `display_timezone` or `[ui] timezone` is not a valid IANA name.
+    /// Config still loads (falls back to local); `atr doctor` warns.
+    pub timezone_error: Option<String>,
     pub github: GithubConfig,
     pub github_poll_interval: Duration,
     pub telegram: TelegramConfig,
@@ -2191,6 +2204,7 @@ fn known_field_names() -> Vec<String> {
         introspect::fields::<RawConfig>(),
         introspect::fields::<RawCache>(),
         introspect::fields::<RawTui>(),
+        introspect::fields::<RawUi>(),
         introspect::fields::<RawMcp>(),
         introspect::fields::<RawPlanner>(),
         introspect::fields::<RawReview>(),
@@ -2620,6 +2634,18 @@ impl Config {
             });
         }
         let github_label = raw.github.label.clone();
+        let tz_raw = {
+            let ui = raw.ui.timezone.trim();
+            if !ui.is_empty() {
+                ui.to_string()
+            } else {
+                raw.display_timezone.trim().to_string()
+            }
+        };
+        let (display_timezone, timezone_error) = match crate::tz::DisplayTz::parse(&tz_raw) {
+            Ok(tz) => (tz, None),
+            Err(e) => (crate::tz::DisplayTz::system(), Some(e.to_string())),
+        };
         Ok(Config {
             unknown_keys: Vec::new(),
             listen: raw.listen,
@@ -2644,7 +2670,8 @@ impl Config {
                 },
             )?,
             desktop_check: raw.desktop_check.trim().to_string(),
-            display_timezone: crate::tz::DisplayTz::parse(&raw.display_timezone)?,
+            display_timezone,
+            timezone_error,
             github_poll_interval: parse_duration(if raw.github.poll_interval.trim().is_empty() {
                 "60s"
             } else {
@@ -3610,9 +3637,49 @@ kind = "claude"
             "backoff",
             "min_memory_mb",
             "resume",
+            "timezone",
         ] {
             assert!(known.iter().any(|f| f == k), "{k} missing");
         }
+    }
+
+    #[test]
+    fn ui_timezone_overrides_display_timezone() {
+        let cfg = parse_config_toml(
+            r#"
+repo_path = "/tmp"
+display_timezone = "UTC"
+[ui]
+timezone = "Asia/Dubai"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.display_timezone.label, "Asia/Dubai");
+        assert!(cfg.timezone_error.is_none());
+    }
+
+    #[test]
+    fn invalid_timezone_loads_with_error_for_doctor() {
+        let cfg = parse_config_toml(
+            r#"
+repo_path = "/tmp"
+[ui]
+timezone = "Not/AZone"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap();
+        assert!(cfg.timezone_error.is_some(), "{:?}", cfg.timezone_error);
+        assert!(
+            cfg.timezone_error.as_deref().unwrap().contains("Not/AZone"),
+            "{:?}",
+            cfg.timezone_error
+        );
     }
 
     #[test]

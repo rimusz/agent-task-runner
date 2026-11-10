@@ -121,3 +121,87 @@ async fn shell_provider_main_checkout_change_only_warns() {
     let runs = h.shared.db.list_runs(Some("demo-m2")).unwrap();
     assert_eq!(runs.last().unwrap().outcome.as_deref(), Some("success"));
 }
+
+#[tokio::test]
+async fn check_only_success_with_no_changes_is_checked() {
+    let h = Harness::with_providers(&[("grok", true, "success")], "127.0.0.1:0").await;
+    h.install_gh_stub();
+    let repo = h.repo.display().to_string();
+    h.shared
+        .submit_with(
+            "demo-c1",
+            "# Check the readme\n\nreport findings only",
+            "test",
+            Some(&repo),
+            None,
+            false,
+            false,
+            atr::SubmitOpts {
+                workspace_kind: Some("git".into()),
+                output_kind: Some("pr".into()),
+                source_kind: Some("cli".into()),
+                title: Some("Check the readme".into()),
+                check_only: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    h.wait_status("demo-c1", &["needs_attention", "waiting"], 15000)
+        .await;
+    let t = h.shared.db.get_task("demo-c1").unwrap().unwrap();
+    assert!(t.check_only);
+    assert_eq!(t.status, "waiting", "{}", t.result_text);
+    let runs = h.shared.db.list_runs(Some("demo-c1")).unwrap();
+    assert_eq!(runs.last().unwrap().outcome.as_deref(), Some("checked"));
+    assert!(
+        !h.fake_dir.join("gh-pr.log").exists(),
+        "no PR for check-only"
+    );
+    assert!(t.result_pr_url.is_empty());
+}
+
+#[tokio::test]
+async fn check_only_success_with_file_changes_needs_attention() {
+    let h = Harness::with_providers(&[("grok", true, "edit_success")], "127.0.0.1:0").await;
+    h.install_gh_stub();
+    let repo = h.repo.display().to_string();
+    h.shared
+        .submit_with(
+            "demo-c2",
+            "# Check the readme\n\nreport findings only",
+            "test",
+            Some(&repo),
+            None,
+            false,
+            false,
+            atr::SubmitOpts {
+                workspace_kind: Some("git".into()),
+                output_kind: Some("pr".into()),
+                source_kind: Some("cli".into()),
+                title: Some("Check the readme".into()),
+                check_only: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    h.wait_status("demo-c2", &["needs_attention", "waiting"], 15000)
+        .await;
+    let t = h.shared.db.get_task("demo-c2").unwrap().unwrap();
+    assert!(t.check_only);
+    assert_eq!(t.status, "needs_attention", "{}", t.result_text);
+    assert!(
+        t.result_text.lines().next() == Some("check-only task modified files"),
+        "{}",
+        t.result_text
+    );
+    let runs = h.shared.db.list_runs(Some("demo-c2")).unwrap();
+    assert_eq!(
+        runs.last().unwrap().outcome.as_deref(),
+        Some("check_only_modified")
+    );
+    assert!(
+        !h.fake_dir.join("gh-pr.log").exists(),
+        "check-only must not open a PR"
+    );
+    assert!(t.result_pr_url.is_empty());
+}

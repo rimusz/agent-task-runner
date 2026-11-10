@@ -237,6 +237,28 @@ fn lessons_check(checks: &mut Vec<Check>, cfg: &Config) {
     }
 }
 
+fn timezone_check(checks: &mut Vec<Check>, cfg: &Config) {
+    match &cfg.timezone_error {
+        Some(err) => push(
+            checks,
+            "timezone",
+            Status::Warn,
+            err.clone(),
+            Some(
+                "set [ui] timezone (or display_timezone) to an IANA name such as Asia/Dubai, or local"
+                    .into(),
+            ),
+        ),
+        None => push(
+            checks,
+            "timezone",
+            Status::Ok,
+            cfg.display_timezone.label.clone(),
+            None,
+        ),
+    }
+}
+
 /// Unknown keys are ignored on load (so rollbacks work); surface them here.
 fn unknown_keys_check(checks: &mut Vec<Check>, cfg: &Config) {
     if cfg.unknown_keys.is_empty() {
@@ -283,6 +305,7 @@ pub async fn run_with_probe(
         None,
     );
     unknown_keys_check(&mut checks, cfg);
+    timezone_check(&mut checks, cfg);
     lessons_check(&mut checks, cfg);
     compare_check(&mut checks, cfg);
     assistant_providers_check(&mut checks, cfg);
@@ -1413,6 +1436,30 @@ cli = "/bin/true"
         let mut checks = Vec::new();
         unknown_keys_check(&mut checks, &cfg);
         assert!(checks.is_empty());
+    }
+
+    #[test]
+    fn invalid_timezone_warns_in_doctor() {
+        let (_dir, cfg, _path) = mini_cfg("[ui]\ntimezone = \"Nope/Zone\"\n");
+        let mut checks = Vec::new();
+        timezone_check(&mut checks, &cfg);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "timezone");
+        assert_eq!(checks[0].status, Status::Warn);
+        assert!(
+            checks[0].detail.contains("Nope/Zone"),
+            "{}",
+            checks[0].detail
+        );
+    }
+
+    #[test]
+    fn valid_timezone_is_ok_in_doctor() {
+        let (_dir, cfg, _path) = mini_cfg("[ui]\ntimezone = \"Asia/Dubai\"\n");
+        let mut checks = Vec::new();
+        timezone_check(&mut checks, &cfg);
+        assert_eq!(checks[0].status, Status::Ok);
+        assert_eq!(checks[0].detail, "Asia/Dubai");
     }
 
     #[tokio::test]

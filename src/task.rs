@@ -427,6 +427,11 @@ JSON suggestion for a maintainer to approve.\n"
     }
 }
 
+/// Injected on check-only tasks: the agent must report, not edit.
+pub fn check_only_note() -> &'static str {
+    "## Check-only\nThis is a check-only/verification task: do not modify files; report findings."
+}
+
 pub fn insert_before_messages(rendered: &str, note: &str) -> String {
     let note = note.trim();
     if note.is_empty() {
@@ -480,6 +485,9 @@ mod tests {
         let out = insert_before_messages(rendered, "## Workspace\nstay in /tmp\n");
         assert!(out.contains("stay in /tmp"));
         assert!(out.find("Workspace").unwrap() < out.find("Messages").unwrap());
+        let check = check_only_note();
+        assert!(check.contains("check-only/verification"));
+        assert!(check.contains("do not modify files"));
     }
 
     #[test]
