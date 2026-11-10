@@ -1069,9 +1069,10 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 );
                 let dest =
                     worktree::pool_slot_path(&cfg.worktree_root, &repo, &provider.name, slot);
-                let branch = format!("{branch_prefix}/{key}");
-                let keep = (dest.join(".git").exists() || dest.join(".git").is_file())
-                    && worktree::current_branch(&dest).as_deref() == Some(branch.as_str());
+                // Same task/session (stall retry, resume, fork, follow-up):
+                // reuse the tree as-is, including detached HEAD. Reset only
+                // when this slot is going to a different task.
+                let keep = worktree::keep_pool_worktree(&dest, &key, &branch_prefix, existing_wt);
                 worktree::acquire_pool_worktree(
                     &repo,
                     &cfg.worktree_root,

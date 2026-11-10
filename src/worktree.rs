@@ -142,6 +142,68 @@ pub fn current_branch(dest: &Path) -> Option<String> {
     }
 }
 
+fn dest_is_git(dest: &Path) -> bool {
+    let git = dest.join(".git");
+    git.exists() || git.is_file()
+}
+
+/// Reuse a pool slot as-is when it already belongs to this task.
+///
+/// Same-session stall retry, resume, session fork, and follow-ups must not
+/// checkout / reset / clean, even if the agent detached HEAD. A different
+/// task landing on the slot still resets.
+pub fn keep_pool_worktree(
+    dest: &Path,
+    key: &str,
+    branch_prefix: &str,
+    existing_task_worktree: Option<&str>,
+) -> bool {
+    if !dest_is_git(dest) {
+        return false;
+    }
+    if existing_task_worktree.is_some_and(|w| crate::config::paths_eq(Path::new(w), dest)) {
+        return true;
+    }
+    let branch = format!("{branch_prefix}/{key}");
+    current_branch(dest).as_deref() == Some(branch.as_str())
+}
+
+/// PIDs whose cwd is this worktree (or a subdirectory). Linux `/proc` only.
+pub(crate) fn pids_using_worktree(dest: &Path) -> Vec<u32> {
+    let Ok(canon) = dest.canonicalize() else {
+        return Vec::new();
+    };
+    let Ok(proc) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut pids = Vec::new();
+    for ent in proc.flatten() {
+        let name = ent.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(cwd) = std::fs::read_link(ent.path().join("cwd")) else {
+            continue;
+        };
+        if cwd == canon || cwd.starts_with(&canon) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+fn warn_if_worktree_busy(dest: &Path) {
+    let pids = pids_using_worktree(dest);
+    if pids.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        worktree = %dest.display(),
+        pids = ?pids,
+        "resetting worktree while processes from a previous run are still alive"
+    );
+}
+
 pub fn slot_from_pool_path(path: &Path, provider: &str) -> Option<u32> {
     let name = path.file_name()?.to_str()?;
     let prefix = format!("{provider}-");
@@ -161,11 +223,12 @@ pub fn acquire_pool_worktree(
 ) -> Result<PathBuf> {
     let dest = pool_slot_path(root, repo, provider, slot);
     let branch = format!("{branch_prefix}/{key}");
-    if dest.join(".git").exists() || dest.join(".git").is_file() {
+    if dest_is_git(&dest) {
         if !reset {
             let _ = ensure_atr_exclude(&dest);
             return Ok(dest);
         }
+        warn_if_worktree_busy(&dest);
         detach_branch_elsewhere(repo, &dest, &branch);
         reset_pool_slot(&dest, &branch, main)?;
         ensure_atr_exclude(&dest)?;
@@ -671,5 +734,142 @@ mod tests {
             Some("atr/task-b"),
             "claude slot must detach so grok can take the task branch"
         );
+    }
+
+    fn head_sha(dest: &Path) -> String {
+        let out = capture_git()
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dest)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn keep_pool_worktree_same_task_even_when_detached() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("wt");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join(".git"), "gitdir: /tmp/fake\n").unwrap();
+        let path = dest.to_str().unwrap();
+        assert!(
+            keep_pool_worktree(&dest, "task-a", "atr", Some(path)),
+            "existing worktree path is enough to keep, even with no branch"
+        );
+        assert!(
+            !keep_pool_worktree(&dest, "task-a", "atr", Some("/other/tree")),
+            "a different task's path must not keep"
+        );
+        assert!(
+            !keep_pool_worktree(&dest, "task-a", "atr", None),
+            "no existing path and no branch → prepare"
+        );
+    }
+
+    #[test]
+    fn same_task_keep_preserves_detached_head_and_dirty_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_sample_repo(&repo).unwrap();
+        let root = dir.path().join("work");
+        let wt =
+            acquire_pool_worktree(&repo, &root, "grok", 0, "task-a", "atr", "main", true).unwrap();
+        std::fs::write(wt.join("agent.txt"), "in progress\n").unwrap();
+        let st = quiet_git()
+            .args(["checkout", "--detach"])
+            .current_dir(&wt)
+            .status()
+            .unwrap();
+        assert!(st.success(), "detach HEAD");
+        let sha = head_sha(&wt);
+        assert!(
+            current_branch(&wt).is_none(),
+            "agent pinned a detached HEAD"
+        );
+        let keep = keep_pool_worktree(&wt, "task-a", "atr", wt.to_str());
+        assert!(keep, "stall retry / same session must reuse the slot");
+        let again =
+            acquire_pool_worktree(&repo, &root, "grok", 0, "task-a", "atr", "main", !keep).unwrap();
+        assert_eq!(again, wt);
+        assert!(
+            current_branch(&wt).is_none(),
+            "same-session retry must not check out the task branch"
+        );
+        assert_eq!(
+            head_sha(&wt),
+            sha,
+            "HEAD must stay where the agent pinned it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("agent.txt")).unwrap(),
+            "in progress\n",
+            "working-tree changes must survive a same-session retry"
+        );
+    }
+
+    #[test]
+    fn new_task_still_resets_detached_head_and_dirty_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_sample_repo(&repo).unwrap();
+        let root = dir.path().join("work");
+        let wt =
+            acquire_pool_worktree(&repo, &root, "grok", 0, "task-a", "atr", "main", true).unwrap();
+        std::fs::write(wt.join("leftover.txt"), "old task\n").unwrap();
+        let st = quiet_git()
+            .args(["checkout", "--detach"])
+            .current_dir(&wt)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        assert!(
+            !keep_pool_worktree(&wt, "task-b", "atr", None),
+            "a new task must prepare the slot"
+        );
+        let next =
+            acquire_pool_worktree(&repo, &root, "grok", 0, "task-b", "atr", "main", true).unwrap();
+        assert_eq!(next, wt);
+        assert_eq!(current_branch(&wt).as_deref(), Some("atr/task-b"));
+        assert!(
+            !wt.join("leftover.txt").exists(),
+            "a new attempt still resets leftovers"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pids_using_worktree_finds_child_cwd() {
+        if !Path::new("/proc").is_dir() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let start = std::time::Instant::now();
+        let found = loop {
+            let pids = pids_using_worktree(dir.path());
+            if pids.contains(&pid) {
+                break true;
+            }
+            if start.elapsed() > std::time::Duration::from_secs(2) {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(found, "sleep {pid} cwd should be the worktree");
     }
 }

@@ -261,6 +261,7 @@ With lessons on, atr reflects after informative failures (verify failed, stalled
 | `atr submit` does nothing | `atr serve` (or the user service) not running. `/status`. |
 | Task `held` | An `after:` dependency failed or is gone. `atr retry <key>` clears the hold. |
 | Queued with retry time | Transient provider error (overloaded / 429 / 5xx / 408). Wait, or `atr retry <key>`. `[retry]` in CONFIG.md. |
+| Stalled while tests/builds still ran | Heartbeat treats descendant CPU/IO and worktree file writes as live. Same-session stall retry keeps the worktree (no reset). Raise `[[provider]] heartbeat_timeout` if needed. |
 | Result `interrupted by atr restart; resuming` | Serve restarted mid-turn; the task is queued again once. A second restart or missing worktree fails as orphaned. `[restart]` in CONFIG.md. |
 | Status `host: … waiting` | CPU load or free RAM past `[host]`. Wait or `atr config set host.enabled false`. |
 | Usage `not reported` | Expected for OpenCode, Cursor, Codex. |

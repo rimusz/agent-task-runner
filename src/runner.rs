@@ -5,11 +5,11 @@ use crate::providers::{
     session_id, CommandSpec, ErrorClass, ParsedEvent, UsageNumbers,
 };
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::{sleep, Instant};
@@ -68,6 +68,172 @@ pub fn descendant_pids(root: u32) -> Vec<u32> {
         }
     }
     kids
+}
+
+/// CPU and IO counters for one process, used as a heartbeat liveness probe.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ProcActivity {
+    pub cpu_ticks: u64,
+    pub io_bytes: u64,
+}
+
+/// Snapshot CPU/IO for `root` and every current descendant.
+pub(crate) fn sample_tree_activity(root: u32) -> HashMap<u32, ProcActivity> {
+    let mut map = HashMap::new();
+    if root == 0 {
+        return map;
+    }
+    if let Some(s) = sample_pid_activity(root) {
+        map.insert(root, s);
+    }
+    for pid in descendant_pids(root) {
+        if let Some(s) = sample_pid_activity(pid) {
+            map.insert(pid, s);
+        }
+    }
+    map
+}
+
+pub(crate) fn sample_pid_activity(pid: u32) -> Option<ProcActivity> {
+    if pid == 0 {
+        return None;
+    }
+    sample_proc(pid).or_else(|| sample_ps(pid))
+}
+
+fn sample_proc(pid: u32) -> Option<ProcActivity> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = text.rsplit_once(')')?.1;
+    let mut fields = after.split_whitespace();
+    let utime: u64 = fields.nth(11)?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+    let mut io_bytes = 0u64;
+    if let Ok(io) = std::fs::read_to_string(format!("/proc/{pid}/io")) {
+        for line in io.lines() {
+            if let Some(v) = line.strip_prefix("read_bytes: ") {
+                io_bytes = io_bytes.saturating_add(v.trim().parse().unwrap_or(0));
+            } else if let Some(v) = line.strip_prefix("write_bytes: ") {
+                io_bytes = io_bytes.saturating_add(v.trim().parse().unwrap_or(0));
+            }
+        }
+    }
+    Some(ProcActivity {
+        cpu_ticks: utime.saturating_add(stime),
+        io_bytes,
+    })
+}
+
+fn sample_ps(pid: u32) -> Option<ProcActivity> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "time=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let time = text.lines().next()?.trim();
+    if time.is_empty() {
+        return None;
+    }
+    Some(ProcActivity {
+        cpu_ticks: parse_cputime(time)?,
+        io_bytes: 0,
+    })
+}
+
+fn parse_cputime(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (days, rest) = match s.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, s),
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    let secs = match parts.as_slice() {
+        [h, m, sec] => {
+            h.parse::<u64>().ok()? * 3600 + m.parse::<u64>().ok()? * 60 + parse_whole_secs(sec)?
+        }
+        [m, sec] => m.parse::<u64>().ok()? * 60 + parse_whole_secs(sec)?,
+        [sec] => parse_whole_secs(sec)?,
+        _ => return None,
+    };
+    Some(days.saturating_mul(86400).saturating_add(secs))
+}
+
+fn parse_whole_secs(s: &str) -> Option<u64> {
+    s.split('.').next()?.parse().ok()
+}
+
+/// CPU ticks (~10ms on Linux) a process must burn between samples to count
+/// as live. A sleeping hang (the stall fixture) stays under this; a test
+/// driver does not. New pids are only a baseline — they must grow next window.
+const CPU_LIVE_TICKS: u64 = 5;
+const IO_LIVE_BYTES: u64 = 4096;
+
+/// True when a pid seen in both samples burned meaningful CPU or IO.
+pub(crate) fn tree_activity_grew(
+    prev: &HashMap<u32, ProcActivity>,
+    next: &HashMap<u32, ProcActivity>,
+) -> bool {
+    next.iter().any(|(pid, now)| {
+        prev.get(pid).is_some_and(|old| {
+            now.cpu_ticks.saturating_sub(old.cpu_ticks) >= CPU_LIVE_TICKS
+                || now.io_bytes.saturating_sub(old.io_bytes) >= IO_LIVE_BYTES
+        })
+    })
+}
+
+/// True when a file in the worktree (not `.git/` or `.atr/`) is newer than `since`.
+pub(crate) fn worktree_touched_since(worktree: &Path, since: SystemTime) -> bool {
+    fn walk(path: &Path, since: SystemTime, depth: u32, left: &mut u32) -> bool {
+        if *left == 0 || depth > 8 {
+            return false;
+        }
+        let Ok(rd) = std::fs::read_dir(path) else {
+            return false;
+        };
+        for ent in rd.flatten() {
+            if *left == 0 {
+                return false;
+            }
+            let name = ent.file_name();
+            if depth == 0 && (name == ".git" || name == ".atr") {
+                continue;
+            }
+            let Ok(ft) = ent.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            *left = left.saturating_sub(1);
+            if ft.is_file() {
+                if let Ok(meta) = ent.metadata() {
+                    if meta.modified().is_ok_and(|m| m >= since) {
+                        return true;
+                    }
+                }
+            } else if ft.is_dir() && walk(&ent.path(), since, depth + 1, left) {
+                return true;
+            }
+        }
+        false
+    }
+    let mut left = 4000u32;
+    walk(worktree, since, 0, &mut left)
+}
+
+/// After first CLI output, silence is not a stall while the tree or worktree
+/// is still doing work (long-running test driver, git, …).
+pub(crate) fn silence_is_live(
+    saw_output: bool,
+    descendant_activity: bool,
+    worktree_activity: bool,
+) -> bool {
+    saw_output && (descendant_activity || worktree_activity)
 }
 
 fn apply_kill(root: u32, tree: &[u32], sig: i32) {
@@ -273,10 +439,13 @@ pub async fn run_cli(
         .with_context(|| format!("spawn {} ({})", spec.program.display(), provider.name))?;
     let pid = child.id().unwrap_or(0);
     let mut seen_descendants = HashSet::new();
+    let mut last_activity = HashMap::new();
+    let mut window_start = SystemTime::now();
     if pid > 0 {
         db.set_run_pid(run_id, pid)?;
         *inflight_pid.lock().unwrap() = Some(pid);
         note_descendants(pid, &mut seen_descendants);
+        last_activity = sample_tree_activity(pid);
     }
 
     if let Some(text) = spec.stdin_text {
@@ -351,6 +520,8 @@ pub async fn run_cli(
                     Ok(Some(line)) => {
                         saw_output = true;
                         next_beat = Instant::now() + heartbeat;
+                        window_start = SystemTime::now();
+                        last_activity = sample_tree_activity(pid);
                         let _ = db.touch_run(run_id);
                         note_descendants(pid, &mut seen_descendants);
                         stdout_blob.push_str(&line);
@@ -404,6 +575,22 @@ pub async fn run_cli(
                 }
             }
             _ = sleep(until_beat) => {
+                note_descendants(pid, &mut seen_descendants);
+                let now_act = sample_tree_activity(pid);
+                let grew = tree_activity_grew(&last_activity, &now_act);
+                let files = worktree_touched_since(worktree, window_start);
+                last_activity = now_act;
+                if silence_is_live(saw_output, grew, files) {
+                    tracing::debug!(
+                        provider = %provider.name,
+                        run_id,
+                        "heartbeat silence; process tree or worktree still active"
+                    );
+                    let _ = db.touch_run(run_id);
+                    next_beat = Instant::now() + heartbeat;
+                    window_start = SystemTime::now();
+                    continue;
+                }
                 let (outcome, class) = if !saw_output {
                     tracing::warn!(
                         provider = %provider.name,
@@ -931,6 +1118,120 @@ os._exit(0)
         assert_eq!(dir, Path::new("/var/lib/atr/prompts/task-notes"));
         let git = runtime_files_dir(state, "task-git", wt, false);
         assert_eq!(git, Path::new("/Users/me/notes/.atr"));
+    }
+
+    #[test]
+    fn silence_is_live_needs_output_and_activity() {
+        assert!(
+            !silence_is_live(false, true, true),
+            "startup timeout is unchanged even if a child exists"
+        );
+        assert!(
+            silence_is_live(true, true, false),
+            "descendant CPU/IO extends the heartbeat"
+        );
+        assert!(
+            silence_is_live(true, false, true),
+            "worktree file activity extends the heartbeat"
+        );
+        assert!(
+            !silence_is_live(true, false, false),
+            "true CLI hang still stalls"
+        );
+    }
+
+    #[test]
+    fn tree_activity_grew_on_cpu_io_not_idle_or_new_pid() {
+        let mut prev = HashMap::new();
+        prev.insert(
+            1,
+            ProcActivity {
+                cpu_ticks: 10,
+                io_bytes: 4,
+            },
+        );
+        let mut same = HashMap::new();
+        same.insert(
+            1,
+            ProcActivity {
+                cpu_ticks: 10,
+                io_bytes: 4,
+            },
+        );
+        assert!(!tree_activity_grew(&prev, &same));
+
+        let mut noise = same.clone();
+        noise.insert(
+            1,
+            ProcActivity {
+                cpu_ticks: 11,
+                io_bytes: 4,
+            },
+        );
+        assert!(
+            !tree_activity_grew(&prev, &noise),
+            "a single scheduler tick on a sleeping process is not liveness"
+        );
+
+        let mut cpu = same.clone();
+        cpu.insert(
+            1,
+            ProcActivity {
+                cpu_ticks: 16,
+                io_bytes: 4,
+            },
+        );
+        assert!(tree_activity_grew(&prev, &cpu));
+
+        let mut io = same.clone();
+        io.insert(
+            1,
+            ProcActivity {
+                cpu_ticks: 10,
+                io_bytes: 5000,
+            },
+        );
+        assert!(tree_activity_grew(&prev, &io));
+
+        let mut child = same;
+        child.insert(
+            2,
+            ProcActivity {
+                cpu_ticks: 80,
+                io_bytes: 0,
+            },
+        );
+        assert!(
+            !tree_activity_grew(&prev, &child),
+            "a new pid is a baseline, not proof of work (stall fixture children)"
+        );
+    }
+
+    #[test]
+    fn worktree_touched_since_sees_new_file_and_skips_atr() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = SystemTime::now() - Duration::from_secs(2);
+        std::fs::write(dir.path().join("out.log"), "driver\n").unwrap();
+        assert!(worktree_touched_since(dir.path(), before));
+
+        let future = SystemTime::now() + Duration::from_secs(60);
+        assert!(!worktree_touched_since(dir.path(), future));
+
+        let atr = dir.path().join(".atr");
+        std::fs::create_dir_all(&atr).unwrap();
+        std::fs::write(atr.join("prompt.md"), "atr file\n").unwrap();
+        assert!(
+            !worktree_touched_since(dir.path(), future),
+            ".atr/ writes are atr's own and must not look like agent work"
+        );
+    }
+
+    #[test]
+    fn parse_cputime_linux_and_macos() {
+        assert_eq!(super::parse_cputime("00:00:01"), Some(1));
+        assert_eq!(super::parse_cputime("1-00:00:02"), Some(86402));
+        assert_eq!(super::parse_cputime("1:02.50"), Some(62));
+        assert_eq!(super::parse_cputime(""), None);
     }
 }
 

@@ -170,9 +170,10 @@ By default (`[cache] worktree_pool = true`) each repo+provider reuses a fixed
 slot `{worktree_root}/{repo}/.atr/wt/{provider}-{n}` (`n` is
 `0..max_parallel-1`). The CLIs embed cwd and git info in their system prompt,
 so a stable path keeps the first-run prefix cacheable. Between different tasks
-the slot is reset (`checkout -B`, `reset --hard`, `clean -fd`). Follow-ups on
-the same task keep the branch and skip the reset. `atr gc` never deletes pool
-slots.
+the slot is reset (`checkout -B`, `reset --hard`, `clean -fd`). Same-task
+continuations (follow-ups, stall retry, session fork, resume) skip the reset
+even if HEAD is detached. Resetting a busy slot (cwd still live) logs a
+warning. `atr gc` never deletes pool slots.
 
 `[cache] worktree_pool = false` falls back to one worktree per task key at
 `{worktree_root}/{repo}/{key}`. `.atr/` is in each worktree's
@@ -316,9 +317,14 @@ and `atr doctor` warns.
 
 `[provider.health]`: no first stdout within `startup_timeout` is Unavailable
 (handoff, no resume). After output, no event for `heartbeat_timeout` is a
-stall: resume up to `stall_resumes`, then handoff + `unhealthy_cooldown`.
-SIGTERM, grace, SIGKILL the process group. Spawn failure and connection
-errors are Unavailable. If every provider is cooling, the task stays queued.
+stall **unless** the process tree still shows CPU/IO or the worktree has
+recent file mtimes (long-running children the agent started). Then atr
+extends the heartbeat instead of killing. Timeout is per provider
+(`heartbeat_timeout` or `[provider.health] heartbeat_timeout`); there is no
+per-task override. A real stall resumes up to `stall_resumes`, then handoff
++ `unhealthy_cooldown`. SIGTERM, grace, SIGKILL the process group. Spawn
+failure and connection errors are Unavailable. If every provider is cooling,
+the task stays queued.
 
 A stall marks the provider degraded for a short configurable window; the flag
 clears when that window expires and on the next successful run.
