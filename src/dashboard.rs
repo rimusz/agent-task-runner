@@ -347,6 +347,7 @@ fn task_json(shared: &Shared, cfg: &Config, t: &crate::db::Task, state: &str) ->
         "hold_reason": t.hold_reason,
         "retry_reason": t.retry_reason,
         "retry_next_at": t.retry_next_at,
+        "check_only": t.check_only,
     })
 }
 

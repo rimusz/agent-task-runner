@@ -129,6 +129,8 @@ pub struct SubmitOpts {
     pub after: Vec<String>,
     /// Optional CLI `--agent` for grok/claude (Telegram `/add --agent`).
     pub agent: Option<String>,
+    /// Proof/verification: no file changes is success (`checked`), not no-op.
+    pub check_only: bool,
 }
 
 impl Shared {
@@ -283,6 +285,9 @@ impl Shared {
         }
         if tests_ok {
             self.db.set_protect_tests_skip(key, true)?;
+        }
+        if opts.check_only {
+            self.db.set_check_only(key, true)?;
         }
         if let Some(h) = opts
             .provider_hint
@@ -1739,6 +1744,7 @@ cli = "/bin/true"
             .as_array()
             .is_some_and(|a| a.iter().all(|r| r["shorthand"] != true)));
         assert_eq!(status["tasks"][0]["repo"], "repo");
+        assert_eq!(status["tasks"][0]["check_only"], false);
         std::mem::forget(dir);
     }
 
@@ -1890,6 +1896,9 @@ cli = "/bin/true"
         assert!(text.contains("idle-1"), "{text}");
         let idle = text.find("idle-1").unwrap();
         assert!(idle > done, "stored waiting belongs in done:\n{text}");
+        let idle_line = text[done..].lines().find(|l| l.contains("idle-1")).unwrap();
+        assert!(idle_line.contains("done"), "{idle_line}");
+        assert!(!idle_line.contains("waiting"), "{idle_line}");
         assert!(!text.contains("tasks:"), "{text}");
 
         let json = shared.status_json();
@@ -1907,6 +1916,13 @@ cli = "/bin/true"
             .unwrap()
             .iter()
             .any(|t| t["key"] == "idle-1" && t["status"] == "waiting"));
+        let idle_json = json["groups"]["done"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["key"] == "idle-1")
+            .unwrap();
+        assert_eq!(idle_json["check_only"], false);
 
         let failed_only = format_status_table_opts(
             &shared,
@@ -2189,6 +2205,26 @@ cli = "/bin/true"
 
         remove_tasks(&shared, &["done-1".into()], false).unwrap();
         assert!(shared.db.get_task("done-1").unwrap().is_none());
+        std::mem::forget(dir);
+    }
+
+    #[test]
+    fn remove_tasks_allows_needs_attention_refuses_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = test_shared(&dir);
+        shared.db.upsert_task("attn-1", "/repo", None).unwrap();
+        shared.db.set_status("attn-1", "needs_attention").unwrap();
+        shared.db.upsert_task("q-1", "/repo", None).unwrap();
+        shared.db.set_status("q-1", "queued").unwrap();
+
+        remove_tasks(&shared, &["attn-1".into()], false).unwrap();
+        assert!(shared.db.get_task("attn-1").unwrap().is_none());
+
+        let err = remove_tasks(&shared, &["q-1".into()], false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("queued"), "{err}");
+        assert!(shared.db.get_task("q-1").unwrap().is_some());
         std::mem::forget(dir);
     }
 

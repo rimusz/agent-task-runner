@@ -210,6 +210,7 @@ fn ingest_file(shared: &Shared, inbox: &Path, path: &Path, max_bytes: u64) -> Re
             needs: spec.needs.clone(),
             after: spec.after.clone(),
             agent: None,
+            check_only: false,
         },
     )?;
     let _ = outcome;

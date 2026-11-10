@@ -877,6 +877,7 @@ async fn serve_dispatch_skips_tui_session() {
                     needs: Vec::new(),
                     after: Vec::new(),
                     agent: None,
+                    check_only: false,
                 },
             )
             .unwrap()

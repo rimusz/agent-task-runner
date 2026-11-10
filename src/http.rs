@@ -166,6 +166,8 @@ struct TaskIn {
     #[serde(default)]
     tests_ok: bool,
     #[serde(default)]
+    check_only: bool,
+    #[serde(default)]
     provider: Option<String>,
     /// Model for `provider` (needs `provider`).
     #[serde(default)]
@@ -197,6 +199,8 @@ struct MessageIn {
     shadow: bool,
     #[serde(default)]
     tests_ok: bool,
+    #[serde(default)]
+    check_only: bool,
     /// Stop the live turn and resume its session with this message.
     #[serde(default)]
     interrupt: bool,
@@ -254,6 +258,7 @@ async fn create_task(
             issue: payload.issue,
             shadow: payload.shadow,
             tests_ok: payload.tests_ok,
+            check_only: payload.check_only,
             files,
             idempotency_key,
             repo_named_prefix: false,
@@ -345,7 +350,7 @@ async fn post_message(
             Json(json!({"ok": false, "error": "missing body"})),
         );
     };
-    match shared.submit(
+    match shared.submit_with(
         &key,
         &body,
         payload.source.as_deref().unwrap_or("http"),
@@ -353,6 +358,10 @@ async fn post_message(
         payload.issue,
         payload.shadow,
         payload.tests_ok,
+        crate::app::SubmitOpts {
+            check_only: payload.check_only,
+            ..crate::app::SubmitOpts::default()
+        },
     ) {
         Ok(SubmitOutcome::Accepted) => (
             StatusCode::OK,

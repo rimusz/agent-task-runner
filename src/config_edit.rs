@@ -433,6 +433,17 @@ model = "opus"
     }
 
     #[test]
+    fn set_and_get_ui_timezone() {
+        let (_dir, path) = seed();
+        assert_eq!(get_value(&path, "ui.timezone").unwrap(), "(unset)");
+        apply_set(&path, "ui.timezone", "Asia/Dubai").unwrap();
+        assert_eq!(get_value(&path, "ui.timezone").unwrap(), "\"Asia/Dubai\"");
+        let cfg = crate::config::load_config(&path).unwrap();
+        assert_eq!(cfg.display_timezone.label, "Asia/Dubai");
+        assert!(cfg.timezone_error.is_none());
+    }
+
+    #[test]
     fn invalid_value_fails_before_write() {
         let (_dir, path) = seed();
         let before = std::fs::read_to_string(&path).unwrap();

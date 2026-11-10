@@ -46,10 +46,22 @@ reloaded with SIGHUP. `atr config migrate` converts shorthand
 
 `driver`, `[planner]`, `[review]`, `[plugin]`, `[github] enabled / repo / label`
 (default `for:atr`), `[dashboard] enabled / bind`, `[telegram]` and
-`[telegram.assistant]`, `[tui] providers`, `[[provider]]` order and `enabled`, `[mcp]`, `[cache]`,
+`[telegram.assistant]`, `[tui] providers`, `[ui] timezone`, `[[provider]]` order and `enabled`, `[mcp]`, `[cache]`,
 `[retry]`, `[restart]`, `[host]`,
 `[[source]]`, `max_prompt_bytes` (default `256k`; CLI/HTTP/MCP prompts and
 inbox files).
+
+### Display timezone
+
+Times in `atr status`, Telegram `/status` and other Telegram clocks, usage, tasks, and the dashboard use one zone:
+
+```toml
+display_timezone = ""          # empty or "local" = host local zone
+[ui]
+timezone = "Asia/Dubai"        # optional IANA override; wins over display_timezone
+```
+
+`[ui] timezone` is an IANA name (`Asia/Dubai`, `UTC`, `Europe/Vilnius`) or empty/`local`. It overrides the top-level `display_timezone` when set. An invalid name still loads (falls back to the host local zone) and `atr doctor` warns (`timezone`). Set it with `atr config set ui.timezone Asia/Dubai`.
 
 ### Cache
 
@@ -184,7 +196,9 @@ assistant):
   with no commits past the base branch opens no PR;
 - a run that changed nothing for a `pr`/`branch`/`patch` task, or returned no
   text for an `issue_comment` task, is an honest **no-op**: `needs_attention`
-  with `NO-OP <key>: …`, never success;
+  with `NO-OP <key>: …`, never success. `--check-only` / `check_only` is the
+  exception: no file changes is outcome `checked` (done); file changes go to
+  `needs_attention` with why `check-only task modified files` and are not pushed;
 - `issue_comment` output is posted with `gh issue comment --body-file -`,
   sanitized (ANSI, control characters and tool-call markup removed) and capped
   at GitHub's limit (65,000 characters). Triage approvals keep a 4,000-character cap.
@@ -629,8 +643,8 @@ To keep it running after logout or reboot without logging in, run
 `sudo loginctl enable-linger $USER` once (needs sudo). Check it with
 `loginctl show-user $USER -p Linger`.
 
-`atr tasks rm` and `atr gc --tasks` delete finished, failed, or cancelled
-task rows only. Running tasks are refused.
+`atr tasks rm` and `atr gc --tasks` delete finished, failed, cancelled, or
+`needs_attention` task rows (no live run). Running and queued tasks are refused.
 
 ## Choosing the driver provider and model
 
