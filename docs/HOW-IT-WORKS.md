@@ -166,7 +166,7 @@ The goal is high prompt-cache hit rates on first runs and resumes.
 
 | Lever | Behaviour |
 |---|---|
-| Worktree pool | Reuses `.atr/wt/<provider>-<n>` per repo+provider so cwd/git in the CLI system prompt stay byte-stable. Reset (`checkout -B`, `reset --hard`, `clean -fd`) between different tasks. `[cache] worktree_pool = false` restores one folder per task key. |
+| Worktree pool | Reuses `.atr/wt/<provider>-<n>` per repo+provider so cwd/git in the CLI system prompt stay byte-stable. Reset (`checkout -B`, `reset --hard`, `clean -fd`) only when a **different** task lands on the slot. Same-session stall retry, resume, session fork, and follow-ups reuse the tree as-is (including detached HEAD and dirty files). `[cache] worktree_pool = false` restores one folder per task key. |
 | CLI system-prompt slot | Stable prefix (system prompt + `AGENTS.md` + provider contract) goes in a *file*, never argv/`ps`: Claude `--append-system-prompt-file`, Grok `--rules`, Codex `-c model_instructions_file` (replaces Codex's base prompt), OpenCode a first `--file` attach (2.x has no `--system`). Cursor has no slot; the prefix stays in the prompt file. |
 | Resume delta | Follow-ups send only the new messages (and optional handoff). The stable prefix is not re-sent. |
 | Variable tail | Per-task text (task header, workspace note, `## Repo lessons (atr)` when `[lessons]` is on, handoff, messages) goes after `----- atr variable -----`, so it never changes the prefix hash. |
@@ -270,7 +270,10 @@ Retry is for when this task would otherwise fail or sit on the same CLI
 (and compare arms with a strict pin never retry). Auth, invalid CLI arguments,
 quota with a reset already handled by `quota.rs`, and task-logic failures
 (`needs_attention`, tests failed) skip this path.
-Stall hangs still use `[[provider]].health.stall_resumes`. `atr retry` clears
+Stall hangs still use `[[provider]].health.stall_resumes`. A stall retry
+reuses the same worktree without checkout/reset. Heartbeat silence is not a
+stall while the CLI process tree is still burning CPU/IO or the worktree is
+being written (a detached test driver counts). `atr retry` clears
 the persisted schedule. A Telegram assistant task (`tg<chat>`) that stalls
 or hits its run cap fails only that run (the chat is told it timed out)
 and does **not** mark the provider degraded or retry/failover other work.

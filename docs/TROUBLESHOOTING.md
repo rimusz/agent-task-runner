@@ -122,6 +122,13 @@ check. `memory unknown` means the sample failed; the memory check then
 does not block.
 Starts are one-at-a-time with `host.settle` (30s) while the gate is on.
 
+**CLI was quiet while tests still ran, and atr stalled / reset the worktree.**
+Heartbeat now counts descendant CPU/IO and worktree file activity as
+liveness, so a detached test driver should not trip the stall. A same-session
+stall retry also reuses the worktree (including detached HEAD). Raise
+`[[provider]] heartbeat_timeout` / `[provider.health] heartbeat_timeout` if
+the work is legitimately silent for longer than that window.
+
 **Task failed with `task timeout`.** The task passed `task_timeout` (default
 `4h`, counted from the first run of the current attempt). `atr tasks <key>`
 shows a last run with outcome `task_timeout`. `atr retry <key>` (or a new
