@@ -50,7 +50,7 @@ impl DisplayTz {
                 label: tz.name().to_string(),
                 named: Some(tz),
             }),
-            Err(_) => bail!("display_timezone {s:?} is not a valid IANA zone (or local)"),
+            Err(_) => bail!("timezone {s:?} is not a valid IANA zone (or local)"),
         }
     }
 

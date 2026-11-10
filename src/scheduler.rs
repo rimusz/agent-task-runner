@@ -1275,6 +1275,10 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         {
             rendered = crate::task::insert_before_messages(&rendered, &note);
         }
+        if task.check_only {
+            rendered =
+                crate::task::insert_before_messages(&rendered, crate::task::check_only_note());
+        }
         // Repo lessons go in the per-task tail (never the cached prefix), on
         // first runs only, and never for plan/review/reflect or the assistant.
         if let Some((block, ids)) = crate::lessons::block_for_task(
@@ -1526,6 +1530,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         && ws_kind == crate::task::WorkspaceKind::Git
         && !assistant
         && !task.shadow
+        && !task.check_only
         && repo != wt
         && crate::worktree::is_git_repo(&wt)
     {
@@ -1559,7 +1564,8 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
 
     // A worker run that "succeeded" but changed nothing (empty diff, no
     // usable suggestion, no answer) is a no-op, never reported as success.
-    let noop: Option<String> = if result.outcome == "success"
+    // check_only tasks are the exception: no changes is `checked` (done).
+    let no_deliver: Option<String> = if result.outcome == "success"
         && !assistant
         && !task.shadow
         && task.role != "plan"
@@ -1604,19 +1610,27 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         }
     });
     // Both are "stop here, deliver nothing, needs attention"; an escape from
-    // the worktree wins over a plain no-op.
+    // the worktree wins over a plain no-op. check_only + no file changes is
+    // success (`checked`), not a no-op.
     let halt_outcome = if escaped.is_some() {
         "main_checkout_edit"
     } else {
         "no_op"
     };
-    let noop = escaped.or(noop);
-    if noop.is_some() {
+    let check_only_ok =
+        task.check_only && result.outcome == "success" && escaped.is_none() && !assistant;
+    let git_changed = check_only_ok
+        && crate::worktree::is_git_repo(&wt)
+        && (crate::output::has_uncommitted(&wt)
+            || crate::output::commits_ahead(&wt, &cfg.repo_default_branch) > 0);
+    let noop = escaped.or(no_deliver);
+    if noop.is_some() && !check_only_ok {
         shared.db.set_run_outcome(run_id, halt_outcome)?;
         shared.db.finish_turn(turn_id, halt_outcome)?;
     }
 
-    let verify = if result.outcome == "success" && !assistant && noop.is_none() {
+    let verify = if result.outcome == "success" && !assistant && noop.is_none() && !task.check_only
+    {
         let task_now = shared.db.get_task(&key)?.unwrap_or_else(|| task.clone());
         Some(
             crate::verify::run(&cfg, &shared.db, &key, &repo, &wt, run_id, &task_now)
@@ -1644,7 +1658,11 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     };
 
     let mut final_outcome = result.outcome.clone();
-    if noop.is_some() {
+    if check_only_ok && git_changed {
+        final_outcome = "check_only_modified".into();
+    } else if check_only_ok {
+        final_outcome = "checked".into();
+    } else if noop.is_some() {
         final_outcome = halt_outcome.into();
     } else if result.outcome == "success" {
         let v = verify.as_ref().cloned().unwrap_or_default();
@@ -1686,12 +1704,55 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         );
     }
 
-    let match_on = if noop.is_some() {
+    let match_on = if check_only_ok && git_changed {
+        "check_only_modified"
+    } else if check_only_ok {
+        "checked"
+    } else if noop.is_some() {
         "no_op"
     } else {
         result.outcome.as_str()
     };
     match match_on {
+        "checked" => {
+            shared.db.set_run_outcome(run_id, "checked")?;
+            shared.db.finish_turn(turn_id, "checked")?;
+            shared.db.set_stall_retries(&key, 0)?;
+            shared.db.clear_retry(&key)?;
+            shared.db.set_tried(&key, None)?;
+            let _ = shared.db.set_degraded_until(&provider.name, None);
+            let text = crate::output::last_text(&shared, &key);
+            let diff = shared
+                .db
+                .get_task(&key)?
+                .map(|t| t.result_diff)
+                .unwrap_or_default();
+            shared.db.set_task_result(&key, &text, &diff, None)?;
+            finish_waiting(&shared, &cfg, &key, &provider.name, task.shadow)?;
+        }
+        "check_only_modified" => {
+            shared.db.set_run_outcome(run_id, "check_only_modified")?;
+            shared.db.finish_turn(turn_id, "check_only_modified")?;
+            shared.db.set_stall_retries(&key, 0)?;
+            shared.db.clear_retry(&key)?;
+            shared.db.set_tried(&key, None)?;
+            let text = crate::output::last_text(&shared, &key);
+            let report = crate::output::check_only_modified_report(&text);
+            let diff = shared
+                .db
+                .get_task(&key)?
+                .map(|t| t.result_diff)
+                .unwrap_or_default();
+            shared.db.set_task_result(&key, &report, &diff, None)?;
+            shared.db.set_status(&key, "needs_attention")?;
+            tracing::warn!(task = %key, "{report}");
+            notify_run(
+                &cfg.telegram,
+                notify::Event::NeedsAttention,
+                &report,
+                task.shadow,
+            );
+        }
         "no_op" => {
             let report = noop.clone().unwrap_or_default();
             shared.db.set_stall_retries(&key, 0)?;
@@ -1904,7 +1965,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     if assistant {
         crate::telegram::deliver_assistant_result(&shared, &key, run_id, &final_outcome);
     }
-    if final_outcome != "success" && noop.is_none() {
+    if final_outcome != "success" && noop.is_none() && !task.check_only {
         let _ = crate::output::capture(&shared, &key);
     }
     if !assistant && cfg.lessons_enabled_for(&task) {

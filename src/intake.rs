@@ -57,6 +57,7 @@ pub struct CreateIn {
     pub issue: Option<i64>,
     pub shadow: bool,
     pub tests_ok: bool,
+    pub check_only: bool,
     pub files: Vec<AttachFile>,
     pub idempotency_key: Option<String>,
     /// MCP uses the watch-repo name as the allocated-key prefix when that
@@ -417,6 +418,7 @@ pub fn create(shared: &Shared, spec: CreateIn) -> Result<CreateOut, CreateError>
             needs: spec.needs.clone(),
             after: spec.after.clone(),
             agent: None,
+            check_only: spec.check_only,
         },
         spec.model.as_deref(),
     ) {
@@ -592,6 +594,9 @@ fn request_hash(spec: &CreateIn, title: &str) -> String {
     );
     put(&mut h, b"shadow", if spec.shadow { b"1" } else { b"0" });
     put(&mut h, b"tests_ok", if spec.tests_ok { b"1" } else { b"0" });
+    if spec.check_only {
+        put(&mut h, b"check_only", b"1");
+    }
     for f in &spec.files {
         put(&mut h, b"file.name", f.name.as_bytes());
         let mut fh = Sha256::new();
@@ -973,5 +978,21 @@ cli = "/bin/true"
         let base = request_hash(&with(None), "t");
         assert_eq!(base, request_hash(&with(Some("  ")), "t"));
         assert_ne!(base, request_hash(&with(Some("gpt-5.6-sol")), "t"));
+    }
+
+    #[test]
+    fn check_only_is_stored_and_changes_idempotency_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = override_shared(dir.path());
+        let on = CreateIn {
+            check_only: true,
+            ..spec("x")
+        };
+        let off = spec("x");
+        assert_ne!(request_hash(&on, "t"), request_hash(&off, "t"));
+        let out = create(&s, on).unwrap();
+        assert!(s.db.get_task(&out.key).unwrap().unwrap().check_only);
+        let out = create(&s, off).unwrap();
+        assert!(!s.db.get_task(&out.key).unwrap().unwrap().check_only);
     }
 }

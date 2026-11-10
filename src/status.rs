@@ -93,6 +93,42 @@ impl GroupFilter {
         }
     }
 
+    /// Telegram `/status done|failed|running|waiting|all`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "failed" | "failing" => Some(Self {
+                failing: true,
+                running: false,
+                waiting: false,
+                done: false,
+            }),
+            "running" => Some(Self {
+                failing: false,
+                running: true,
+                waiting: false,
+                done: false,
+            }),
+            "waiting" => Some(Self {
+                failing: false,
+                running: false,
+                waiting: true,
+                done: false,
+            }),
+            "done" => Some(Self {
+                failing: false,
+                running: false,
+                waiting: false,
+                done: true,
+            }),
+            "all" => Some(Self::all()),
+            _ => None,
+        }
+    }
+
+    pub fn is_all(self) -> bool {
+        self.failing && self.running && self.waiting && self.done
+    }
+
     pub fn shows(self, bucket: Bucket) -> bool {
         match bucket {
             Bucket::Failing => self.failing,
@@ -142,6 +178,29 @@ pub fn telegram_caps() -> Caps {
         waiting: TG_CAP_WAITING,
         done: TG_CAP_DONE,
         other: TG_CAP_FAILING,
+    }
+}
+
+pub fn telegram_caps_full() -> Caps {
+    Caps {
+        failing: usize::MAX,
+        running: usize::MAX,
+        waiting: usize::MAX,
+        done: usize::MAX,
+        other: usize::MAX,
+    }
+}
+
+/// Telegram bot message limit. Split or truncate before this.
+pub const TG_MSG_LIMIT: usize = 4096;
+
+/// Finished/idle label for the done group: last outcome, else `done`
+/// (stored `waiting` means idle after success, not "waiting to run").
+pub fn done_label(status: &str, last_outcome: Option<&str>) -> String {
+    match last_outcome.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(o) => o.to_string(),
+        None if status == "waiting" => "done".into(),
+        None => status.to_string(),
     }
 }
 
@@ -436,10 +495,42 @@ fn exit_cell(t: &Value) -> String {
     }
 }
 
+fn is_check_only(t: &Value) -> bool {
+    t.get("check_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn done_status_cell(t: &Value) -> String {
+    let outcome = json_text(t, "last_outcome");
+    let status = json_text(t, "status");
+    let mut label = done_label(
+        &status,
+        if outcome.is_empty() {
+            None
+        } else {
+            Some(outcome.as_str())
+        },
+    );
+    if is_check_only(t) {
+        label.push_str(" check-only");
+    }
+    label
+}
+
 fn cli_row(bucket: Bucket, t: &Value) -> Vec<String> {
     let key = cell(t, "key");
     let repo = cell(t, "repo");
-    let status = cell(t, "status");
+    let status = if is_check_only(t) && bucket != Bucket::Done {
+        let s = cell(t, "status");
+        if s == "-" {
+            "check-only".into()
+        } else {
+            format!("{s} check-only")
+        }
+    } else {
+        cell(t, "status")
+    };
     let provider = cell(t, "provider");
     match bucket {
         Bucket::Failing => vec![
@@ -473,7 +564,7 @@ fn cli_row(bucket: Bucket, t: &Value) -> Vec<String> {
             }
             row
         }
-        Bucket::Done => vec![key, repo, status, provider, cell(t, "updated")],
+        Bucket::Done => vec![key, repo, done_status_cell(t), provider, cell(t, "updated")],
         Bucket::Other => vec![key, repo, status, provider],
     }
 }
@@ -567,7 +658,11 @@ fn telegram_bullet(bucket: Bucket, t: &Value) -> String {
     let stall = stall_note(t);
     match bucket {
         Bucket::Failing => {
-            let status = cell(t, "status");
+            let status = if is_check_only(t) {
+                format!("{} check-only", cell(t, "status"))
+            } else {
+                cell(t, "status")
+            };
             let why = first_line(&json_text(t, "why"), 80);
             if why.is_empty() {
                 format!("• {key} — {status}\n")
@@ -592,7 +687,11 @@ fn telegram_bullet(bucket: Bucket, t: &Value) -> String {
             }
         }
         Bucket::Waiting => {
-            let status = cell(t, "status");
+            let status = if is_check_only(t) {
+                format!("{} check-only", cell(t, "status"))
+            } else {
+                cell(t, "status")
+            };
             let extra = compact_retry_why(&json_text(t, "why"));
             let mut detail = if extra.is_empty() {
                 status
@@ -606,7 +705,7 @@ fn telegram_bullet(bucket: Bucket, t: &Value) -> String {
             format!("• {key} — {detail}\n")
         }
         Bucket::Done => {
-            let status = cell(t, "status");
+            let status = done_status_cell(t);
             let updated = json_text(t, "updated");
             if updated.is_empty() {
                 format!("• {key} — {status}\n")
@@ -621,11 +720,22 @@ fn telegram_bullet(bucket: Bucket, t: &Value) -> String {
     }
 }
 
-fn render_telegram_sections(groups: &Value, caps: Caps) -> String {
+fn render_telegram_sections(
+    groups: &Value,
+    caps: Caps,
+    filter: GroupFilter,
+    show_empty: bool,
+) -> String {
     let mut out = String::new();
     for bucket in Bucket::display_order() {
+        if !filter.shows(bucket) {
+            continue;
+        }
         let items = group_items(groups, bucket);
         if items.is_empty() {
+            if show_empty && bucket != Bucket::Other {
+                out.push_str(&section_header(bucket.telegram_label(), 0, 0));
+            }
             continue;
         }
         let cap = caps.for_bucket(bucket);
@@ -644,26 +754,81 @@ fn render_telegram_sections(groups: &Value, caps: Caps) -> String {
 /// Phone task sections. If `budget` would overflow, drop Done first, then
 /// truncate Waiting; Failing and Running stay.
 pub fn format_telegram_task_sections(groups: &Value, budget: usize) -> String {
+    format_telegram_task_sections_opts(groups, GroupFilter::all(), false, budget)
+}
+
+/// Phone task sections. `full` lifts the usual caps (filtered `/status done`
+/// and `/status all`). Empty selected groups still print a `(0)` header when
+/// `full` is a single-group filter.
+pub fn format_telegram_task_sections_opts(
+    groups: &Value,
+    filter: GroupFilter,
+    full: bool,
+    budget: usize,
+) -> String {
+    let groups = apply_group_filter(groups, filter);
+    let show_empty = full && !filter.is_all();
+    if full {
+        return render_telegram_sections(&groups, telegram_caps_full(), filter, show_empty);
+    }
     let mut caps = telegram_caps();
-    let mut body = render_telegram_sections(groups, caps);
+    let mut body = render_telegram_sections(&groups, caps, filter, false);
     if body.len() <= budget {
         return body;
     }
-    if !group_items(groups, Bucket::Done).is_empty() && caps.done > 0 {
+    if !group_items(&groups, Bucket::Done).is_empty() && caps.done > 0 {
         caps.done = 0;
-        body = render_telegram_sections(groups, caps);
+        body = render_telegram_sections(&groups, caps, filter, false);
         if body.len() <= budget {
             return body;
         }
     }
     while caps.waiting > 0 {
         caps.waiting -= 1;
-        body = render_telegram_sections(groups, caps);
+        body = render_telegram_sections(&groups, caps, filter, false);
         if body.len() <= budget {
             return body;
         }
     }
     body
+}
+
+/// Split a Telegram body into chunks at most `limit` bytes, preferring
+/// newline boundaries. A leftover that still overflows is truncated with a note.
+pub fn split_telegram_text(text: &str, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return vec![text.to_string()];
+    }
+    if text.len() <= limit {
+        return if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![text.to_string()]
+        };
+    }
+    let note = "\n… truncated";
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in text.split_inclusive('\n') {
+        if line.len() > limit {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            let keep = limit.saturating_sub(note.len()).max(1);
+            let mut chunk: String = line.chars().take(keep).collect();
+            chunk.push_str(note);
+            out.push(chunk);
+            continue;
+        }
+        if cur.len() + line.len() > limit && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        cur.push_str(line);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 pub fn failing_count(groups: &Value) -> usize {
@@ -786,7 +951,7 @@ mod tests {
         assert!(text.contains("• live — opus, 3m, edit"), "{text}");
         assert!(text.contains("• hold — held, needs merge"), "{text}");
         assert!(
-            text.contains("• idle — waiting, 2026-01-01 00:00 UTC"),
+            text.contains("• idle — done, 2026-01-01 00:00 UTC"),
             "{text}"
         );
         let done_at = text.find("• idle").unwrap();
@@ -815,6 +980,71 @@ mod tests {
             tight.contains("Done (1, showing 0)") || !tight.contains("• d —"),
             "{tight}"
         );
+    }
+
+    #[test]
+    fn done_label_uses_outcome_not_stored_waiting() {
+        assert_eq!(done_label("waiting", None), "done");
+        assert_eq!(done_label("waiting", Some("success")), "success");
+        assert_eq!(done_label("waiting", Some("checked")), "checked");
+        assert_eq!(done_label("done", None), "done");
+        assert_eq!(done_label("done", Some("")), "done");
+    }
+
+    #[test]
+    fn done_row_marks_check_only_and_hides_waiting() {
+        let groups = json!({
+            "failing": [],
+            "running": [],
+            "waiting": [],
+            "done": [{
+                "key": "proof",
+                "repo": "r",
+                "status": "waiting",
+                "provider": "claude",
+                "updated": "later",
+                "last_outcome": "checked",
+                "check_only": true
+            }]
+        });
+        let cli = format_cli_task_sections(&groups, GroupFilter::all(), cli_caps(false, None));
+        assert!(cli.contains("checked check-only"), "{cli}");
+        assert!(!cli.contains("  waiting  "), "{cli}");
+        let tg = format_telegram_task_sections(&groups, 3500);
+        assert!(tg.contains("• proof — checked check-only, later"), "{tg}");
+    }
+
+    #[test]
+    fn telegram_status_name_and_split() {
+        assert_eq!(
+            GroupFilter::from_name("failed").unwrap(),
+            GroupFilter::from_flags(true, false, false, false)
+        );
+        assert_eq!(GroupFilter::from_name("all").unwrap(), GroupFilter::all());
+        assert!(GroupFilter::from_name("nixer").is_none());
+        let parts = split_telegram_text("aa\nbb\ncc\n", 5);
+        assert!(parts.len() >= 2, "{parts:?}");
+        assert!(parts.iter().all(|p| p.len() <= 5), "{parts:?}");
+        let one = split_telegram_text("short", 100);
+        assert_eq!(one, vec!["short".to_string()]);
+    }
+
+    #[test]
+    fn telegram_filtered_full_shows_empty_header() {
+        let groups = json!({
+            "failing": [],
+            "running": [],
+            "waiting": [],
+            "done": [{"key": "d", "status": "waiting", "updated": "t"}]
+        });
+        let text = format_telegram_task_sections_opts(
+            &groups,
+            GroupFilter::from_flags(true, false, false, false),
+            true,
+            4096,
+        );
+        assert!(text.contains("Failing (0)"), "{text}");
+        assert!(!text.contains("Done ("), "{text}");
     }
 
     #[test]

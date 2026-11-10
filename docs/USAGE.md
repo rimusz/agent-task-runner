@@ -18,11 +18,12 @@ You can also hand it work without GitHub:
 atr add "what is 2+2?"
 atr add "fix the typo in notes.txt" --dir ~/notes
 atr add "open a PR for the README typo" --repo ~/src/my-repo --output pr
+atr add --check-only --repo ~/src/my-repo "prove the login still works"
 atr submit my-task --body "also fix the footer"
 atr ask "what is 2+2?"
 ```
 
-`--dir` edits in place. atr asks the CLI to stay inside that folder where the CLI supports it (Claude `--add-dir`, Codex sandbox `workspace-write`, Grok `--cwd`, OpenCode runs in the folder). That is best-effort: some CLIs can still write outside, and atr does not snapshot-detect outside writes. Prompt files for dir tasks live in the state directory, not a `.atr/` folder in your notes. `--repo` uses a git worktree. Neither flag means answer-only. `--output` is `reply` (default: answer the source), `pr`, `issue-comment`, `branch`, `patch`, `text`, `webhook`, or `triage` (suggest-only; see below). With `--output pr` atr itself commits the agent's edits, pushes the branch and opens the PR with a description built from the task, `git diff --stat` and the agent's summary. A run that changes nothing (no diff for `pr`/`branch`/`patch`, no usable suggestion for `triage`, no text for `issue-comment`) is a **no-op**: the run outcome is `no_op`, the task goes to `needs_attention` with a `NO-OP <key>: <reason>` result, and nothing is delivered. For `--repo` tasks atr also snapshots `git status` of the main checkout before and after each run; if the agent changed it (escaped its worktree), the run outcome is `main_checkout_edit`, the task goes to `needs_attention` with a `BLOCKED <key>: ...` result listing the files, and nothing is delivered. Before verify and commit, atr also drops new untracked scratch files the task didn't name (root-level helpers like `test_fix.py`/`run_tests.py`, and `debug*`/`verify_*`-style names anywhere) and lists them in the PR body; it also restores tracked docs files (README, CHANGELOG, `*.md`, `docs/`) the task never asked about when the run changed code too, listed under "Reverted unrequested edits". See `[scratch]` in [CONFIG.md](CONFIG.md#scratch-files). Triage tasks never run verify. Agents are spawned with `PWD` set to the worktree, because OpenCode 2.x takes its project folder from `$PWD`, not the process cwd. Prompts (and inbox files) are capped at 256 KiB by default (`max_prompt_bytes`).
+`--dir` edits in place. atr asks the CLI to stay inside that folder where the CLI supports it (Claude `--add-dir`, Codex sandbox `workspace-write`, Grok `--cwd`, OpenCode runs in the folder). That is best-effort: some CLIs can still write outside, and atr does not snapshot-detect outside writes. Prompt files for dir tasks live in the state directory, not a `.atr/` folder in your notes. `--repo` uses a git worktree. Neither flag means answer-only. `--output` is `reply` (default: answer the source), `pr`, `issue-comment`, `branch`, `patch`, `text`, `webhook`, or `triage` (suggest-only; see below). With `--output pr` atr itself commits the agent's edits, pushes the branch and opens the PR with a description built from the task, `git diff --stat` and the agent's summary. A run that changes nothing (no diff for `pr`/`branch`/`patch`, no usable suggestion for `triage`, no text for `issue-comment`) is a **no-op**: the run outcome is `no_op`, the task goes to `needs_attention` with a `NO-OP <key>: <reason>` result, and nothing is delivered. `--check-only` (HTTP/MCP `check_only`, Telegram `/add --check-only`) is the exception for proof runs: the prompt tells the agent not to edit files; success with no file changes is outcome `checked` and the task is done (stored `waiting`); success that modified files is `needs_attention` with why `check-only task modified files`, and nothing is pushed. For `--repo` tasks atr also snapshots `git status` of the main checkout before and after each run; if the agent changed it (escaped its worktree), the run outcome is `main_checkout_edit`, the task goes to `needs_attention` with a `BLOCKED <key>: ...` result listing the files, and nothing is delivered. Before verify and commit, atr also drops new untracked scratch files the task didn't name (root-level helpers like `test_fix.py`/`run_tests.py`, and `debug*`/`verify_*`-style names anywhere) and lists them in the PR body; it also restores tracked docs files (README, CHANGELOG, `*.md`, `docs/`) the task never asked about when the run changed code too, listed under "Reverted unrequested edits". See `[scratch]` in [CONFIG.md](CONFIG.md#scratch-files). Triage tasks never run verify. Agents are spawned with `PWD` set to the worktree, because OpenCode 2.x takes its project folder from `$PWD`, not the process cwd. Prompts (and inbox files) are capped at 256 KiB by default (`max_prompt_bytes`).
 
 Other agents and scripts can also hand it work through MCP, the HTTP API, Telegram, or an inbox folder. See [Hand work to atr](#hand-work-to-atr).
 
@@ -74,10 +75,11 @@ Every way in creates the same kind of task. Pick whichever suits the caller. Ful
 atr add "what is 2+2?"                                  # answer only, no workspace
 atr add "fix the typo in notes.txt" --dir ~/notes       # edit a plain folder in place
 atr add "fix the README typo" --repo ~/src/my-repo --output pr   # git worktree, opens a PR
+atr add --check-only --repo ~/src/my-repo "prove the login still works"
 atr add "deploy" --after build,test                     # wait until those keys succeed
 ```
 
-**MCP.** Run `atr mcp` as an MCP server in your agent. `add_task` needs `body` (`title` is optional and defaults to the first prompt line). With neither `dir` nor `repo`, workspace is `none`, matching CLI and HTTP. Optional `dir`, `repo`, `workspace`, `output`, `issue` (GitHub issue number, needed for `output: issue_comment`), `provider`, `after` (task keys that must succeed first). Optional `idempotency_key`: a retry with the same key and the same request returns the existing task (`replayed: true`); the same key with a different body, workspace, output, or files is a conflict. Optional `files`: `[{name, content_base64}]` or `[{name, text}]` — each file is written into the task worktree under that filename when the worktree is ready. Returns a task key. `wait_task` waits for that key to finish (`timeout_seconds`, default 120, max 3600). `get_result` returns the answer text, diff, and PR URL.
+**MCP.** Run `atr mcp` as an MCP server in your agent. `add_task` needs `body` (`title` is optional and defaults to the first prompt line). With neither `dir` nor `repo`, workspace is `none`, matching CLI and HTTP. Optional `dir`, `repo`, `workspace`, `output`, `issue` (GitHub issue number, needed for `output: issue_comment`), `provider`, `after` (task keys that must succeed first), `check_only` (proof run: no file changes is `checked`, not no-op). Optional `idempotency_key`: a retry with the same key and the same request returns the existing task (`replayed: true`); the same key with a different body, workspace, output, or files is a conflict. Optional `files`: `[{name, content_base64}]` or `[{name, text}]` — each file is written into the task worktree under that filename when the worktree is ready. Returns a task key. `wait_task` waits for that key to finish (`timeout_seconds`, default 120, max 3600). `get_result` returns the answer text, diff, and PR URL.
 
 **HTTP.** While atr is running, POST JSON to the local API (default `127.0.0.1:7420`). It returns the new task `key`; read the result from `GET /tasks/{key}/result`. Writes need `Authorization: Bearer` (same token as `/mcp`). Optional header `Idempotency-Key` (JSON field `idempotency_key` is a fallback): a retry with the same key and the same request returns the existing task (`replayed: true`); the same key with a different body, workspace, output, or files is HTTP 409. Optional `files` (alias `attachments`): `[{name, content_base64}]` or `[{name, text}]` — each file lands in the worktree under that filename when the worktree is ready.
 
@@ -164,6 +166,7 @@ atr telegram test
 /task my-task
 /add what is 2+2?
 /add demo fix the login
+/add demo --check-only prove the login still works
 /add host --provider claude --model claude-sonnet-5-5 draft a changelog
 /assistant
 /assistant grok
@@ -173,7 +176,7 @@ atr telegram test
 /ui
 ```
 
-`/status [repo]` uses the same failing → running → waiting → done grouping as `atr status` (phone layout: Title Case section names and bullets). Running and failing tasks are listed; a stored `waiting` row is under Done. Caps are tighter than the CLI (10 / 8 / 5 / 3). If the body would exceed the Telegram length cap, Done is dropped first, then Waiting is truncated; Failing and Running stay. `/status` has no `--watch` / `--check` / `--json`.
+`/status [done|failed|running|waiting|all] [repo]` uses the same failing → running → waiting → done grouping as `atr status` (phone layout: Title Case section names and bullets). Running and failing tasks are listed; a stored `waiting` row is under Done and labelled with the last outcome (`success`, `checked`, …) or `done`, not `waiting`. Caps are tighter than the CLI (10 / 8 / 5 / 3). If the default body would exceed the Telegram length cap, Done is dropped first, then Waiting is truncated; Failing and Running stay. `/status done` (and the other group names, plus `/status all`) lists that group in full and splits across messages at Telegram's 4096-character limit (a leftover that still overflows ends with `… truncated`). `/status` has no `--watch` / `--check` / `--json`. Times use `[ui] timezone` when set, else `display_timezone`, else the host local zone.
 
 `/ui` replies with a dashboard link: `[dashboard] public_url` if set, else a detected Tailscale Serve `https://…ts.net/` URL, else the local `atr ui --print` address (marked local-only).
 
@@ -190,7 +193,7 @@ atr config get telegram.assistant.providers
 
 `providers` wins over `provider` (doctor warns when both are set); names must be `[[provider]]` names. See [CONFIG.md](CONFIG.md).
 
-**Dashboard.** While atr is running, open `http://127.0.0.1:7420/`. It is read-only: what is running, what is queued, recent results, and usage. No buttons. Times are in `display_timezone`, shown once in the header and not repeated after each time. Plan usage reads like `5h 0% · resets Oct 16; 7d 4% · resets Oct 17`; hover a reset date for the full time and zone.
+**Dashboard.** While atr is running, open `http://127.0.0.1:7420/`. It is read-only: what is running, what is queued, recent results, and usage. No buttons. Times are in `[ui] timezone` when set, else `display_timezone` (empty = host local), shown once in the header and not repeated after each time. Plan usage reads like `5h 0% · resets Oct 16; 7d 4% · resets Oct 17`; hover a reset date for the full time and zone.
 
 **Terminal.**
 
@@ -220,7 +223,7 @@ atr config set github.label for:atr
 - **failing** — stored `failed`, `needs_attention`, `cancelled`
 - **running** — stored `running`, or in-flight, or an open run whose owner is still alive
 - **waiting** — `queued` or `held` (hold reason, retry time, or `after` deps). atr's stored `waiting` is idle/finished and is listed under **done**, not here
-- **done** — stored `waiting` or `done`
+- **done** — stored `waiting` or `done`. Rows show the last outcome (`success`, `checked`, …) or `done`, not the stored `waiting` label
 
 Flags: `--failed` / `--running` / `--waiting` / `--done` show only those sections (several combine, still in that order). `--since 7d` drops older `updated` rows before caps (same duration parser as `atr gc`). `--limit N` caps each shown section (`0` prints counts and no rows). `--all` includes hidden `role=reflect` tasks and lifts the done/waiting caps (still honors `--limit`). `--watch [SECS]` reprints the human view (default 2) until stdin closes or Ctrl-C; it cannot be combined with `--json`. `--check` exits 0 when the shown failing count is 0, 1 when it is greater, 2 for bad flags or an unknown `--repo`. Default (no `--check`) is exit 0 whenever the snapshot prints. `--json` keeps the existing `tasks[]` (every non-reflect task, `updated DESC`, unless `--all`) and adds `groups`. Worktree and branch stay on `atr tasks` / `atr tasks KEY`.
 
@@ -230,10 +233,10 @@ Telegram command to CLI:
 
 | Telegram | CLI | HTTP (bearer token) |
 |---|---|---|
-| `/status [repo]` | `atr status [--repo R]` | `GET /status` |
+| `/status [done\|failed\|running\|waiting\|all] [repo]` | `atr status [--done/--failed/--running/--waiting/--all] [--repo R]` | `GET /status` |
 | `/tasks [repo]` | `atr tasks [--repo R]` | `GET /dashboard.json` |
 | `/task <key>` | `atr tasks <key>` | `GET /tasks/<key>` |
-| `/add [repo or host] [--provider P] [--model M] [--agent A] <prompt>` | `atr add [--repo R] [--provider P] [--model M] <prompt>` | `POST /tasks` |
+| `/add [repo or host] [--provider P] [--model M] [--agent A] [--check-only] <prompt>` | `atr add [--repo R] [--provider P] [--model M] [--check-only] <prompt>` | `POST /tasks` |
 | `/assistant [provider]` | none (per-chat default) | none |
 | `/cancel <key> [force]` | `atr cancel <key> [--force]` | `POST /tasks/<key>/cancel` |
 | `/retry <key>` | `atr retry <key>` | `POST /tasks/<key>/retry` |
@@ -407,7 +410,7 @@ atr gc --tasks --dry-run
 
 `atr skills install` writes the atr agent skill (`skills/atr/SKILL.md`) for each coding CLI installed on this machine: `~/.claude` (claude), `~/.cursor` (cursor-agent), `~/.codex` (codex), `~/.grok` (grok) and `~/.config/opencode` (opencode). CLIs that aren't installed are skipped and their folders aren't created. Config files are never touched. `atr init` does the same. `atr upgrade` and `atr rollback` refresh that skill so it matches the binary now installed. Run it again after installing a new CLI, or on each host that runs atr.
 
-`atr tasks rm` only deletes finished or failed work, never a running task.
+`atr tasks rm` deletes finished, failed, cancelled, or `needs_attention` work when there is no live run. Running and queued tasks are refused.
 
 `atr reset` is a full reset. It lists what it will remove and asks before doing it (`--yes`/`-y` skips the prompt; without a terminal it refuses unless you pass `--yes`; `--dry-run` only prints the list). It stops and uninstalls the service, then deletes only atr's own files: `~/.config/atr` (config, secrets, launcher), `~/.local/share/atr` (task database, logs, backups, inbox), `~/atr-work` (worktrees), `~/Library/Logs/atr` and `~/Library/Logs/atr.boot.err` on macOS, and the `skills/atr/` folders under `~/.claude`, `~/.cursor`, `~/.codex`, `~/.grok` and `~/.config/opencode`. It never touches provider configs, your repos, or the `atr` binary; configured paths outside those dirs, or a dir that holds a watched repo, are listed as kept. Run `atr init` afterwards to set up again. Full flag list: `atr --help`. Service files and config edits: [CONFIG.md](CONFIG.md).
 
@@ -469,7 +472,7 @@ Commands (allowed private chats only; also registered in the `/` menu via setMyC
 
 | Command | What it does |
 |---|---|
-| `/status` | queue, running tasks, providers |
+| `/status [done\|failed\|running\|waiting\|all] [repo]` | grouped queue; a group name lists that section in full |
 | `/tasks`, `/task <id>` | recent and running tasks; one task's detail |
 | `/cancel <id>` | cancel a task (asks Confirm) |
 | `/doctor` | `atr doctor`, warn/FAIL lines only |

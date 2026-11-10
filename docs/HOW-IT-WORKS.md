@@ -453,7 +453,9 @@ Tools: `add_task` (`body` required; `title` optional, derived from the prompt;
 workspace defaults to `none` when neither `dir` nor `repo` is set; optional
 `workspace` git/dir/none, `dir`, `repo`, `output`, `issue` (GitHub issue
 number for `output: issue_comment`),
-`webhook`, `patch`, `idempotency_key`, `files`), `wait_task` (block until waiting/done/failed or
+`webhook`, `patch`, `check_only` (proof run: no file changes is `checked`,
+not no-op; file changes go to `needs_attention` and are not pushed),
+`idempotency_key`, `files`), `wait_task` (block until waiting/done/failed or
 `timeout_seconds`), `get_result` (text, diff, PR URL), `list_tasks`,
 `task_status` (timeline + last output), `steer_task` (`interrupt: true` stops the
 live turn and resumes its session with the message), `cancel_task`,

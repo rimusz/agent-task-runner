@@ -109,7 +109,7 @@ as `{prefix}-{issue}` and still posts via the agent prompt (`gh issue comment`
   `POST /mcp` on the existing listener (localhost by default; Tailscale bind
   is optional). HTTP requires a bearer token from `mcp.token_env` (default
   `ATR_MCP_TOKEN`) or `mcp.token_file` (0600). atr never prints the token.
-  Tools enqueue (`add_task` with optional title, workspace git/dir/none, output, `idempotency_key`, `files`), `wait_task`, `get_result`
+  Tools enqueue (`add_task` with optional title, workspace git/dir/none, output, `check_only`, `idempotency_key`, `files`), `wait_task`, `get_result`
   (text, diff, PR URL), list, status (timeline + last output), steer, cancel,
   list repos/providers, usage, doctor, and read-only `config_get` (secrets
   redacted). Resources: `atr://status`, `atr://dashboard`. Config cannot be
@@ -160,9 +160,9 @@ missing worktree, or a prepare/setup failure still fail as orphans.
 `events(id, run_id, recorded, kind, raw_json)` — assistant / tool / result lines used to build a handoff.
 `usage(run_id, input, cache_read, cache_write, output, cost_usd, cost_kind[est|plan], raw_json)` — one row per run (upsert). Subscription CLIs with no dollar figure use `plan`; a reported estimate is `est`. Opening the DB backfills empty `cost_kind`, recovers a Grok cost from `raw_json` when possible, and canonicalizes Grok usage-window names.
 
-`atr tasks rm` and `atr gc --tasks` delete finished, failed, or cancelled task
-rows and their sessions, runs, turns, events, and messages. Running tasks are
-refused.
+`atr tasks rm` and `atr gc --tasks` delete finished, failed, cancelled, or
+`needs_attention` task rows and their sessions, runs, turns, events, and
+messages. Running and queued tasks are refused.
 
 ## 3. Workspace
 
@@ -309,7 +309,9 @@ Manual `[[provider.quota]]` still applies. `atr status` shows both.
 
 **Quota-aware choice:** `[[provider.quota]]` rolling windows (usd/tokens/runs);
 skip new tasks at threshold or in a reported limit/reset; existing tasks stay.
-`display_timezone` labels times and groups usage days.
+`display_timezone` labels times and groups usage days. `[ui] timezone`
+(IANA) overrides it when set; invalid names fall back to the host local zone
+and `atr doctor` warns.
 
 ## 7. Watchdog
 
@@ -359,7 +361,7 @@ original request plus the new message, with the usual handoff.
 Telegram bot inside `atr serve` (long-poll, no webhook). Batched, rate-limited
 alerts for done / needs_attention / failover / quota skip. Daily summary at a
 configured local time. Never send tokens, env vars, or full prompts.
-`display_timezone` labels every clock. The agent posts on the GitHub issue
+`display_timezone` (overridden by `[ui] timezone` when set) labels every clock. The agent posts on the GitHub issue
 when GitHub intake is on.
 
 ## 10. Shadow mode and verify

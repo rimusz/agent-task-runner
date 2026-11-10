@@ -83,6 +83,8 @@ pub struct Task {
     /// Human-needed `after` hold (`held` status).
     pub hold_reason: String,
     pub hold_notified: bool,
+    /// Proof/verification: success with no file changes is `checked`, not no-op.
+    pub check_only: bool,
 }
 
 impl Default for Task {
@@ -127,6 +129,7 @@ impl Default for Task {
             retry_reason: String::new(),
             hold_reason: String::new(),
             hold_notified: false,
+            check_only: false,
         }
     }
 }
@@ -139,7 +142,7 @@ const TASK_SELECT: &str = "key, repo, issue, status, provider, session_id, workt
                           result_text, result_diff, result_pr_url, needs,
                           pin_strict, compare_decision, clock_started,
                           retry_attempt, retry_next_at, retry_reason,
-                          hold_reason, hold_notified, model_override";
+                          hold_reason, hold_notified, model_override, check_only";
 
 const RUN_SELECT: &str = "id, task_key, provider, model, pid, started, ended, outcome,
                           last_event_at, exit_code, session_id, handoff, prefix_hash,
@@ -625,6 +628,10 @@ impl Db {
         let _ = conn.execute("ALTER TABLE runs ADD COLUMN owner_started TEXT", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN owner_pid INTEGER", []);
         let _ = conn.execute("ALTER TABLE tasks ADD COLUMN owner_started TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN check_only INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS owners (
@@ -907,6 +914,16 @@ impl Db {
         Ok(())
     }
 
+    /// Proof/verification: success with no file changes is terminal `checked`.
+    pub fn set_check_only(&self, key: &str, check_only: bool) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET check_only = ?1, updated = ?2 WHERE key = ?3",
+            params![check_only as i64, now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
     /// Pin a task strictly to its provider (compare arms): no failover.
     pub fn set_pin_strict(&self, key: &str, strict: bool) -> Result<()> {
         let conn = self.lock();
@@ -1098,7 +1115,10 @@ impl Db {
 
     /// Finished (`waiting`/`done`), failed, or cancelled. Running and queued stay.
     pub fn removable_status(status: &str) -> bool {
-        matches!(status, "waiting" | "failed" | "done" | "cancelled" | "held")
+        matches!(
+            status,
+            "waiting" | "failed" | "done" | "cancelled" | "held" | "needs_attention"
+        )
     }
 
     pub fn has_open_run(&self, key: &str) -> Result<bool> {
@@ -1117,7 +1137,7 @@ impl Db {
             None => Ok(Some(format!("unknown task {key}"))),
             Some(t) if t.status == "running" => Ok(Some(format!("task {key} is running"))),
             Some(t) if !Self::removable_status(&t.status) => Ok(Some(format!(
-                "task {key} is {} (only finished, failed, or cancelled may be removed)",
+                "task {key} is {} (only finished, failed, cancelled, or needs_attention may be removed)",
                 t.status
             ))),
             Some(_) if self.has_open_run(key)? => Ok(Some(format!("task {key} has an open run"))),
@@ -1125,7 +1145,7 @@ impl Db {
         }
     }
 
-    /// Delete a finished/failed/cancelled task and its sessions, runs, turns, events, messages.
+    /// Delete a finished/failed/cancelled/needs_attention task and its sessions, runs, turns, events, messages.
     pub fn delete_task(&self, key: &str) -> Result<()> {
         if let Some(reason) = self.delete_refuse_reason(key)? {
             anyhow::bail!("{reason}");
@@ -3056,6 +3076,7 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         hold_reason: r.get::<_, Option<String>>(36)?.unwrap_or_default(),
         hold_notified: r.get::<_, Option<i64>>(37)?.unwrap_or(0) != 0,
         model_override: r.get::<_, Option<String>>(38)?.unwrap_or_default(),
+        check_only: r.get::<_, Option<i64>>(39)?.unwrap_or(0) != 0,
     })
 }
 
@@ -4355,6 +4376,27 @@ mod tests {
         let none = db.get_task("answer-1").unwrap().unwrap();
         assert_eq!(none.workspace_kind, "none");
         assert_eq!(none.issue, None);
+        assert!(!gh.check_only);
+        assert!(!local.check_only);
+        assert!(!none.check_only);
+    }
+
+    #[test]
+    fn migrate_adds_check_only_default_false_on_existing_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        write_v0_1_31_main_schema(&path);
+        let cols = sqlite_columns(&path, "tasks");
+        assert!(!cols.iter().any(|c| c == "check_only"), "{cols:?}");
+        let db = Db::open(&path).unwrap();
+        let t = db.get_task("acme-12").unwrap().unwrap();
+        assert!(!t.check_only);
+        let cols = sqlite_columns(&path, "tasks");
+        assert!(cols.iter().any(|c| c == "check_only"), "{cols:?}");
+        db.set_check_only("acme-12", true).unwrap();
+        assert!(db.get_task("acme-12").unwrap().unwrap().check_only);
+        db.upsert_task("next", "/r", None).unwrap();
+        assert!(!db.get_task("next").unwrap().unwrap().check_only);
     }
 
     #[test]
@@ -4697,6 +4739,7 @@ mod tests {
             "owner_pid",
             "owner_started",
             "clock_started",
+            "check_only",
         ] {
             assert!(task_cols.iter().any(|c| c == col), "missing tasks.{col}");
         }

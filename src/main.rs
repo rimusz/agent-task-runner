@@ -70,6 +70,9 @@ enum Cmd {
         /// that cannot resume: the message just waits).
         #[arg(long)]
         interrupt: bool,
+        /// Verification/proof: success with no file changes is done (`checked`), not no-op.
+        #[arg(long)]
+        check_only: bool,
     },
     /// Enqueue a generic task (prompt + optional workspace). No issue number.
     Add {
@@ -112,6 +115,9 @@ enum Cmd {
         /// verify with the smallest diff. Needs --repo and verify commands.
         #[arg(long, conflicts_with_all = ["provider", "dir", "needs"])]
         compare: Option<String>,
+        /// Verification/proof: success with no file changes is done (`checked`), not no-op.
+        #[arg(long)]
+        check_only: bool,
     },
     /// One-shot in-process turn for CI and scripts (`atr serve` is not required).
     /// Never opens the interactive TUI.
@@ -535,7 +541,7 @@ enum ConfigCmd {
 
 #[derive(Subcommand, Debug)]
 enum TasksCmd {
-    /// Delete finished, failed, or cancelled tasks (and their history).
+    /// Delete finished, failed, cancelled, or needs_attention tasks (and their history).
     Rm {
         /// Task keys to remove.
         #[arg(required = true, num_args = 1..)]
@@ -737,6 +743,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             shadow,
             tests_ok,
             interrupt,
+            check_only,
         } => {
             let text = read_body(body, body_file)?;
             let cfg = load_config(&path)?;
@@ -752,6 +759,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 shadow,
                 tests_ok,
                 interrupt,
+                check_only,
             ) {
                 return Ok(match status {
                     200 => ExitCode::SUCCESS,
@@ -760,7 +768,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 });
             }
             let shared = Shared::open(path)?;
-            match shared.submit(
+            match shared.submit_with(
                 &key,
                 &text,
                 &source,
@@ -768,6 +776,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 issue,
                 shadow,
                 tests_ok,
+                atr::SubmitOpts {
+                    check_only,
+                    ..atr::SubmitOpts::default()
+                },
             )? {
                 SubmitOutcome::Accepted => Ok(ExitCode::SUCCESS),
                 SubmitOutcome::Queued => {
@@ -795,6 +807,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             needs,
             after,
             compare,
+            check_only,
         } => {
             let needs = atr::task::parse_needs(&needs)?;
             let text = if let Some(p) = prompt.filter(|s| !s.trim().is_empty()) {
@@ -891,6 +904,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 matches!(workspace_kind, atr::task::WorkspaceKind::Dir),
                 &needs,
                 &after,
+                check_only,
             ) {
                 println!("{key}");
                 return Ok(match status {
@@ -919,6 +933,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     needs: needs.clone(),
                     after: after.clone(),
                     agent: None,
+                    check_only,
                 },
                 model.as_deref(),
             )?;
@@ -1476,6 +1491,7 @@ fn http_submit(
     shadow: bool,
     tests_ok: bool,
     interrupt: bool,
+    check_only: bool,
 ) -> Result<u16> {
     let url = format!("http://{listen}/tasks/{key}/messages");
     let mut req = ureq::post(&url).set("User-Agent", "atr");
@@ -1490,6 +1506,7 @@ fn http_submit(
         "shadow": shadow,
         "tests_ok": tests_ok,
         "interrupt": interrupt,
+        "check_only": check_only,
     }))?;
     Ok(resp.status())
 }
@@ -1510,6 +1527,7 @@ fn http_create(
     as_dir: bool,
     needs: &[String],
     after: &[String],
+    check_only: bool,
 ) -> Result<u16> {
     let url = format!("http://{listen}/tasks");
     let mut payload = serde_json::json!({
@@ -1538,6 +1556,9 @@ fn http_create(
     }
     if !after.is_empty() {
         payload["after"] = serde_json::json!(after);
+    }
+    if check_only {
+        payload["check_only"] = serde_json::Value::Bool(true);
     }
     if let Some(spec) = output_spec {
         if output == "webhook" {
@@ -1661,6 +1682,7 @@ async fn run_triage_cmd(path: PathBuf, cmd: TriageCmd) -> anyhow::Result<ExitCod
                 false,
                 &[],
                 &[],
+                false,
             ) {
                 println!("{key}");
                 return Ok(match status {
@@ -1690,6 +1712,7 @@ async fn run_triage_cmd(path: PathBuf, cmd: TriageCmd) -> anyhow::Result<ExitCod
                     needs: Vec::new(),
                     after: Vec::new(),
                     agent: None,
+                    check_only: false,
                 },
             )?;
             println!("{key}");

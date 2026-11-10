@@ -16,7 +16,7 @@ pub const PROTOCOL_VERSION: &str = "2025-03-26";
 const TOOLS: &[(&str, &str)] = &[
     (
         "add_task",
-        "Enqueue a new atr task. Optional workspace (git repo, local dir, or none), output, key, provider/driver hint, model (for that provider), after (task keys that must succeed first), idempotency_key (replay the same create), and files (name + content_base64 or text; land in the worktree by filename).",
+        "Enqueue a new atr task. Optional workspace (git repo, local dir, or none), output, key, provider/driver hint, model (for that provider), after (task keys that must succeed first), check_only (verification: no file changes is success), idempotency_key (replay the same create), and files (name + content_base64 or text; land in the worktree by filename).",
     ),
     (
         "list_tasks",
@@ -371,6 +371,7 @@ fn tool_schema(name: &str) -> Value {
                 "model": {"type": "string", "description": "Model id (requires `provider`). Pins the task strictly to `provider`: no fallback or failover"},
                 "needs": {"type": "array", "items": {"type": "string", "enum": ["browser", "desktop"]}, "description": "Required provider capabilities; desktop tasks wait for a logged-in, unlocked graphical session"},
                 "after": {"type": "array", "items": {"type": "string"}, "description": "Task keys that must succeed before this one starts"},
+                "check_only": {"type": "boolean", "description": "Verification/proof run: success with no file changes is checked (done), not no-op. File changes go to needs_attention and are not pushed."},
                 "hint": {"type": "string"},
                 "idempotency_key": {"type": "string", "description": "Optional. Same key + same request returns the existing task; same key + different body/files is a conflict."},
                 "files": {
@@ -619,6 +620,10 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
             issue: arg_issue(args)?,
             shadow: false,
             tests_ok: false,
+            check_only: args
+                .get("check_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             files,
             idempotency_key: arg_str(args, &["idempotency_key", "idempotencyKey"]),
             repo_named_prefix: true,

@@ -26,6 +26,7 @@ broken. Each non-ok line prints a `fix:` hint.
 |---|---|---|---|
 | `config` | — | config could not load | On a TTY, `atr` / `atr tui` / `atr ask` offer `atr init`. Otherwise run `atr init` (or `atr init --yes`), or fix the TOML error it prints |
 | `config keys` | the file has keys this atr does not know (they are ignored); the line names each one and the nearest valid key | — | Fix the typo, delete the key, or upgrade atr if the key belongs to a newer version (normal after a rollback) |
+| `timezone` | `[ui] timezone` or `display_timezone` is not a valid IANA name; clocks fall back to the host local zone | — | Set `[ui] timezone` (or `display_timezone`) to an IANA name such as `Asia/Dubai`, or `local` |
 | `lessons` | lessons are on but the reflect provider (`[lessons] provider`, else the driver) is missing or disabled: only manual lessons get added | — | Set `[lessons] provider` to an enabled provider, or enable the driver |
 | `compare` | `[verify]` is on but some repos have no verify commands: compare can't judge there and `atr add --compare` refuses | — | Set `[verify] commands` or a `[[verify.repo]]` entry with commands |
 | `gh auth` | `gh auth status` fails in this shell but a token is in `shadow.env` | no `gh` login and no token | Use a token (below). A failed `gh auth status` over SSH on macOS is usually just the locked keychain. |
@@ -58,7 +59,8 @@ still read):
 ## 2. `atr status` and the dashboard
 
 `atr status` (or `--json`) shows providers, then tasks grouped as failing,
-running, waiting, and done, plus a
+running, waiting, and done (finished rows show the last outcome or `done`,
+not the stored `waiting` label), plus a
 `github auth:` line (`ok`, `warn`, `FAIL`). The dashboard
 (`atr ui`, or your Tailscale Serve URL) shows a **red banner** when GitHub auth
 is failing and an **amber banner** when the token expires within 14 days.

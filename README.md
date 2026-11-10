@@ -96,6 +96,7 @@ Ask it to do something in a folder:
 
 ```bash
 atr add "fix the spelling mistakes in README.md" --dir .
+atr add --check-only --dir . "report leftover TODOs; do not edit files"
 atr status
 ```
 

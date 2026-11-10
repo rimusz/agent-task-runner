@@ -1441,6 +1441,7 @@ pub(crate) fn enqueue_turn(
             needs: Vec::new(),
             after: Vec::new(),
             agent: None,
+            check_only: false,
         },
     )?;
     if shared.db.get_task(key)?.is_some_and(|t| t.role == "plan") {
