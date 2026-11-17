@@ -3822,7 +3822,14 @@ mod tests {
         db.upsert_task("acme-tz", "/repo", None).unwrap();
         let run = db.start_run("acme-tz", "claude", "m").unwrap();
         db.finish_run(run, "success", Some(0)).unwrap();
-        let recorded = "2026-10-14T02:00:00Z";
+        // 02:00 UTC is the previous calendar day in America/New_York. A few
+        // days back stays inside usage_by_day_tz(30) without a calendar date
+        // that ages out of the window (2026-10-14 fell out on 2026-11-17).
+        let recorded_utc = (Utc::now() - ChronoDuration::days(2))
+            .date_naive()
+            .and_time(chrono::NaiveTime::from_hms_opt(2, 0, 0).unwrap())
+            .and_utc();
+        let recorded = recorded_utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         db.insert_usage_at(
             run,
             None,
@@ -3834,45 +3841,47 @@ mod tests {
             Some(1.0),
             Some("est"),
             "{}",
-            recorded,
+            &recorded,
         )
         .unwrap();
         let utc = crate::tz::DisplayTz::parse("UTC").unwrap();
         let ny = crate::tz::DisplayTz::parse("America/New_York").unwrap();
-        let utc_days = db.usage_by_day_tz(90, &utc).unwrap();
-        let ny_days = db.usage_by_day_tz(90, &ny).unwrap();
+        let utc_day = utc.day(recorded_utc);
+        let ny_day = ny.day(recorded_utc);
+        assert_ne!(
+            utc_day, ny_day,
+            "02:00 UTC must land on the previous NY calendar day"
+        );
+        let utc_days = db.usage_by_day_tz(30, &utc).unwrap();
+        let ny_days = db.usage_by_day_tz(30, &ny).unwrap();
         assert!(
             utc_days
                 .iter()
-                .any(|d| d.day == "2026-10-14" && d.provider == "claude"),
+                .any(|d| d.day == utc_day && d.provider == "claude"),
             "{utc_days:?}"
         );
         assert!(
             ny_days
                 .iter()
-                .any(|d| d.day == "2026-10-13" && d.provider == "claude"),
+                .any(|d| d.day == ny_day && d.provider == "claude"),
             "{ny_days:?}"
         );
-        let range = db
-            .usage_by_day_range("2026-10-14", "2026-10-14", &utc)
-            .unwrap();
+        let range = db.usage_by_day_range(&utc_day, &utc_day, &utc).unwrap();
         assert!(
             range
                 .iter()
-                .any(|d| d.day == "2026-10-14" && d.provider == "claude" && d.input == 10),
+                .any(|d| d.day == utc_day && d.provider == "claude" && d.input == 10),
             "{range:?}"
         );
         let empty = db
-            .usage_by_day_range("2026-10-01", "2026-10-01", &utc)
+            .usage_by_day_range("2000-01-01", "2000-01-01", &utc)
             .unwrap();
         assert!(empty.is_empty(), "{empty:?}");
-        let ny_range = db
-            .usage_by_day_range("2026-10-13", "2026-10-13", &ny)
-            .unwrap();
+        let ny_range = db.usage_by_day_range(&ny_day, &ny_day, &ny).unwrap();
         assert!(
             ny_range
                 .iter()
-                .any(|d| d.day == "2026-10-13" && d.provider == "claude"),
+                .any(|d| d.day == ny_day && d.provider == "claude"),
             "{ny_range:?}"
         );
     }
