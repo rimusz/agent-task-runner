@@ -372,6 +372,10 @@ fn tool_schema(name: &str) -> Value {
                 "needs": {"type": "array", "items": {"type": "string", "enum": ["browser", "desktop"]}, "description": "Required provider capabilities; desktop tasks wait for a logged-in, unlocked graphical session"},
                 "after": {"type": "array", "items": {"type": "string"}, "description": "Task keys that must succeed before this one starts"},
                 "check_only": {"type": "boolean", "description": "Verification/proof run: success with no file changes is checked (done), not no-op. File changes go to needs_attention and are not pushed."},
+                "labels": {"type": "string", "description": "Comma-separated labels for [labels.<name>] overrides (e.g. proof)"},
+                "run_timeout": {"type": "string", "description": "Per-task run wall-clock cap (90m, 3h). Empty inherits provider/label/default."},
+                "stall_resumes": {"type": "integer", "description": "Per-task same-session resume budget after a cap or stall"},
+                "overflow_on_cap": {"type": "boolean", "description": "Overflow to another provider when the run cap is exhausted"},
                 "hint": {"type": "string"},
                 "idempotency_key": {"type": "string", "description": "Optional. Same key + same request returns the existing task; same key + different body/files is a conflict."},
                 "files": {
@@ -624,6 +628,13 @@ fn add_task(shared: &Shared, args: &Value) -> Result<Value, String> {
                 .get("check_only")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            labels: arg_str(args, &["labels"]).unwrap_or_default(),
+            run_timeout: arg_str(args, &["run_timeout"]).unwrap_or_default(),
+            stall_resumes: args
+                .get("stall_resumes")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok()),
+            overflow_on_cap: args.get("overflow_on_cap").and_then(|v| v.as_bool()),
             files,
             idempotency_key: arg_str(args, &["idempotency_key", "idempotencyKey"]),
             repo_named_prefix: true,

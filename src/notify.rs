@@ -19,6 +19,8 @@ pub enum Event {
     QuotaSkip,
     Compare,
     Hook,
+    /// Run wall-clock cap (`run_timeout`). Never a stall / CLI hang.
+    CapReached,
 }
 
 impl Event {
@@ -38,6 +40,7 @@ impl Event {
         Event::QuotaSkip,
         Event::Compare,
         Event::Hook,
+        Event::CapReached,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -57,6 +60,7 @@ impl Event {
             Event::QuotaSkip => "quota_skip",
             Event::Compare => "compare",
             Event::Hook => "hook",
+            Event::CapReached => "cap_reached",
         }
     }
 
@@ -77,6 +81,7 @@ impl Event {
             "quota_skip" => Ok(Event::QuotaSkip),
             "compare" => Ok(Event::Compare),
             "hook" => Ok(Event::Hook),
+            "cap_reached" => Ok(Event::CapReached),
             other => bail!(
                 "unknown telegram.events value {other:?}; expected one of: {}",
                 Event::ALL
@@ -107,7 +112,12 @@ pub fn parse_event_names(raw: &[String]) -> Result<Vec<String>> {
 }
 
 pub fn allows_event(cfg: &TelegramConfig, event: Event) -> bool {
-    cfg.events.is_empty() || cfg.events.iter().any(|e| e == event.as_str())
+    if cfg.events.is_empty() || cfg.events.iter().any(|e| e == event.as_str()) {
+        return true;
+    }
+    // Existing configs that list `stalled` (Mini) still receive cap alerts.
+    // The Telegram text is never stall / CLI hang / heartbeat.
+    event == Event::CapReached && cfg.events.iter().any(|e| e == Event::Stalled.as_str())
 }
 
 struct TelegramDest {
@@ -227,7 +237,7 @@ mod tests {
             Event::NeedsAttention
         );
         assert_eq!(Event::parse("verify_retry").unwrap(), Event::VerifyRetry);
-        assert_eq!(Event::ALL.len(), 15);
+        assert_eq!(Event::ALL.len(), 16);
         let err = Event::parse("boom").unwrap_err().to_string();
         assert!(err.contains("unknown telegram.events"), "{err}");
         assert!(err.contains("failed"), "{err}");
@@ -250,8 +260,24 @@ mod tests {
         };
         assert!(allows_event(&cfg, Event::Failed));
         assert!(allows_event(&cfg, Event::Stalled));
+        assert!(
+            allows_event(&cfg, Event::CapReached),
+            "stalled in events still admits cap_reached so existing filters keep working"
+        );
         assert!(!allows_event(&cfg, Event::Start));
         assert!(!allows_event(&cfg, Event::Finished));
         assert!(!allows_event(&cfg, Event::Hook));
+    }
+
+    #[test]
+    fn cap_reached_is_its_own_event() {
+        assert_eq!(Event::parse("cap_reached").unwrap(), Event::CapReached);
+        assert_eq!(Event::CapReached.as_str(), "cap_reached");
+        let cfg = TelegramConfig {
+            events: parse_event_names(&["failed".into(), "cap_reached".into()]).unwrap(),
+            ..TelegramConfig::default()
+        };
+        assert!(allows_event(&cfg, Event::CapReached));
+        assert!(!allows_event(&cfg, Event::Stalled));
     }
 }

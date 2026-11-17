@@ -332,7 +332,11 @@ clears when that window expires and on the next successful run.
 
 Stall, cancel, **and a normal CLI exit** kill leftover descendants.
 
-Wall-clock cap (`run_timeout` per provider); per-task cap from TOML. Orphan
+Wall-clock cap (`run_timeout` per provider, default `90m`); per-task and
+`[labels.<name>]` overrides (task > label > provider). Hitting the cap is
+outcome `run_timeout` / skip reason `wall_clock_cap`, not `stalled` and not
+usage `limit`. Same-session resumes share `stall_resumes`. A pinned provider
+does not overflow on cap exhaustion unless `overflow_on_cap` is set. Orphan
 sweep at startup: runs marked running whose pid is gone → failed.
 
 ## 8. Message queueing

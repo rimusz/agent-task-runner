@@ -1596,6 +1596,7 @@ fn handle_add(shared: &Shared, chat: i64, raw: &str) -> Outgoing {
             after: Vec::new(),
             agent,
             check_only: spec.check_only,
+            ..Default::default()
         },
         model.as_deref(),
     ) {
@@ -1922,7 +1923,7 @@ pub fn assistant_reply(shared: &Shared, key: &str, run_id: i64, outcome: &str) -
         return Vec::new();
     };
     if outcome != "success" {
-        let text = if outcome == "stalled" {
+        let text = if outcome == "stalled" || outcome == "run_timeout" {
             "assistant timed out. Try again or /status.".into()
         } else {
             format!("assistant run {outcome}. Try again or /status.")

@@ -1,6 +1,7 @@
 use crate::duration::parse_duration;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -109,6 +110,14 @@ pub struct RawConfig {
     /// Host CPU/memory gate before starting a new task.
     #[serde(default)]
     pub host: RawHost,
+    /// When a run hits the wall-clock cap and same-session resumes are
+    /// exhausted: `true` always overflow, `false` never overflow. Omit =
+    /// overflow only if the task did not pin a provider.
+    #[serde(default)]
+    pub overflow_on_cap: Option<bool>,
+    /// Per-label overrides (`[labels.proof]`) for the run wall-clock cap.
+    #[serde(default)]
+    pub labels: BTreeMap<String, RawLabelPolicy>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -696,6 +705,17 @@ pub struct RawHealth {
     pub unhealthy_cooldown: String,
 }
 
+/// `[labels.<name>]` overrides for the per-run wall-clock cap.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RawLabelPolicy {
+    #[serde(default)]
+    pub run_timeout: String,
+    #[serde(default)]
+    pub stall_resumes: Option<u32>,
+    #[serde(default)]
+    pub overflow_on_cap: Option<bool>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawQuota {
     pub window: String,
@@ -760,6 +780,10 @@ pub struct Config {
     /// Re-queue in-flight turns cut off only because `atr serve` restarted.
     pub restart: RestartConfig,
     pub host: HostConfig,
+    /// Omit = overflow on cap only when the task did not pin a provider.
+    pub overflow_on_cap: Option<bool>,
+    /// `[labels.<name>]` overrides. Lookup is case-insensitive on the name.
+    pub labels: BTreeMap<String, LabelPolicy>,
     /// Keys in the file this binary does not know (ignored; `atr doctor` warns).
     /// Dotted paths such as `compare.enabled` or `provider.0.foo`.
     pub unknown_keys: Vec<UnknownKey>,
@@ -1076,6 +1100,28 @@ impl Default for ProviderHealth {
     }
 }
 
+/// Why a provider was skipped after the run wall-clock cap (not a usage limit).
+pub const WALL_CLOCK_CAP_REASON: &str = "wall_clock_cap";
+
+/// Run outcome when `run_timeout` fires. Distinct from heartbeat `stalled`.
+pub const RUN_TIMEOUT_OUTCOME: &str = "run_timeout";
+
+/// Unset fields on `[labels.<name>]` (and the matching task columns).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LabelPolicy {
+    pub run_timeout: Option<Duration>,
+    pub stall_resumes: Option<u32>,
+    pub overflow_on_cap: Option<bool>,
+}
+
+/// Resolved run-cap policy for one task on one provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapPolicy {
+    pub run_timeout: Duration,
+    pub stall_resumes: u32,
+    pub overflow_on_cap: bool,
+}
+
 impl Provider {
     #[cfg(test)]
     pub fn test_stub(name: &str) -> Self {
@@ -1348,6 +1394,22 @@ fn parse_host(raw: RawHost) -> Result<HostConfig> {
         max_load: raw.max_load,
         min_memory_mb: raw.min_memory_mb,
         settle: parse_duration(&settle).context("[host] settle")?,
+    })
+}
+
+fn parse_label_policy(raw: &RawLabelPolicy) -> Result<LabelPolicy> {
+    let run_timeout = if raw.run_timeout.trim().is_empty() {
+        None
+    } else {
+        Some(
+            parse_duration(&raw.run_timeout)
+                .with_context(|| format!("[labels] run_timeout {:?}", raw.run_timeout))?,
+        )
+    };
+    Ok(LabelPolicy {
+        run_timeout,
+        stall_resumes: raw.stall_resumes,
+        overflow_on_cap: raw.overflow_on_cap,
     })
 }
 
@@ -2217,6 +2279,7 @@ fn known_field_names() -> Vec<String> {
         introspect::fields::<RawRetry>(),
         introspect::fields::<RawRestart>(),
         introspect::fields::<RawHost>(),
+        introspect::fields::<RawLabelPolicy>(),
         introspect::fields::<RawHandoff>(),
         introspect::fields::<RawShadow>(),
         introspect::fields::<GithubConfig>(),
@@ -3026,6 +3089,18 @@ impl Config {
                 }
                 out
             },
+            overflow_on_cap: raw.overflow_on_cap,
+            labels: {
+                let mut out = BTreeMap::new();
+                for (name, raw_p) in raw.labels {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    out.insert(name.to_string(), parse_label_policy(&raw_p)?);
+                }
+                out
+            },
         })
     }
 
@@ -3035,6 +3110,65 @@ impl Config {
 
     pub fn provider(&self, name: &str) -> Option<&Provider> {
         self.providers.iter().find(|p| p.name == name)
+    }
+
+    /// First matching `[labels.<name>]` fills each unset field (task label
+    /// order). Lookup is case-insensitive.
+    pub fn label_policy(&self, labels: &str) -> LabelPolicy {
+        let mut out = LabelPolicy::default();
+        for name in labels.split(',') {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let Some(p) = self
+                .labels
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v)
+            else {
+                continue;
+            };
+            if out.run_timeout.is_none() {
+                out.run_timeout = p.run_timeout;
+            }
+            if out.stall_resumes.is_none() {
+                out.stall_resumes = p.stall_resumes;
+            }
+            if out.overflow_on_cap.is_none() {
+                out.overflow_on_cap = p.overflow_on_cap;
+            }
+        }
+        out
+    }
+
+    /// Task > label > global / provider default.
+    /// `overflow_on_cap` omit = overflow only when the task did not pin a provider.
+    pub fn cap_policy(&self, task: &crate::db::Task, provider: &Provider) -> CapPolicy {
+        let from_labels = self.label_policy(&task.labels);
+        let run_timeout = {
+            let raw = task.run_timeout.trim();
+            if raw.is_empty() {
+                from_labels.run_timeout
+            } else {
+                parse_duration(raw).ok().or(from_labels.run_timeout)
+            }
+        }
+        .unwrap_or(provider.run_timeout);
+        let stall_resumes = task
+            .stall_resumes
+            .or(from_labels.stall_resumes)
+            .unwrap_or(provider.health.stall_resumes);
+        let overflow_on_cap = task
+            .overflow_on_cap
+            .or(from_labels.overflow_on_cap)
+            .or(self.overflow_on_cap)
+            .unwrap_or_else(|| !crate::task::pinned_provider(task));
+        CapPolicy {
+            run_timeout,
+            stall_resumes,
+            overflow_on_cap,
+        }
     }
 
     /// Configured driver name, or grok when enabled, else the first enabled
@@ -4350,5 +4484,100 @@ kind = "grok"
             label_cfg(LABEL_REPO).repos[0].labels(),
             vec![DEFAULT_GITHUB_LABEL]
         );
+    }
+
+    fn cap_cfg(extra: &str) -> Config {
+        parse_config_toml(&format!(
+            r#"
+repo_path = "/tmp"
+{extra}
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "/bin/true"
+run_timeout = "90m"
+[provider.health]
+stall_resumes = 1
+"#
+        ))
+        .unwrap()
+    }
+
+    fn cap_task(labels: &str, hint: &str) -> crate::db::Task {
+        crate::db::Task {
+            labels: labels.into(),
+            provider_hint: hint.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cap_policy_precedence_is_task_then_label_then_provider() {
+        let cfg = cap_cfg(
+            r#"
+overflow_on_cap = false
+[labels.proof]
+run_timeout = "3h"
+stall_resumes = 4
+overflow_on_cap = true
+[labels.other]
+run_timeout = "10m"
+"#,
+        );
+        let claude = cfg.provider("claude").unwrap();
+        let from_label = cfg.cap_policy(&cap_task("proof", "claude"), claude);
+        assert_eq!(from_label.run_timeout, Duration::from_secs(3 * 3600));
+        assert_eq!(from_label.stall_resumes, 4);
+        assert!(from_label.overflow_on_cap);
+
+        let mut task = cap_task("proof", "claude");
+        task.run_timeout = "2h".into();
+        task.stall_resumes = Some(2);
+        task.overflow_on_cap = Some(false);
+        let from_task = cfg.cap_policy(&task, claude);
+        assert_eq!(from_task.run_timeout, Duration::from_secs(2 * 3600));
+        assert_eq!(from_task.stall_resumes, 2);
+        assert!(!from_task.overflow_on_cap);
+
+        let unlabelled = cfg.cap_policy(&cap_task("", "claude"), claude);
+        assert_eq!(unlabelled.run_timeout, Duration::from_secs(90 * 60));
+        assert_eq!(unlabelled.stall_resumes, 1);
+        assert!(
+            !unlabelled.overflow_on_cap,
+            "global overflow_on_cap = false"
+        );
+    }
+
+    #[test]
+    fn cap_overflow_defaults_off_for_pinned_provider() {
+        let cfg = cap_cfg("");
+        let claude = cfg.provider("claude").unwrap();
+        let pinned = cfg.cap_policy(&cap_task("", "claude"), claude);
+        assert!(
+            !pinned.overflow_on_cap,
+            "explicit provider pin must not overflow on cap"
+        );
+        let free = cfg.cap_policy(&cap_task("", ""), claude);
+        assert!(
+            free.overflow_on_cap,
+            "unpinned tasks keep overflow on cap by default"
+        );
+    }
+
+    #[test]
+    fn label_policy_is_case_insensitive_and_first_match_wins() {
+        let cfg = cap_cfg(
+            r#"
+[labels.Proof]
+run_timeout = "3h"
+stall_resumes = 4
+[labels.later]
+run_timeout = "10m"
+stall_resumes = 9
+"#,
+        );
+        let p = cfg.label_policy("for:atr,PROOF,later");
+        assert_eq!(p.run_timeout, Some(Duration::from_secs(3 * 3600)));
+        assert_eq!(p.stall_resumes, Some(4));
     }
 }

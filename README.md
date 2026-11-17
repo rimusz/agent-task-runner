@@ -3,7 +3,7 @@
 **Your AI subscriptions are idle 16 hours a day. atr turns them into a 24/7 dev team.**
 
 - Hand it a task (a prompt, plus a folder or repo if you like) and it runs it with Claude Code, Grok Build, Cursor, Codex or OpenCode.
-- When one provider hits its limit, it moves on to the next one in your list.
+- When one provider hits its usage limit, it moves on to the next one in your list. A run wall-clock cap is not a usage limit: a pinned provider stays put unless you allow overflow.
 - Retries transient provider errors (overloaded, 429, 5xx) with backoff, waits on `after:` task dependencies, and keeps new work queued when the host CPU or memory is busy.
 - Takes work from the terminal, GitHub issues, other agents (MCP), Telegram, HTTP or a drop folder.
 - Shows what is running on a local dashboard, in the terminal or in Telegram.
@@ -219,3 +219,5 @@ Setup, config and safety details: [docs/USAGE.md](docs/USAGE.md#providers-and-op
 atr is not affiliated with or endorsed by Anthropic, xAI, Anysphere, OpenAI or the OpenCode authors. Claude, Grok, Cursor, Codex, ChatGPT and OpenCode are trademarks of their owners. Use atr with **your own** CLI accounts and follow each provider's terms. Do not resell access or share accounts.
 
 Licensed under MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`). Dependency licenses: `THIRD_PARTY_LICENSES`.
+
+shadow-edit

@@ -58,6 +58,12 @@ pub struct CreateIn {
     pub shadow: bool,
     pub tests_ok: bool,
     pub check_only: bool,
+    /// Comma-separated labels (`proof`). Empty = none.
+    pub labels: String,
+    /// Per-task `run_timeout` override. Empty = inherit.
+    pub run_timeout: String,
+    pub stall_resumes: Option<u32>,
+    pub overflow_on_cap: Option<bool>,
     pub files: Vec<AttachFile>,
     pub idempotency_key: Option<String>,
     /// MCP uses the watch-repo name as the allocated-key prefix when that
@@ -419,6 +425,10 @@ pub fn create(shared: &Shared, spec: CreateIn) -> Result<CreateOut, CreateError>
             after: spec.after.clone(),
             agent: None,
             check_only: spec.check_only,
+            labels: spec.labels.clone(),
+            run_timeout: spec.run_timeout.clone(),
+            stall_resumes: spec.stall_resumes,
+            overflow_on_cap: spec.overflow_on_cap,
         },
         spec.model.as_deref(),
     ) {
@@ -596,6 +606,18 @@ fn request_hash(spec: &CreateIn, title: &str) -> String {
     put(&mut h, b"tests_ok", if spec.tests_ok { b"1" } else { b"0" });
     if spec.check_only {
         put(&mut h, b"check_only", b"1");
+    }
+    if !spec.labels.trim().is_empty() {
+        put(&mut h, b"labels", spec.labels.trim().as_bytes());
+    }
+    if !spec.run_timeout.trim().is_empty() {
+        put(&mut h, b"run_timeout", spec.run_timeout.trim().as_bytes());
+    }
+    if let Some(n) = spec.stall_resumes {
+        put(&mut h, b"stall_resumes", n.to_string().as_bytes());
+    }
+    if let Some(v) = spec.overflow_on_cap {
+        put(&mut h, b"overflow_on_cap", if v { b"1" } else { b"0" });
     }
     for f in &spec.files {
         put(&mut h, b"file.name", f.name.as_bytes());

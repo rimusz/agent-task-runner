@@ -85,6 +85,12 @@ pub struct Task {
     pub hold_notified: bool,
     /// Proof/verification: success with no file changes is `checked`, not no-op.
     pub check_only: bool,
+    /// Per-task `run_timeout` override (`90m`, `3h`). Empty = inherit.
+    pub run_timeout: String,
+    /// Per-task same-session resume budget. `None` = inherit.
+    pub stall_resumes: Option<u32>,
+    /// Per-task overflow-on-cap. `None` = inherit.
+    pub overflow_on_cap: Option<bool>,
 }
 
 impl Default for Task {
@@ -130,6 +136,9 @@ impl Default for Task {
             hold_reason: String::new(),
             hold_notified: false,
             check_only: false,
+            run_timeout: String::new(),
+            stall_resumes: None,
+            overflow_on_cap: None,
         }
     }
 }
@@ -142,7 +151,8 @@ const TASK_SELECT: &str = "key, repo, issue, status, provider, session_id, workt
                           result_text, result_diff, result_pr_url, needs,
                           pin_strict, compare_decision, clock_started,
                           retry_attempt, retry_next_at, retry_reason,
-                          hold_reason, hold_notified, model_override, check_only";
+                          hold_reason, hold_notified, model_override, check_only,
+                          run_timeout, stall_resumes, overflow_on_cap";
 
 const RUN_SELECT: &str = "id, task_key, provider, model, pid, started, ended, outcome,
                           last_event_at, exit_code, session_id, handoff, prefix_hash,
@@ -632,6 +642,12 @@ impl Db {
             "ALTER TABLE tasks ADD COLUMN check_only INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN run_timeout TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN stall_resumes INTEGER", []);
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN overflow_on_cap INTEGER", []);
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS owners (
@@ -920,6 +936,33 @@ impl Db {
         conn.execute(
             "UPDATE tasks SET check_only = ?1, updated = ?2 WHERE key = ?3",
             params![check_only as i64, now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_run_timeout(&self, key: &str, timeout: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET run_timeout = ?1, updated = ?2 WHERE key = ?3",
+            params![timeout, now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_task_stall_resumes(&self, key: &str, n: Option<u32>) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET stall_resumes = ?1, updated = ?2 WHERE key = ?3",
+            params![n.map(i64::from), now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_overflow_on_cap(&self, key: &str, v: Option<bool>) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET overflow_on_cap = ?1, updated = ?2 WHERE key = ?3",
+            params![v.map(|b| if b { 1 } else { 0 }), now_rfc3339(), key],
         )?;
         Ok(())
     }
@@ -3077,6 +3120,11 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         hold_notified: r.get::<_, Option<i64>>(37)?.unwrap_or(0) != 0,
         model_override: r.get::<_, Option<String>>(38)?.unwrap_or_default(),
         check_only: r.get::<_, Option<i64>>(39)?.unwrap_or(0) != 0,
+        run_timeout: r.get::<_, Option<String>>(40)?.unwrap_or_default(),
+        stall_resumes: r
+            .get::<_, Option<i64>>(41)?
+            .and_then(|n| u32::try_from(n).ok()),
+        overflow_on_cap: r.get::<_, Option<i64>>(42)?.map(|n| n != 0),
     })
 }
 
@@ -3774,7 +3822,14 @@ mod tests {
         db.upsert_task("acme-tz", "/repo", None).unwrap();
         let run = db.start_run("acme-tz", "claude", "m").unwrap();
         db.finish_run(run, "success", Some(0)).unwrap();
-        let recorded = "2026-10-14T02:00:00Z";
+        // 02:00 UTC is the previous calendar day in America/New_York. A few
+        // days back stays inside usage_by_day_tz(30) without a calendar date
+        // that ages out of the window (2026-10-14 fell out on 2026-11-17).
+        let recorded_utc = (Utc::now() - ChronoDuration::days(2))
+            .date_naive()
+            .and_time(chrono::NaiveTime::from_hms_opt(2, 0, 0).unwrap())
+            .and_utc();
+        let recorded = recorded_utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         db.insert_usage_at(
             run,
             None,
@@ -3786,45 +3841,47 @@ mod tests {
             Some(1.0),
             Some("est"),
             "{}",
-            recorded,
+            &recorded,
         )
         .unwrap();
         let utc = crate::tz::DisplayTz::parse("UTC").unwrap();
         let ny = crate::tz::DisplayTz::parse("America/New_York").unwrap();
+        let utc_day = utc.day(recorded_utc);
+        let ny_day = ny.day(recorded_utc);
+        assert_ne!(
+            utc_day, ny_day,
+            "02:00 UTC must land on the previous NY calendar day"
+        );
         let utc_days = db.usage_by_day_tz(30, &utc).unwrap();
         let ny_days = db.usage_by_day_tz(30, &ny).unwrap();
         assert!(
             utc_days
                 .iter()
-                .any(|d| d.day == "2026-10-14" && d.provider == "claude"),
+                .any(|d| d.day == utc_day && d.provider == "claude"),
             "{utc_days:?}"
         );
         assert!(
             ny_days
                 .iter()
-                .any(|d| d.day == "2026-10-13" && d.provider == "claude"),
+                .any(|d| d.day == ny_day && d.provider == "claude"),
             "{ny_days:?}"
         );
-        let range = db
-            .usage_by_day_range("2026-10-14", "2026-10-14", &utc)
-            .unwrap();
+        let range = db.usage_by_day_range(&utc_day, &utc_day, &utc).unwrap();
         assert!(
             range
                 .iter()
-                .any(|d| d.day == "2026-10-14" && d.provider == "claude" && d.input == 10),
+                .any(|d| d.day == utc_day && d.provider == "claude" && d.input == 10),
             "{range:?}"
         );
         let empty = db
-            .usage_by_day_range("2026-10-01", "2026-10-01", &utc)
+            .usage_by_day_range("2000-01-01", "2000-01-01", &utc)
             .unwrap();
         assert!(empty.is_empty(), "{empty:?}");
-        let ny_range = db
-            .usage_by_day_range("2026-10-13", "2026-10-13", &ny)
-            .unwrap();
+        let ny_range = db.usage_by_day_range(&ny_day, &ny_day, &ny).unwrap();
         assert!(
             ny_range
                 .iter()
-                .any(|d| d.day == "2026-10-13" && d.provider == "claude"),
+                .any(|d| d.day == ny_day && d.provider == "claude"),
             "{ny_range:?}"
         );
     }
@@ -4740,6 +4797,9 @@ mod tests {
             "owner_started",
             "clock_started",
             "check_only",
+            "run_timeout",
+            "stall_resumes",
+            "overflow_on_cap",
         ] {
             assert!(task_cols.iter().any(|c| c == col), "missing tasks.{col}");
         }

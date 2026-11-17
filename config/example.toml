@@ -218,6 +218,16 @@ backoff = ["1m", "2m", "4m", "8m"]
 [restart]
 resume = true
 
+# Per-run wall-clock cap (`[[provider]] run_timeout`, default 90m). Hitting
+# it is `cap reached …`, not a stall / CLI hang, and not a usage limit.
+# Task flags and `[labels.<name>]` override the provider default
+# (task > label > provider). A pinned provider does not overflow on cap
+# exhaustion unless overflow_on_cap is true.
+# overflow_on_cap = false
+# [labels.proof]
+# run_timeout = "3h"
+# stall_resumes = 4
+
 # Host CPU/memory gate before starting a new task. While over the limit,
 # work stays queued. Starts are one at a time with `settle` between them.
 # `max_load` is 1-minute load / cores (`0` ignores CPU). `min_memory_mb = 0`

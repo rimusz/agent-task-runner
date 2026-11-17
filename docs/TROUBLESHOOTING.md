@@ -131,6 +131,23 @@ stall retry also reuses the worktree (including detached HEAD). Raise
 `[[provider]] heartbeat_timeout` / `[provider.health] heartbeat_timeout` if
 the work is legitimately silent for longer than that window.
 
+**Telegram said `stalled … (CLI hang / heartbeat)` but the CLI was still
+working, then overflowed to another provider.** That was a run wall-clock
+cap (`[[provider]] run_timeout`, default `90m`) mislabeled as a stall. Cap
+hits now send `cap reached <task> provider=<p> after <dur>, …` and never
+cool the provider as a usage `limit`. A task that pinned a provider stays
+on it (`needs_attention` when same-session resumes are exhausted) unless
+`overflow_on_cap` is true. Raise the cap for long proofs:
+
+```toml
+[labels.proof]
+run_timeout = "3h"
+stall_resumes = 4
+```
+
+Or `atr add --labels proof --run-timeout 3h --stall-resumes 4`. Real
+heartbeat hangs still use the stall message.
+
 **Task failed with `task timeout`.** The task passed `task_timeout` (default
 `4h`, counted from the first run of the current attempt). `atr tasks <key>`
 shows a last run with outcome `task_timeout`. `atr retry <key>` (or a new

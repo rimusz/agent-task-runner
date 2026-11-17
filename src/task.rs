@@ -701,6 +701,15 @@ pub fn validate_overrides<S: AsRef<str>>(
     Ok(())
 }
 
+/// The operator named a provider: `--provider`, `provider:` label, a model
+/// pin, or a compare-arm strict pin. Distinct from `tasks.provider`, which is
+/// whoever last ran.
+pub fn pinned_provider(task: &crate::db::Task) -> bool {
+    task.pin_strict
+        || !task.provider_hint.trim().is_empty()
+        || !task.model_override.trim().is_empty()
+}
+
 /// Overrides from GitHub labels for a new task. Never fails a poll: an invalid
 /// provider (or one lacking `needs`) drops both labels so the normal capable
 /// provider runs the task; an invalid model drops the model only.
@@ -912,5 +921,22 @@ cli = "/bin/true"
             ),
             (None, None)
         );
+    }
+
+    #[test]
+    fn pinned_provider_is_hint_model_or_strict_not_last_runner() {
+        let mut t = crate::db::Task {
+            provider: Some("claude".into()),
+            ..Default::default()
+        };
+        assert!(!pinned_provider(&t), "last-used provider is not a pin");
+        t.provider_hint = "claude".into();
+        assert!(pinned_provider(&t));
+        t.provider_hint.clear();
+        t.model_override = "claude-opus-4".into();
+        assert!(pinned_provider(&t));
+        t.model_override.clear();
+        t.pin_strict = true;
+        assert!(pinned_provider(&t));
     }
 }
