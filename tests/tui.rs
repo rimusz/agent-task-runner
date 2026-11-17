@@ -779,9 +779,10 @@ async fn atr_tui_provider_prefers_named_provider() {
         ("codex", false, "success"),
     ])
     .await;
-    tui::run(shared.clone(), opts("hello", Some("grok"), Some("work")))
+    let code = tui::run(shared.clone(), opts("hello", Some("grok"), Some("work")))
         .await
         .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
     let task = shared.db.get_task("cli-work").unwrap().unwrap();
     assert_eq!(task.key, "cli-work");
     assert_eq!(task.provider.as_deref(), Some("grok"));
@@ -797,18 +798,20 @@ async fn session_provider_switch_uses_existing_handoff() {
         ("codex", false, "success"),
     ])
     .await;
-    tui::run(shared.clone(), opts("first", Some("claude"), None))
+    let code = tui::run(shared.clone(), opts("first", Some("claude"), None))
         .await
         .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
     let sid = shared.db.task_session("cli-default", "grok").ok().flatten();
     shared
         .db
         .set_provider_session("cli-default", Some("grok"), sid.as_deref())
         .unwrap();
     shared.db.set_provider_hint("cli-default", "grok").unwrap();
-    tui::run(shared.clone(), opts("second", None, None))
+    let code = tui::run(shared.clone(), opts("second", None, None))
         .await
         .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
     let runs = shared.db.list_runs(Some("cli-default")).unwrap();
     assert_eq!(runs.len(), 2, "{runs:?}");
     assert_eq!(runs[0].provider, "claude");
@@ -833,9 +836,10 @@ async fn tui_providers_list_beats_global_order() {
         let mut cfg = shared.config.write().unwrap();
         cfg.tui.providers = vec!["grok".into(), "claude".into()];
     }
-    tui::run(shared.clone(), opts("list please", None, None))
+    let code = tui::run(shared.clone(), opts("list please", None, None))
         .await
         .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
     let task = shared.db.get_task("cli-default").unwrap().unwrap();
     assert_eq!(task.provider.as_deref(), Some("grok"));
 }
@@ -1235,9 +1239,10 @@ async fn workspace_chrome_is_honest() {
         assert!(git.contains("main"), "{git}");
     }
 
-    tui::run_oneshot(shared.clone(), opts("hello", None, None))
+    let code = tui::run_oneshot(shared.clone(), opts("hello", None, None))
         .await
         .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
     let footer = tui::footer_line(&shared, "cli-default");
     assert!(footer.contains("answer-only"), "{footer}");
     assert!(
@@ -1342,7 +1347,7 @@ async fn repo_slash_resolves_and_clears_bound_session() {
         tui::preview_line(&shared, "cli-default", &format!("/repo {}", repo.display())).unwrap();
     assert!(by_path.contains("git "), "{by_path}");
 
-    tui::run_oneshot(
+    let code = tui::run_oneshot(
         shared.clone(),
         tui::TuiOpts {
             prompt: Some("bound turn".into()),
@@ -1352,6 +1357,7 @@ async fn repo_slash_resolves_and_clears_bound_session() {
     )
     .await
     .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
     let task = shared.db.get_task("cli-default").unwrap().unwrap();
     assert_eq!(task.workspace_kind, "git", "{task:?}");
     assert!(
@@ -1371,7 +1377,7 @@ async fn repo_slash_resolves_and_clears_bound_session() {
         "switching away from a bound session must clear like /new"
     );
 
-    tui::run_oneshot(
+    let code = tui::run_oneshot(
         shared.clone(),
         tui::TuiOpts {
             prompt: Some("bind again".into()),
@@ -1381,6 +1387,7 @@ async fn repo_slash_resolves_and_clears_bound_session() {
     )
     .await
     .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
     shared.db.set_status("cli-default", "running").unwrap();
     let err = tui::preview_line(&shared, "cli-default", "/repo none").unwrap_err();
     let msg = format!("{err:#}");
@@ -1475,9 +1482,10 @@ async fn repo_pick_binds_next_turn_spawn_cwd() {
         ("codex", false, "success"),
     ])
     .await;
-    tui::run_oneshot(shared.clone(), opts("hello none", None, None))
+    let code = tui::run_oneshot(shared.clone(), opts("hello none", None, None))
         .await
         .unwrap();
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
     let before = shared.db.get_task("cli-default").unwrap().unwrap();
     let none_wt = before.worktree.as_deref().unwrap_or("").to_string();
     assert!(
