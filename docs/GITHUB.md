@@ -265,6 +265,7 @@ Next to the intake label, atr reads these when it creates the task:
 | `needs:browser`, `needs:desktop` | Required capabilities ([NEEDS.md](NEEDS.md)) |
 | `provider:<name>` | Preferred `[[provider]]`, like `atr add --provider` |
 | `model:<id>` | Model for that provider. Needs a `provider:` label. Pins the task strictly to that provider (no fallback) |
+| any `[labels.<name>]` (e.g. `proof`) | Per-label `run_timeout` / `stall_resumes` / `overflow_on_cap` ([CONFIG.md](CONFIG.md#run-wall-clock-cap)) |
 
 An invalid `provider:` or `model:` label never fails the poll: atr drops it and
 logs a warning, and `needs:*` labels still apply. Rules: [USAGE.md](USAGE.md#per-task-provider-and-model).

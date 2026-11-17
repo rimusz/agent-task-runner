@@ -273,10 +273,16 @@ quota with a reset already handled by `quota.rs`, and task-logic failures
 Stall hangs still use `[[provider]].health.stall_resumes`. A stall retry
 reuses the same worktree without checkout/reset. Heartbeat silence is not a
 stall while the CLI process tree is still burning CPU/IO or the worktree is
-being written (a detached test driver counts). `atr retry` clears
-the persisted schedule. A Telegram assistant task (`tg<chat>`) that stalls
-or hits its run cap fails only that run (the chat is told it timed out)
-and does **not** mark the provider degraded or retry/failover other work.
+being written (a detached test driver counts). The per-run wall-clock cap
+(`[[provider]] run_timeout`, default `90m`) is a different event: outcome
+`run_timeout`, Telegram `cap reached …`, skip reason `wall_clock_cap`. It
+does not mark the provider degraded or cooling, and a pinned provider does
+not overflow unless `overflow_on_cap` allows it. Per-task and
+`[labels.<name>]` overrides apply (task > label > default). `atr retry`
+clears the persisted schedule. A Telegram assistant task (`tg<chat>`) that
+stalls or hits its run cap fails only that run (the chat is told it timed
+out) and does **not** mark the provider degraded or retry/failover other
+work.
 
 ## Telegram
 
@@ -345,7 +351,11 @@ the last finished run's messages when none are pending — the scheduler only
 starts a task that has an unconsumed prompt. Internal requeues
 within an attempt (verify retries, review rounds, stall resumes, failover)
 keep counting.
-When a queued task is past it, atr marks the task `failed`, sends
+This is the **task** clock (`task_timeout`, default `4h`), not the per-run
+CLI cap (`run_timeout`, default `90m`). A long Maestro proof that is still
+making progress can hit `run_timeout` while well under `task_timeout` and
+well under the provider's usage limit — that is `cap_reached`, not a stall.
+When a queued task is past `task_timeout`, atr marks the task `failed`, sends
 `failed <key> (task timeout)`, and records a finished run with outcome
 `task_timeout` plus a `task_timeout` event (limit, run count, provider), and
 captures the result text and diff. `atr tasks <key>` shows it even after the
@@ -367,6 +377,8 @@ Each arm has a **strict provider pin** (`tasks.pin_strict`):
 | Pinned provider disabled, unknown, CLI missing, or lacking a needed capability | tries the next provider | `failed` before any run (a marker run with outcome `arm_unavailable`) |
 | Limit, auth, unavailable, server error, spawn error, `needs_attention`, stall past `stall_resumes` | fails over through `handle_failover` | `failed`, with an `arm_unavailable` event on the run |
 | Stall within `stall_resumes` | retries the same session | same (on its own provider) |
+| Run wall-clock cap within `stall_resumes` | retries the same session (`cap_reached`) | same (on its own provider) |
+| Run wall-clock cap past `stall_resumes` | `needs_attention` if the task pinned a provider (unless `overflow_on_cap`); else failover with reason `wall_clock_cap`, not `limit` | `failed` (strict pin) |
 
 So both arms can never collapse onto one provider. Arms skip the review
 loop.

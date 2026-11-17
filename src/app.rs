@@ -131,6 +131,14 @@ pub struct SubmitOpts {
     pub agent: Option<String>,
     /// Proof/verification: no file changes is success (`checked`), not no-op.
     pub check_only: bool,
+    /// Comma-separated labels (`proof`). Merged into `tasks.labels`.
+    pub labels: String,
+    /// Per-task `run_timeout` override (`3h`). Empty = inherit.
+    pub run_timeout: String,
+    /// Per-task same-session resume budget. `None` = inherit.
+    pub stall_resumes: Option<u32>,
+    /// Per-task overflow-on-cap. `None` = inherit.
+    pub overflow_on_cap: Option<bool>,
 }
 
 impl Shared {
@@ -288,6 +296,19 @@ impl Shared {
         }
         if opts.check_only {
             self.db.set_check_only(key, true)?;
+        }
+        if !opts.labels.trim().is_empty() {
+            self.db.set_task_labels(key, opts.labels.trim())?;
+        }
+        if !opts.run_timeout.trim().is_empty() {
+            crate::duration::parse_duration(opts.run_timeout.trim())?;
+            self.db.set_run_timeout(key, opts.run_timeout.trim())?;
+        }
+        if opts.stall_resumes.is_some() {
+            self.db.set_task_stall_resumes(key, opts.stall_resumes)?;
+        }
+        if opts.overflow_on_cap.is_some() {
+            self.db.set_overflow_on_cap(key, opts.overflow_on_cap)?;
         }
         if let Some(h) = opts
             .provider_hint

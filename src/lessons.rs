@@ -359,10 +359,12 @@ pub fn signal_after_run(
             "tests_modified" => "tests_modified",
             "success" => "review_request_changes",
             "stalled" => "stalled",
+            "run_timeout" => "run_timeout",
             _ => "needs_attention",
         }),
         "failed" => match final_outcome {
             "stalled" => Some("stalled"),
+            "run_timeout" => Some("run_timeout"),
             "needs_attention" => Some("needs_attention"),
             _ => None,
         },
@@ -1009,10 +1011,18 @@ mod tests {
             Some("stalled")
         );
         assert_eq!(
+            signal_after_run("needs_attention", "run_timeout", 0, 0),
+            Some("run_timeout")
+        );
+        assert_eq!(
             signal_after_run("needs_attention", "limit", 0, 0),
             Some("needs_attention")
         );
         assert_eq!(signal_after_run("failed", "stalled", 0, 0), Some("stalled"));
+        assert_eq!(
+            signal_after_run("failed", "run_timeout", 0, 0),
+            Some("run_timeout")
+        );
         for o in ["limit", "auth", "cancelled", "failed"] {
             assert_eq!(signal_after_run("failed", o, 0, 0), None, "{o}");
         }

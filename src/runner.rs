@@ -504,7 +504,7 @@ pub async fn run_cli(
             let _ = child.wait().await;
             reap_leftovers(&seen_descendants, cfg.kill_grace);
             return Ok(finish(
-                "stalled",
+                crate::config::RUN_TIMEOUT_OUTCOME,
                 None,
                 session_id_found,
                 usage,

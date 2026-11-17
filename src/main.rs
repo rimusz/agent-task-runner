@@ -23,6 +23,7 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Write config, prompt, launcher. TTY asks about the user service.
     Init {
@@ -73,6 +74,18 @@ enum Cmd {
         /// Verification/proof: success with no file changes is done (`checked`), not no-op.
         #[arg(long)]
         check_only: bool,
+        /// Labels for `[labels.<name>]` overrides (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        labels: Vec<String>,
+        /// Per-task run wall-clock cap (`90m`, `3h`). Empty = inherit.
+        #[arg(long, value_name = "DUR")]
+        run_timeout: Option<String>,
+        /// Per-task same-session resume budget after a cap or stall.
+        #[arg(long, value_name = "N")]
+        stall_resumes: Option<u32>,
+        /// Overflow to another provider when the run cap is exhausted.
+        #[arg(long, value_name = "BOOL")]
+        overflow_on_cap: Option<bool>,
     },
     /// Enqueue a generic task (prompt + optional workspace). No issue number.
     Add {
@@ -118,6 +131,18 @@ enum Cmd {
         /// Verification/proof: success with no file changes is done (`checked`), not no-op.
         #[arg(long)]
         check_only: bool,
+        /// Labels for `[labels.<name>]` overrides (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        labels: Vec<String>,
+        /// Per-task run wall-clock cap (`90m`, `3h`). Empty = inherit.
+        #[arg(long, value_name = "DUR")]
+        run_timeout: Option<String>,
+        /// Per-task same-session resume budget after a cap or stall.
+        #[arg(long, value_name = "N")]
+        stall_resumes: Option<u32>,
+        /// Overflow to another provider when the run cap is exhausted.
+        #[arg(long, value_name = "BOOL")]
+        overflow_on_cap: Option<bool>,
     },
     /// One-shot in-process turn for CI and scripts (`atr serve` is not required).
     /// Never opens the interactive TUI.
@@ -744,6 +769,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             tests_ok,
             interrupt,
             check_only,
+            labels,
+            run_timeout,
+            stall_resumes,
+            overflow_on_cap,
         } => {
             let text = read_body(body, body_file)?;
             let cfg = load_config(&path)?;
@@ -760,6 +789,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 tests_ok,
                 interrupt,
                 check_only,
+                &labels,
+                run_timeout.as_deref(),
+                stall_resumes,
+                overflow_on_cap,
             ) {
                 return Ok(match status {
                     200 => ExitCode::SUCCESS,
@@ -778,6 +811,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 tests_ok,
                 atr::SubmitOpts {
                     check_only,
+                    labels: labels.join(","),
+                    run_timeout: run_timeout.clone().unwrap_or_default(),
+                    stall_resumes,
+                    overflow_on_cap,
                     ..atr::SubmitOpts::default()
                 },
             )? {
@@ -808,6 +845,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             after,
             compare,
             check_only,
+            labels,
+            run_timeout,
+            stall_resumes,
+            overflow_on_cap,
         } => {
             let needs = atr::task::parse_needs(&needs)?;
             let text = if let Some(p) = prompt.filter(|s| !s.trim().is_empty()) {
@@ -823,6 +864,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             atr::task::check_prompt_bytes(&text, cfg.max_prompt_bytes)?;
             // Before http_create: any error from it falls back to a local submit.
             atr::task::validate_overrides(&cfg, provider.as_deref(), model.as_deref(), &needs)?;
+            if let Some(d) = run_timeout.as_deref() {
+                atr::duration::parse_duration(d)?;
+            }
             let title = title
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| atr::task::title_from_prompt(&text));
@@ -905,6 +949,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 &needs,
                 &after,
                 check_only,
+                &labels,
+                run_timeout.as_deref(),
+                stall_resumes,
+                overflow_on_cap,
             ) {
                 println!("{key}");
                 return Ok(match status {
@@ -934,6 +982,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     after: after.clone(),
                     agent: None,
                     check_only,
+                    labels: labels.join(","),
+                    run_timeout: run_timeout.clone().unwrap_or_default(),
+                    stall_resumes,
+                    overflow_on_cap,
                 },
                 model.as_deref(),
             )?;
@@ -1492,6 +1544,10 @@ fn http_submit(
     tests_ok: bool,
     interrupt: bool,
     check_only: bool,
+    labels: &[String],
+    run_timeout: Option<&str>,
+    stall_resumes: Option<u32>,
+    overflow_on_cap: Option<bool>,
 ) -> Result<u16> {
     let url = format!("http://{listen}/tasks/{key}/messages");
     let mut req = ureq::post(&url).set("User-Agent", "atr");
@@ -1507,6 +1563,10 @@ fn http_submit(
         "tests_ok": tests_ok,
         "interrupt": interrupt,
         "check_only": check_only,
+        "labels": labels.join(","),
+        "run_timeout": run_timeout,
+        "stall_resumes": stall_resumes,
+        "overflow_on_cap": overflow_on_cap,
     }))?;
     Ok(resp.status())
 }
@@ -1528,6 +1588,10 @@ fn http_create(
     needs: &[String],
     after: &[String],
     check_only: bool,
+    labels: &[String],
+    run_timeout: Option<&str>,
+    stall_resumes: Option<u32>,
+    overflow_on_cap: Option<bool>,
 ) -> Result<u16> {
     let url = format!("http://{listen}/tasks");
     let mut payload = serde_json::json!({
@@ -1559,6 +1623,18 @@ fn http_create(
     }
     if check_only {
         payload["check_only"] = serde_json::Value::Bool(true);
+    }
+    if !labels.is_empty() {
+        payload["labels"] = serde_json::json!(labels.join(","));
+    }
+    if let Some(d) = run_timeout.map(str::trim).filter(|s| !s.is_empty()) {
+        payload["run_timeout"] = serde_json::Value::String(d.into());
+    }
+    if let Some(n) = stall_resumes {
+        payload["stall_resumes"] = serde_json::json!(n);
+    }
+    if let Some(v) = overflow_on_cap {
+        payload["overflow_on_cap"] = serde_json::Value::Bool(v);
     }
     if let Some(spec) = output_spec {
         if output == "webhook" {
@@ -1683,6 +1759,10 @@ async fn run_triage_cmd(path: PathBuf, cmd: TriageCmd) -> anyhow::Result<ExitCod
                 &[],
                 &[],
                 false,
+                &[],
+                None,
+                None,
+                None,
             ) {
                 println!("{key}");
                 return Ok(match status {
@@ -1713,6 +1793,7 @@ async fn run_triage_cmd(path: PathBuf, cmd: TriageCmd) -> anyhow::Result<ExitCod
                     after: Vec::new(),
                     agent: None,
                     check_only: false,
+                    ..Default::default()
                 },
             )?;
             println!("{key}");

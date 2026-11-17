@@ -884,6 +884,37 @@ enum StallFollowup {
     Failover,
 }
 
+pub(crate) fn stall_hang_text(key: &str, provider: &str) -> String {
+    format!("stalled {key} provider={provider} (CLI hang / heartbeat)")
+}
+
+pub(crate) fn cap_resume_text(
+    key: &str,
+    provider: &str,
+    after: Duration,
+    n: u32,
+    max: u32,
+) -> String {
+    format!(
+        "cap reached {key} provider={provider} after {}, resuming same session ({n}/{max})",
+        crate::duration::format_duration(after)
+    )
+}
+
+pub(crate) fn cap_exhausted_text(key: &str, n: u32, max: u32, next: &str) -> String {
+    format!("cap reached {key}, same-session retries exhausted ({n}/{max}), {next}")
+}
+
+pub(crate) fn cap_exhausted_next_action(overflow: bool, pinned: bool, provider: &str) -> String {
+    if overflow {
+        "overflowing to next provider".into()
+    } else if pinned {
+        format!("not overflowing pinned provider={provider}; marking needs_attention")
+    } else {
+        "not overflowing; marking needs_attention".into()
+    }
+}
+
 /// Assistant stalls fail only that chat's run. They must not mark the
 /// provider degraded or retry/failover (that would stall every other task).
 fn record_stall(
@@ -908,10 +939,7 @@ fn record_stall(
     notify_run(
         &cfg.telegram,
         notify::Event::Stalled,
-        &format!(
-            "stalled {key} provider={} (CLI hang / heartbeat)",
-            provider.name
-        ),
+        &stall_hang_text(key, &provider.name),
         shadow,
     );
     let retries = shared
@@ -942,6 +970,87 @@ fn record_stall(
     }
 }
 
+/// Run wall-clock cap (`run_timeout`): resume the same session, never a stall
+/// alert, never a usage `limit` cooldown. Overflow is optional.
+fn record_cap_hit(
+    shared: &Shared,
+    cfg: &Config,
+    key: &str,
+    provider: &Provider,
+    run_id: i64,
+    assistant: bool,
+    shadow: bool,
+) -> Result<StallFollowup> {
+    if assistant {
+        shared.db.set_status(key, "failed")?;
+        tracing::warn!(
+            task = %key,
+            provider = %provider.name,
+            "assistant task hit run wall-clock cap; not degrading provider"
+        );
+        return Ok(StallFollowup::Done);
+    }
+    shared.db.unconsume_run(run_id)?;
+    let task = shared.db.get_task(key)?.unwrap_or_default();
+    let policy = cfg.cap_policy(&task, provider);
+    let retries = task.stall_retries;
+    let max = policy.stall_resumes;
+    if retries < i64::from(max) {
+        let n = u32::try_from(retries + 1).unwrap_or(u32::MAX);
+        shared.db.set_stall_retries(key, retries + 1)?;
+        shared.db.set_status(key, "queued")?;
+        notify_run(
+            &cfg.telegram,
+            notify::Event::CapReached,
+            &cap_resume_text(key, &provider.name, policy.run_timeout, n, max),
+            shadow,
+        );
+        tracing::info!(
+            task = %key,
+            provider = %provider.name,
+            retries = n,
+            max,
+            reason = crate::config::WALL_CLOCK_CAP_REASON,
+            "retrying same session after run wall-clock cap"
+        );
+        return Ok(StallFollowup::Done);
+    }
+    let pinned = crate::task::pinned_provider(&task);
+    let overflow = policy.overflow_on_cap && !strictly_pinned(&task);
+    let n = u32::try_from(retries).unwrap_or(u32::MAX);
+    let next = if strictly_pinned(&task) {
+        format!("strict pin on {}; marking failed", provider.name)
+    } else {
+        cap_exhausted_next_action(overflow, pinned, &provider.name)
+    };
+    notify_run(
+        &cfg.telegram,
+        notify::Event::CapReached,
+        &cap_exhausted_text(key, n, max, &next),
+        shadow,
+    );
+    tracing::info!(
+        task = %key,
+        provider = %provider.name,
+        retries = n,
+        max,
+        reason = crate::config::WALL_CLOCK_CAP_REASON,
+        overflow,
+        "run wall-clock cap retries exhausted"
+    );
+    if overflow || strictly_pinned(&task) {
+        Ok(StallFollowup::Failover)
+    } else {
+        let msg = format!(
+            "run wall-clock cap exceeded after {} (retries {n}/{max}); {next}",
+            crate::duration::format_duration(policy.run_timeout)
+        );
+        let _ = shared.db.set_task_result(key, &msg, "", None);
+        shared.db.set_status(key, "needs_attention")?;
+        Ok(StallFollowup::Done)
+    }
+}
+
 async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -> Result<()> {
     let cfg = shared.config.read().unwrap().clone();
     let assistant = crate::telegram::is_assistant_key(&key);
@@ -968,6 +1077,10 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     apply_task_model(&mut provider, &task);
     if let Ok(agent) = shared.db.task_agent(&key) {
         apply_task_agent(&mut provider, &agent);
+    }
+    if !assistant {
+        let policy = cfg.cap_policy(&task, &provider);
+        provider.run_timeout = policy.run_timeout;
     }
 
     crate::reported::refresh_grok_billing(&shared.db, &provider, &Clock::system())
@@ -1869,6 +1982,26 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                 task.shadow,
             )? == StallFollowup::Failover
             {
+                handle_failover(&shared, &cfg, &key, &provider, &result, run_id, &wt).await?;
+            }
+        }
+        "run_timeout" => {
+            if record_cap_hit(
+                &shared,
+                &cfg,
+                &key,
+                &provider,
+                run_id,
+                assistant,
+                task.shadow,
+            )? == StallFollowup::Failover
+            {
+                tracing::info!(
+                    provider = %provider.name,
+                    reason = crate::config::WALL_CLOCK_CAP_REASON,
+                    task = %key,
+                    "skipping provider"
+                );
                 handle_failover(&shared, &cfg, &key, &provider, &result, run_id, &wt).await?;
             }
         }
@@ -4549,5 +4682,241 @@ cli = "{cli}"
         assert!(degraded, "normal stall still degrades the provider");
         let t = shared.db.get_task("work-1").unwrap().unwrap();
         assert_eq!(t.status, "queued");
+    }
+
+    #[test]
+    fn cap_messages_are_not_stall_or_hang() {
+        let resume = cap_resume_text(
+            "mini-9674b0fc-proof",
+            "claude",
+            Duration::from_secs(90 * 60),
+            1,
+            1,
+        );
+        assert_eq!(
+            resume,
+            "cap reached mini-9674b0fc-proof provider=claude after 90m, resuming same session (1/1)"
+        );
+        assert!(!resume.contains("stalled"));
+        assert!(!resume.contains("hang"));
+        assert!(!resume.contains("heartbeat"));
+        let hang = stall_hang_text("mini-9674b0fc-proof", "claude");
+        assert_eq!(
+            hang,
+            "stalled mini-9674b0fc-proof provider=claude (CLI hang / heartbeat)"
+        );
+        let next = cap_exhausted_next_action(false, true, "claude");
+        let exhausted = cap_exhausted_text("mini-9674b0fc-proof", 1, 1, &next);
+        assert_eq!(
+            exhausted,
+            "cap reached mini-9674b0fc-proof, same-session retries exhausted (1/1), not overflowing pinned provider=claude; marking needs_attention"
+        );
+        assert!(!exhausted.contains("stalled"));
+        assert!(!exhausted.contains("hang"));
+        assert_eq!(
+            cap_exhausted_next_action(true, false, "claude"),
+            "overflowing to next provider"
+        );
+    }
+
+    #[test]
+    fn cap_exhaust_is_not_a_usage_limit_and_does_not_overflow_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = if std::path::Path::new("/bin/true").exists() {
+            "/bin/true"
+        } else {
+            "/usr/bin/true"
+        };
+        let text = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "{cli}"
+[[provider]]
+name = "grok"
+kind = "grok"
+cli = "{cli}"
+"#,
+            db = dir.path().join("s.db").display(),
+            root = dir.path().display(),
+            cli = cli,
+        );
+        let raw: crate::config::RawConfig = toml::from_str(&text).unwrap();
+        let cfg = crate::config::Config::from_raw(raw).unwrap();
+        let shared =
+            crate::app::Shared::from_config(dir.path().join("c.toml"), cfg.clone()).unwrap();
+        shared
+            .db
+            .upsert_task("mini-9674b0fc-proof", "/repo", None)
+            .unwrap();
+        shared
+            .db
+            .set_provider_hint("mini-9674b0fc-proof", "claude")
+            .unwrap();
+        shared
+            .db
+            .set_status("mini-9674b0fc-proof", "running")
+            .unwrap();
+        let run = shared
+            .db
+            .start_run("mini-9674b0fc-proof", "claude", "")
+            .unwrap();
+        shared
+            .db
+            .enqueue_message("mini-9674b0fc-proof", "prove it", "cli")
+            .unwrap();
+        let ids: Vec<i64> = shared
+            .db
+            .pending_messages("mini-9674b0fc-proof")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        shared.db.mark_consumed(&ids, run).unwrap();
+        let provider = cfg
+            .providers
+            .iter()
+            .find(|p| p.name == "claude")
+            .unwrap()
+            .clone();
+
+        assert_eq!(
+            record_cap_hit(
+                &shared,
+                &cfg,
+                "mini-9674b0fc-proof",
+                &provider,
+                run,
+                false,
+                false
+            )
+            .unwrap(),
+            StallFollowup::Done
+        );
+        let t = shared.db.get_task("mini-9674b0fc-proof").unwrap().unwrap();
+        assert_eq!(t.status, "queued");
+        assert_eq!(t.stall_retries, 1);
+        let (cooling, degraded) = shared.db.provider_blocked("claude").unwrap();
+        assert!(!cooling && !degraded, "cap resume must not cool or degrade");
+
+        let run2 = shared
+            .db
+            .start_run("mini-9674b0fc-proof", "claude", "")
+            .unwrap();
+        assert_eq!(
+            record_cap_hit(
+                &shared,
+                &cfg,
+                "mini-9674b0fc-proof",
+                &provider,
+                run2,
+                false,
+                false
+            )
+            .unwrap(),
+            StallFollowup::Done
+        );
+        let t = shared.db.get_task("mini-9674b0fc-proof").unwrap().unwrap();
+        assert_eq!(t.status, "needs_attention");
+        let (cooling, degraded) = shared.db.provider_blocked("claude").unwrap();
+        assert!(
+            !cooling && !degraded,
+            "cap exhaust must not look like a usage limit"
+        );
+        assert_ne!(
+            unavailable(
+                &cfg,
+                &provider,
+                &shared.db,
+                &HashMap::new(),
+                false,
+                &Clock::system()
+            )
+            .unwrap(),
+            Some("limit")
+        );
+        assert_eq!(
+            crate::config::WALL_CLOCK_CAP_REASON,
+            "wall_clock_cap",
+            "cap skip reason is distinct from limit"
+        );
+    }
+
+    #[test]
+    fn cap_exhaust_overflows_unpinned_without_limit_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = if std::path::Path::new("/bin/true").exists() {
+            "/bin/true"
+        } else {
+            "/usr/bin/true"
+        };
+        let text = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "{cli}"
+[[provider]]
+name = "grok"
+kind = "grok"
+cli = "{cli}"
+"#,
+            db = dir.path().join("s.db").display(),
+            root = dir.path().display(),
+            cli = cli,
+        );
+        let raw: crate::config::RawConfig = toml::from_str(&text).unwrap();
+        let cfg = crate::config::Config::from_raw(raw).unwrap();
+        let shared =
+            crate::app::Shared::from_config(dir.path().join("c.toml"), cfg.clone()).unwrap();
+        shared.db.upsert_task("free-1", "/repo", None).unwrap();
+        shared.db.set_stall_retries("free-1", 1).unwrap();
+        shared.db.set_status("free-1", "running").unwrap();
+        let run = shared.db.start_run("free-1", "claude", "").unwrap();
+        shared.db.enqueue_message("free-1", "go", "cli").unwrap();
+        let ids: Vec<i64> = shared
+            .db
+            .pending_messages("free-1")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        shared.db.mark_consumed(&ids, run).unwrap();
+        let provider = cfg
+            .providers
+            .iter()
+            .find(|p| p.name == "claude")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            record_cap_hit(&shared, &cfg, "free-1", &provider, run, false, false).unwrap(),
+            StallFollowup::Failover
+        );
+        let (cooling, degraded) = shared.db.provider_blocked("claude").unwrap();
+        assert!(!cooling && !degraded);
+        assert_ne!(
+            unavailable(
+                &cfg,
+                &provider,
+                &shared.db,
+                &HashMap::new(),
+                false,
+                &Clock::system()
+            )
+            .unwrap(),
+            Some("limit"),
+            "cap overflow must not classify claude as limit"
+        );
     }
 }

@@ -48,6 +48,8 @@ reloaded with SIGHUP. `atr config migrate` converts shorthand
 (default `for:atr`), `[dashboard] enabled / bind`, `[telegram]` and
 `[telegram.assistant]`, `[tui] providers`, `[ui] timezone`, `[[provider]]` order and `enabled`, `[mcp]`, `[cache]`,
 `[retry]`, `[restart]`, `[host]`,
+`overflow_on_cap`, `[labels.<name>]` (per-label `run_timeout` /
+`stall_resumes` / `overflow_on_cap`),
 `[[source]]`, `max_prompt_bytes` (default `256k`; CLI/HTTP/MCP prompts and
 inbox files).
 
@@ -270,9 +272,11 @@ host_dir = "~/atr-ops"
 ```
 
 `events` filters task-lifecycle Telegram notifies (`start`, `finished`,
-`verify_retry`, `failed`, `needs_attention`, `stalled`, `fallback`,
-`cancelled`, `retry`, `held`, `planned`, `review`, `quota_skip`, `compare`,
-`hook`). Empty keeps current behaviour (send all). GitHub token-expiry
+`verify_retry`, `failed`, `needs_attention`, `stalled`, `cap_reached`,
+`fallback`, `cancelled`, `retry`, `held`, `planned`, `review`, `quota_skip`,
+`compare`, `hook`). Empty keeps current behaviour (send all). A filter that
+lists `stalled` but not `cap_reached` still delivers cap alerts (the text is
+never stall / CLI hang / heartbeat). GitHub token-expiry
 alerts, Telegram health alerts, the daily summary, and replies to
 interactive commands are never filtered.
 
@@ -484,6 +488,45 @@ started (test driver, build) keeps the run alive. There is no per-task
 heartbeat override; set it on the provider. A stall retry of the same session
 reuses the worktree as-is (no checkout/reset). A new task on that pool slot
 still prepares the tree.
+
+### Run wall-clock cap
+
+`[[provider]] run_timeout` (default `90m`) is a cap on one CLI process, not a
+hang. Hitting it is outcome `run_timeout`, skip reason `wall_clock_cap`, and
+Telegram `cap_reached` — never `stalled` / CLI hang / heartbeat, and never a
+usage `limit`. Same-session resumes still use `stall_resumes` (default 1).
+Exhausting them does not cool the provider.
+
+A task that pinned a provider (`--provider`, `provider:` label, `--model`, or
+a compare-arm strict pin) does **not** overflow to another provider when the
+cap is exhausted; the task goes to `needs_attention` unless you allow
+overflow. Unpinned tasks still overflow. Real usage-limit overflow is
+unchanged.
+
+Precedence for the cap, resume budget, and overflow flag: **task > label >
+global / provider default**.
+
+```toml
+# omit = overflow on cap only when the task did not pin a provider
+# overflow_on_cap = false   # never overflow on cap
+# overflow_on_cap = true    # always overflow on cap (strict pins still never)
+
+[labels.proof]
+run_timeout = "3h"
+stall_resumes = 4
+# overflow_on_cap = false
+```
+
+CLI / HTTP / MCP (task wins over `[labels.<name>]`):
+
+```bash
+atr add --provider claude --labels proof --run-timeout 3h --stall-resumes 4 \
+  --check-only --repo ~/src/my-repo "prove the login still works"
+```
+
+`--overflow-on-cap false` stores a per-task override. Label names match
+`tasks.labels` (GitHub issue labels, `--labels`, HTTP/MCP `labels`)
+case-insensitively.
 
 ### Serve restart recovery
 

@@ -107,7 +107,7 @@ pub async fn run(
         if started.elapsed() > run_timeout {
             let _ = child.kill().await;
             return Ok(finish(
-                "stalled",
+                crate::config::RUN_TIMEOUT_OUTCOME,
                 None,
                 session_id,
                 usage,

@@ -237,7 +237,7 @@ Off by default (`[lessons] enabled = true`, or `lessons = true` in one `[[repo]]
 | `atr lessons clear --repo R [--id N]` | delete one or all |
 | `atr lessons export --repo R` | markdown to paste into `AGENTS.md` via a normal PR |
 
-With lessons on, atr reflects after informative failures (verify failed, stalled, needs attention, task timeout, success after a verify retry or review): a read-only 3-turn run on `[lessons] provider` (default: the driver) under a hidden `<key>-reflect` task, at most 2 lessons of ≤ 240 chars, near-duplicates bumped instead of added, unpinned lessons expire after `ttl` (30d). A task past `task_timeout` leaves a run with outcome `task_timeout` (see `atr tasks <key>`).
+With lessons on, atr reflects after informative failures (verify failed, stalled, run wall-clock cap, needs attention, task timeout, success after a verify retry or review): a read-only 3-turn run on `[lessons] provider` (default: the driver) under a hidden `<key>-reflect` task, at most 2 lessons of ≤ 240 chars, near-duplicates bumped instead of added, unpinned lessons expire after `ttl` (30d). A task past `task_timeout` leaves a run with outcome `task_timeout` (see `atr tasks <key>`). A run that hits `[[provider]] run_timeout` is outcome `run_timeout` (Telegram `cap reached …`, skip reason `wall_clock_cap`), not a stall and not a usage limit.
 
 ## Compare
 
@@ -262,6 +262,7 @@ With lessons on, atr reflects after informative failures (verify failed, stalled
 | Task `held` | An `after:` dependency failed or is gone. `atr retry <key>` clears the hold. |
 | Queued with retry time | Transient provider error (overloaded / 429 / 5xx / 408). Wait, or `atr retry <key>`. `[retry]` in CONFIG.md. |
 | Stalled while tests/builds still ran | Heartbeat treats descendant CPU/IO and worktree file writes as live. Same-session stall retry keeps the worktree (no reset). Raise `[[provider]] heartbeat_timeout` if needed. |
+| Telegram `stalled … (CLI hang / heartbeat)` but the CLI was still working | Older builds mislabeled a `run_timeout` cap (default 90m) as a stall. Cap alerts are now `cap reached …` (reason `wall_clock_cap`, not `limit`). A pinned provider does not overflow unless `overflow_on_cap`. Set `[labels.proof] run_timeout = "3h"` / `stall_resumes = 4`, or `atr add --run-timeout 3h --stall-resumes 4 --labels proof`. Real hangs still use the stall text. |
 | Result `interrupted by atr restart; resuming` | Serve restarted mid-turn; the task is queued again once. A second restart or missing worktree fails as orphaned. `[restart]` in CONFIG.md. |
 | Status `host: … waiting` | CPU load or free RAM past `[host]`. Wait or `atr config set host.enabled false`. |
 | Usage `not reported` | Expected for OpenCode, Cursor, Codex. |

@@ -183,6 +183,31 @@ struct TaskIn {
     idempotency_key: Option<String>,
     #[serde(default, alias = "attachments")]
     files: Vec<crate::intake::FileIn>,
+    #[serde(default, deserialize_with = "de_labels")]
+    labels: String,
+    #[serde(default)]
+    run_timeout: Option<String>,
+    #[serde(default)]
+    stall_resumes: Option<u32>,
+    #[serde(default)]
+    overflow_on_cap: Option<bool>,
+}
+
+fn de_labels<'de, D>(d: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Option::<OneOrMany>::deserialize(d)? {
+        None => String::new(),
+        Some(OneOrMany::One(s)) => s,
+        Some(OneOrMany::Many(v)) => v.join(","),
+    })
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -204,6 +229,14 @@ struct MessageIn {
     /// Stop the live turn and resume its session with this message.
     #[serde(default)]
     interrupt: bool,
+    #[serde(default)]
+    labels: Option<String>,
+    #[serde(default)]
+    run_timeout: Option<String>,
+    #[serde(default)]
+    stall_resumes: Option<u32>,
+    #[serde(default)]
+    overflow_on_cap: Option<bool>,
 }
 
 async fn create_task(
@@ -259,6 +292,10 @@ async fn create_task(
             shadow: payload.shadow,
             tests_ok: payload.tests_ok,
             check_only: payload.check_only,
+            labels: payload.labels,
+            run_timeout: payload.run_timeout.unwrap_or_default(),
+            stall_resumes: payload.stall_resumes,
+            overflow_on_cap: payload.overflow_on_cap,
             files,
             idempotency_key,
             repo_named_prefix: false,
@@ -360,6 +397,10 @@ async fn post_message(
         payload.tests_ok,
         crate::app::SubmitOpts {
             check_only: payload.check_only,
+            labels: payload.labels.unwrap_or_default(),
+            run_timeout: payload.run_timeout.unwrap_or_default(),
+            stall_resumes: payload.stall_resumes,
+            overflow_on_cap: payload.overflow_on_cap,
             ..crate::app::SubmitOpts::default()
         },
     ) {

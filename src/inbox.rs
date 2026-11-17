@@ -211,6 +211,7 @@ fn ingest_file(shared: &Shared, inbox: &Path, path: &Path, max_bytes: u64) -> Re
             after: spec.after.clone(),
             agent: None,
             check_only: false,
+            ..Default::default()
         },
     )?;
     let _ = outcome;

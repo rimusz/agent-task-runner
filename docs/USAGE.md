@@ -19,6 +19,7 @@ atr add "what is 2+2?"
 atr add "fix the typo in notes.txt" --dir ~/notes
 atr add "open a PR for the README typo" --repo ~/src/my-repo --output pr
 atr add --check-only --repo ~/src/my-repo "prove the login still works"
+atr add --provider claude --labels proof --run-timeout 3h --stall-resumes 4 --check-only --repo ~/src/my-repo "prove iOS+Android"
 atr submit my-task --body "also fix the footer"
 atr ask "what is 2+2?"
 ```
@@ -76,6 +77,7 @@ atr add "what is 2+2?"                                  # answer only, no worksp
 atr add "fix the typo in notes.txt" --dir ~/notes       # edit a plain folder in place
 atr add "fix the README typo" --repo ~/src/my-repo --output pr   # git worktree, opens a PR
 atr add --check-only --repo ~/src/my-repo "prove the login still works"
+atr add --provider claude --labels proof --run-timeout 3h --stall-resumes 4 --check-only --repo ~/src/my-repo "prove iOS+Android"
 atr add "deploy" --after build,test                     # wait until those keys succeed
 ```
 
@@ -279,6 +281,8 @@ curl -s -X POST http://127.0.0.1:7420/tasks \
 ```
 
 MCP `add_task` takes the same `provider` and `model` arguments. On GitHub, add the labels `provider:codex` and `model:gpt-5.6-sol` next to the intake label (case-insensitive prefix; the model id keeps its case). Labels are read when the task is created.
+
+Long proofs can also set a per-task run wall-clock cap and same-session resume budget (`--run-timeout`, `--stall-resumes`, `--overflow-on-cap`, `--labels`, or HTTP/MCP `run_timeout` / `stall_resumes` / `overflow_on_cap` / `labels`). Those override `[labels.<name>]`, which override `[[provider]] run_timeout` / `stall_resumes`. A pinned provider does not overflow when the cap is exhausted unless overflow is allowed. See [CONFIG.md](CONFIG.md#run-wall-clock-cap).
 
 Validation at intake:
 

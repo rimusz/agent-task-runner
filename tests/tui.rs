@@ -878,6 +878,7 @@ async fn serve_dispatch_skips_tui_session() {
                     after: Vec::new(),
                     agent: None,
                     check_only: false,
+                    ..Default::default()
                 },
             )
             .unwrap()
