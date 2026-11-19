@@ -2,7 +2,7 @@ use crate::app::Shared;
 use crate::config::{expand_path, Config};
 use crate::db::Db;
 use anyhow::Result;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -214,8 +214,9 @@ fn prune_tasks(
 }
 
 fn cutoff(d: Duration) -> String {
-    let ts = Utc::now() - ChronoDuration::from_std(d).unwrap_or(ChronoDuration::days(30));
-    ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    let ts = Timestamp::now()
+        - SignedDuration::try_from(d).unwrap_or(SignedDuration::from_hours(24 * 30));
+    crate::rfc3339::millis(ts)
 }
 
 fn home_dir() -> PathBuf {
@@ -229,10 +230,12 @@ fn prune_worktrees(
     force: bool,
     report: &mut GcReport,
 ) -> Result<()> {
-    let keep_after = Utc::now()
-        - ChronoDuration::from_std(cfg.gc.worktree_retention).unwrap_or(ChronoDuration::days(14));
-    let shadow_min = Utc::now()
-        - ChronoDuration::from_std(cfg.gc.shadow_min_age).unwrap_or(ChronoDuration::days(7));
+    let keep_after = Timestamp::now()
+        - SignedDuration::try_from(cfg.gc.worktree_retention)
+            .unwrap_or(SignedDuration::from_hours(24 * 14));
+    let shadow_min = Timestamp::now()
+        - SignedDuration::try_from(cfg.gc.shadow_min_age)
+            .unwrap_or(SignedDuration::from_hours(24 * 7));
     for t in db.list_tasks()? {
         if !is_done_or_cancelled(&t.status) {
             continue;
@@ -251,7 +254,7 @@ fn prune_worktrees(
             tracing::warn!(path = %dest.display(), "gc skip worktree outside worktree_root");
             continue;
         }
-        let updated = parse_ts(&t.updated).unwrap_or(Utc::now());
+        let updated = parse_ts(&t.updated).unwrap_or_else(Timestamp::now);
         if updated > keep_after {
             continue;
         }
@@ -306,10 +309,8 @@ fn is_dirty(worktree: &Path) -> bool {
     }
 }
 
-fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|t| t.with_timezone(&Utc))
+fn parse_ts(s: &str) -> Option<Timestamp> {
+    crate::rfc3339::parse(s)
 }
 
 /// Known per-CLI session directories under `home`.
@@ -472,8 +473,7 @@ cli = "/bin/true"
     }
 
     fn old(days: i64) -> String {
-        (Utc::now() - ChronoDuration::days(days))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        crate::rfc3339::millis(Timestamp::now() - SignedDuration::from_hours(24 * days))
     }
 
     #[test]

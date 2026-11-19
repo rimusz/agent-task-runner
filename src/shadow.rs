@@ -4,7 +4,7 @@ use crate::db::{now_rfc3339, Db, ShadowResult};
 use crate::handoff;
 use crate::providers::cache_hit_ratio;
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -580,11 +580,11 @@ pub fn record_after_run(
 }
 
 fn duration_ms(started: &str, ended: Option<&str>) -> Option<i64> {
-    let start = DateTime::parse_from_rfc3339(started).ok()?;
+    let start = crate::rfc3339::parse(started)?;
     let end = ended
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .unwrap_or_else(|| Utc::now().into());
-    Some(end.signed_duration_since(start).num_milliseconds().max(0))
+        .and_then(crate::rfc3339::parse)
+        .unwrap_or_else(Timestamp::now);
+    Some(((end - start).as_millis() as i64).max(0))
 }
 
 fn tests_summary(events: &[crate::db::EventRow]) -> String {
@@ -624,10 +624,15 @@ fn looks_like_test(cmd: &str) -> bool {
 pub fn parse_since(raw: &str) -> Result<String> {
     let s = raw.trim();
     if let Ok(d) = crate::duration::parse_duration(s) {
-        let ts = Utc::now() - ChronoDuration::from_std(d).unwrap_or(ChronoDuration::seconds(0));
-        return Ok(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        let dur = SignedDuration::try_from(d).unwrap_or(SignedDuration::ZERO);
+        let ts = Timestamp::now()
+            .checked_sub(dur)
+            .unwrap_or_else(|_| Timestamp::now());
+        return Ok(crate::rfc3339::millis(ts));
     }
-    DateTime::parse_from_rfc3339(s).map_err(|e| anyhow::anyhow!("--since: {e}"))?;
+    if crate::rfc3339::parse(s).is_none() {
+        bail!("--since: \"{raw}\" is not RFC 3339 or a duration");
+    }
     Ok(s.to_string())
 }
 

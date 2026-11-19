@@ -1,7 +1,7 @@
 //! Telegram reachability tracking (getUpdates health) and long-reply
 //! splitting. Never logs the bot token.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -40,9 +40,9 @@ impl HealthEvent {
 #[derive(Debug, Default, Clone)]
 pub struct PollHealth {
     pub consecutive: u32,
-    pub failing_since: Option<DateTime<Utc>>,
+    pub failing_since: Option<Timestamp>,
     pub alerted: bool,
-    pub last_ok: Option<DateTime<Utc>>,
+    pub last_ok: Option<Timestamp>,
     pub last_error: Option<String>,
 }
 
@@ -53,7 +53,7 @@ impl PollHealth {
         &mut self,
         ok: bool,
         err: Option<&str>,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> (LogLevel, Option<HealthEvent>, bool) {
         if ok {
             let was_failing = self.consecutive > 0;
@@ -85,8 +85,7 @@ impl PollHealth {
         let mut event = None;
         if !self.alerted {
             if let Some(since) = self.failing_since {
-                if (now - since)
-                    .to_std()
+                if std::time::Duration::try_from(now - since)
                     .map(|d| d >= ALERT_AFTER)
                     .unwrap_or(false)
                 {
@@ -102,11 +101,11 @@ impl PollHealth {
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "consecutive_failures": self.consecutive,
-            "failing_since": self.failing_since.map(|t| t.to_rfc3339()),
+            "failing_since": self.failing_since.map(crate::rfc3339::auto),
             "alerted": self.alerted,
-            "last_ok": self.last_ok.map(|t| t.to_rfc3339()),
+            "last_ok": self.last_ok.map(crate::rfc3339::auto),
             "last_error": self.last_error,
-            "checked_at": Utc::now().to_rfc3339(),
+            "checked_at": crate::rfc3339::auto(Timestamp::now()),
         })
     }
 }
@@ -131,7 +130,7 @@ fn short_err(e: &str) -> String {
 
 /// Called by the poll loop after each getUpdates. `err` must already be redacted.
 pub fn observe_poll(cfg: &crate::config::Config, config_path: &Path, err: Option<&str>) {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let (level, event, changed, snapshot) = {
         let mut g = HEALTH.lock().unwrap_or_else(|e| e.into_inner());
         let h = g.get_or_insert_with(PollHealth::default);
@@ -189,7 +188,7 @@ pub fn observe_poll(cfg: &crate::config::Config, config_path: &Path, err: Option
 pub fn status_json(
     cfg: &crate::config::Config,
     config_path: &Path,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> serde_json::Value {
     if !cfg.telegram.enabled {
         return serde_json::json!({"level": "off", "message": "telegram disabled"});
@@ -209,16 +208,15 @@ pub fn is_conflict(err: &str) -> bool {
         || err.contains("terminated by other getUpdates")
 }
 
-pub fn summarize(raw: &serde_json::Value, now: DateTime<Utc>) -> serde_json::Value {
+pub fn summarize(raw: &serde_json::Value, now: Timestamp) -> serde_json::Value {
     if raw.is_null() {
         return serde_json::json!({"level": "unknown", "message": "no Telegram poll recorded yet (is atr serve running?)"});
     }
     let n = raw["consecutive_failures"].as_u64().unwrap_or(0);
     let since = raw["failing_since"]
         .as_str()
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.with_timezone(&Utc));
-    let mins = since.map(|s| (now - s).num_minutes()).unwrap_or(0);
+        .and_then(crate::rfc3339::parse);
+    let mins = since.map(|s| (now - s).as_mins()).unwrap_or(0);
     let raw_err = raw["last_error"].as_str().unwrap_or("");
     let conflict;
     let err = if is_conflict(raw_err) {
@@ -391,7 +389,7 @@ pub fn multipart_document(
     content: &[u8],
     caption: &str,
 ) -> (String, Vec<u8>) {
-    let boundary = format!("atr{:x}", Utc::now().timestamp_nanos_opt().unwrap_or(0));
+    let boundary = format!("atr{:x}", Timestamp::now().as_nanosecond());
     let mut b: Vec<u8> = Vec::new();
     let mut field = |name: &str, val: &str| {
         b.extend_from_slice(
@@ -419,10 +417,10 @@ pub fn multipart_document(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use jiff::SignedDuration;
 
-    fn t(m: i64) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap() + chrono::Duration::minutes(m)
+    fn t(m: i64) -> Timestamp {
+        crate::clock::utc(2026, 10, 1, 0, 0, 0) + SignedDuration::from_mins(m)
     }
 
     #[test]
@@ -462,11 +460,10 @@ mod tests {
         );
         let ok = serde_json::json!({"consecutive_failures": 0});
         assert_eq!(summarize(&ok, t(0))["level"], "ok");
-        let warn = serde_json::json!({"consecutive_failures": 3, "failing_since": t(0).to_rfc3339(), "last_error": "timed out"});
+        let warn = serde_json::json!({"consecutive_failures": 3, "failing_since": crate::rfc3339::auto(t(0)), "last_error": "timed out"});
         assert_eq!(summarize(&warn, t(5))["level"], "warn");
         assert_eq!(summarize(&warn, t(20))["level"], "fail");
-        let blip =
-            serde_json::json!({"consecutive_failures": 1, "failing_since": t(0).to_rfc3339()});
+        let blip = serde_json::json!({"consecutive_failures": 1, "failing_since": crate::rfc3339::auto(t(0))});
         assert_eq!(summarize(&blip, t(1))["level"], "ok");
     }
 
@@ -547,8 +544,8 @@ mod tests {
 
     #[test]
     fn conflict_409_explained() {
-        let now = chrono::Utc::now();
-        let raw = serde_json::json!({"consecutive_failures": 3, "failing_since": now.to_rfc3339(), "last_error": "https://api.telegram.org/bot***/getUpdates: status code 409"});
+        let now = Timestamp::now();
+        let raw = serde_json::json!({"consecutive_failures": 3, "failing_since": crate::rfc3339::auto(now), "last_error": "https://api.telegram.org/bot***/getUpdates: status code 409"});
         let v = summarize(&raw, now);
         assert!(v["message"].as_str().unwrap().contains("another poller"));
         assert!(!is_conflict("timed out"));

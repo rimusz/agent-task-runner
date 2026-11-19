@@ -6,6 +6,7 @@ use crate::runner::terminate_tree_now;
 use crate::scheduler::{self, reconcile};
 use crate::status::{self, Caps, Enrich, GroupFilter, GroupRow};
 use anyhow::{bail, Result};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal, Read, Write};
@@ -581,7 +582,7 @@ impl Shared {
         };
         let totals = self.db.usage_totals(1).unwrap_or_default();
         let clock = crate::clock::Clock::system();
-        let mut top_reset: Option<chrono::DateTime<chrono::Utc>> = None;
+        let mut top_reset: Option<Timestamp> = None;
         let providers: Vec<Value> = cfg
             .providers
             .iter()
@@ -626,8 +627,7 @@ impl Shared {
                 }
                 if cooling {
                     if let Some(until) = self.db.cooldown_until(&p.name).ok().flatten() {
-                        if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&until) {
-                            let t = t.with_timezone(&chrono::Utc);
+                        if let Some(t) = crate::rfc3339::parse(&until) {
                             reset_at = Some(match reset_at {
                                 Some(cur) => cur.min(t),
                                 None => t,
@@ -708,8 +708,8 @@ impl Shared {
             "line": crate::host::format_line(&cfg.host, &host_snap),
         });
         let cutoff = opts.since.map(|d| {
-            chrono::Utc::now()
-                - chrono::Duration::from_std(d).unwrap_or_else(|_| chrono::Duration::days(30))
+            Timestamp::now()
+                - SignedDuration::try_from(d).unwrap_or(SignedDuration::from_hours(24 * 30))
         });
         let inflight_keys: HashSet<String> = inflight.keys().cloned().collect();
         let live_open: HashSet<String> = self
@@ -734,8 +734,8 @@ impl Shared {
                 }
             }
             if let Some(cut) = cutoff {
-                if let Ok(u) = chrono::DateTime::parse_from_rfc3339(&t.updated) {
-                    if u.with_timezone(&chrono::Utc) < cut {
+                if let Some(u) = crate::rfc3339::parse(&t.updated) {
+                    if u < cut {
                         continue;
                     }
                 }
@@ -838,8 +838,8 @@ impl Shared {
             "timezone": cfg.display_timezone.label,
             "quota_reset": top_reset.map(|t| cfg.display_timezone.format(t)),
             "intake_paused": self.intake_paused.load(Ordering::Relaxed),
-            "github_auth": crate::gh_token::status_json(&cfg, &self.config_path, chrono::Utc::now()),
-            "telegram_health": crate::telegram_health::status_json(&cfg, &self.config_path, chrono::Utc::now()),
+            "github_auth": crate::gh_token::status_json(&cfg, &self.config_path, Timestamp::now()),
+            "telegram_health": crate::telegram_health::status_json(&cfg, &self.config_path, Timestamp::now()),
             "running": inflight.keys().cloned().collect::<Vec<_>>(),
             "providers": providers,
             "shadow": {

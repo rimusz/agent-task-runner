@@ -3,7 +3,7 @@ use crate::config::{Provider, QuotaUnit, QuotaWindow};
 use crate::db::Db;
 use crate::runner::RunResult;
 use anyhow::Result;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
@@ -16,7 +16,7 @@ pub struct WindowUsage {
     pub ratio: f64,
     pub threshold: f64,
     pub over: bool,
-    pub reset: Option<DateTime<Utc>>,
+    pub reset: Option<Timestamp>,
 }
 
 impl WindowUsage {
@@ -27,7 +27,7 @@ impl WindowUsage {
     pub fn to_json_tz(&self, tz: Option<&crate::tz::DisplayTz>) -> serde_json::Value {
         let reset = self.reset.map(|t| match tz {
             Some(z) => z.format(t),
-            None => t.to_rfc3339(),
+            None => crate::rfc3339::auto(t),
         });
         serde_json::json!({
             "window": self.window_raw,
@@ -50,8 +50,8 @@ pub fn window_usage(
     clock: &Clock,
 ) -> Result<WindowUsage> {
     let now = clock.now();
-    let since = now - ChronoDuration::from_std(w.window).unwrap_or(ChronoDuration::hours(5));
-    let since_s = since.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let since = now - SignedDuration::try_from(w.window).unwrap_or(SignedDuration::from_hours(5));
+    let since_s = crate::rfc3339::millis(since);
     let (input, output, cost, runs) = db.usage_since(provider, &since_s)?;
     let used = match w.unit {
         QuotaUnit::Usd => cost,
@@ -80,16 +80,15 @@ fn rolling_reset(
     provider: &str,
     w: &QuotaWindow,
     since: &str,
-    now: DateTime<Utc>,
-) -> Result<Option<DateTime<Utc>>> {
+    now: Timestamp,
+) -> Result<Option<Timestamp>> {
     let Some(oldest) = db.usage_oldest(provider, since)? else {
         return Ok(None);
     };
-    let Ok(ts) = DateTime::parse_from_rfc3339(&oldest) else {
+    let Some(ts) = crate::rfc3339::parse(&oldest) else {
         return Ok(None);
     };
-    let end = ts.with_timezone(&Utc)
-        + ChronoDuration::from_std(w.window).unwrap_or(ChronoDuration::hours(5));
+    let end = ts + SignedDuration::try_from(w.window).unwrap_or(SignedDuration::from_hours(5));
     if end > now {
         Ok(Some(end))
     } else {
@@ -120,14 +119,10 @@ pub fn snapshots(db: &Db, p: &Provider, clock: &Clock) -> Result<Vec<WindowUsage
 pub fn earliest_reset(
     windows: &[WindowUsage],
     cli_reset: Option<&str>,
-    now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
-    let parse = |s: &str| {
-        DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|t| t.with_timezone(&Utc))
-    };
-    let mut times: Vec<DateTime<Utc>> = windows
+    now: Timestamp,
+) -> Option<Timestamp> {
+    let parse = |s: &str| crate::rfc3339::parse(s);
+    let mut times: Vec<Timestamp> = windows
         .iter()
         .filter(|w| w.over)
         .filter_map(|w| w.reset)
@@ -151,14 +146,14 @@ pub fn limit_reset_active(db: &Db, name: &str, clock: &Clock) -> Result<bool> {
 }
 
 /// Parse a CLI-reported reset time from a structured event or error body.
-pub fn extract_reset_at(value: &Value, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+pub fn extract_reset_at(value: &Value, now: Timestamp) -> Option<Timestamp> {
     if let Some(t) = from_known_fields(value, now) {
         return Some(t);
     }
     walk_reset(value, now, 0)
 }
 
-fn from_known_fields(value: &Value, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+fn from_known_fields(value: &Value, now: Timestamp) -> Option<Timestamp> {
     const KEYS: &[&str] = &[
         "resetsAt",
         "resets_at",
@@ -190,7 +185,7 @@ fn from_known_fields(value: &Value, now: DateTime<Utc>) -> Option<DateTime<Utc>>
     None
 }
 
-fn walk_reset(value: &Value, now: DateTime<Utc>, depth: u8) -> Option<DateTime<Utc>> {
+fn walk_reset(value: &Value, now: Timestamp, depth: u8) -> Option<Timestamp> {
     if depth > 6 {
         return None;
     }
@@ -235,7 +230,7 @@ fn find_key<'a>(value: &'a Value, key: &str, depth: u8) -> Option<&'a Value> {
     }
 }
 
-fn parse_reset_value(v: &Value, now: DateTime<Utc>, millis: bool) -> Option<DateTime<Utc>> {
+fn parse_reset_value(v: &Value, now: Timestamp, millis: bool) -> Option<Timestamp> {
     if let Some(s) = v.as_str() {
         return parse_reset_str(s, now);
     }
@@ -248,44 +243,44 @@ fn parse_reset_value(v: &Value, now: DateTime<Utc>, millis: bool) -> Option<Date
     None
 }
 
-fn parse_reset_str(s: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+fn parse_reset_str(s: &str, now: Timestamp) -> Option<Timestamp> {
     let t = s.trim();
     if t.is_empty() {
         return None;
     }
-    if let Ok(d) = DateTime::parse_from_rfc3339(t) {
-        return Some(d.with_timezone(&Utc));
+    if let Some(d) = crate::rfc3339::parse(t) {
+        return Some(d);
     }
     if let Ok(n) = t.parse::<i64>() {
         return parse_reset_number(n, now, false);
     }
     if let Ok(d) = crate::duration::parse_duration(t) {
-        return Some(now + ChronoDuration::from_std(d).ok()?);
+        return now.checked_add(SignedDuration::try_from(d).ok()?).ok();
     }
     reset_from_message(t, now)
 }
 
-fn parse_reset_number(n: i64, now: DateTime<Utc>, millis: bool) -> Option<DateTime<Utc>> {
+fn parse_reset_number(n: i64, now: Timestamp, millis: bool) -> Option<Timestamp> {
     if millis || n > 1_000_000_000_000 {
-        return DateTime::from_timestamp(n / 1000, 0);
+        return Timestamp::from_second(n / 1000).ok();
     }
     if n > 1_000_000_000 {
-        return DateTime::from_timestamp(n, 0);
+        return Timestamp::from_second(n).ok();
     }
     if n >= 0 {
-        return Some(now + ChronoDuration::seconds(n));
+        return now.checked_add(SignedDuration::from_secs(n)).ok();
     }
     None
 }
 
-pub fn reset_from_message(msg: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+pub fn reset_from_message(msg: &str, now: Timestamp) -> Option<Timestamp> {
     let lower = msg.to_ascii_lowercase();
     for needle in ["resets at ", "reset at ", "resets ", "try again at "] {
         if let Some(idx) = lower.find(needle) {
             let rest = msg[idx + needle.len()..].trim();
             let token = rest.split_whitespace().next().unwrap_or(rest);
-            if let Ok(d) = DateTime::parse_from_rfc3339(token.trim_end_matches(['.', ',', ';'])) {
-                return Some(d.with_timezone(&Utc));
+            if let Some(d) = crate::rfc3339::parse(token.trim_end_matches(['.', ',', ';'])) {
+                return Some(d);
             }
         }
     }
@@ -298,17 +293,17 @@ pub fn reset_from_message(msg: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>
         if let Some(idx) = lower.find(needle) {
             let rest = msg[idx + needle.len()..].trim();
             if let Some(d) = parse_human_duration(rest) {
-                return Some(now + d);
+                return now.checked_add(d).ok();
             }
         }
     }
     None
 }
 
-fn parse_human_duration(s: &str) -> Option<ChronoDuration> {
+fn parse_human_duration(s: &str) -> Option<SignedDuration> {
     let t = s.trim();
     if let Ok(d) = crate::duration::parse_duration(t.split_whitespace().next().unwrap_or(t)) {
-        return ChronoDuration::from_std(d).ok();
+        return SignedDuration::try_from(d).ok();
     }
     let mut parts = t.split_whitespace();
     let n: i64 = parts
@@ -318,19 +313,19 @@ fn parse_human_duration(s: &str) -> Option<ChronoDuration> {
         .ok()?;
     let unit = parts.next().unwrap_or("s").to_ascii_lowercase();
     if unit.starts_with("hour") || unit == "h" {
-        Some(ChronoDuration::hours(n))
+        Some(SignedDuration::from_hours(n))
     } else if unit.starts_with("min") || unit == "m" {
-        Some(ChronoDuration::minutes(n))
+        Some(SignedDuration::from_mins(n))
     } else if unit.starts_with("sec") || unit == "s" {
-        Some(ChronoDuration::seconds(n))
+        Some(SignedDuration::from_secs(n))
     } else if unit.starts_with("day") || unit == "d" {
-        Some(ChronoDuration::days(n))
+        Some(SignedDuration::from_hours(24 * n))
     } else {
         None
     }
 }
 
-pub fn reset_from_run(result: &RunResult, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+pub fn reset_from_run(result: &RunResult, now: Timestamp) -> Option<Timestamp> {
     for raw in &result.usage_raw {
         if let Some(t) = extract_reset_at(raw, now) {
             return Some(t);
@@ -366,7 +361,7 @@ pub fn record_limit_for_run(
             .into_iter()
             .min()
     });
-    let reset_s = reset.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    let reset_s = reset.map(crate::rfc3339::millis);
     let raw = result
         .usage_raw
         .first()
@@ -386,11 +381,10 @@ mod tests {
     use super::*;
     use crate::config::QuotaWindow;
     use crate::db::Db;
-    use chrono::TimeZone;
     use std::time::Duration;
 
-    fn t0() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 13, 12, 0, 0).unwrap()
+    fn t0() -> Timestamp {
+        crate::clock::utc(2026, 10, 13, 12, 0, 0)
     }
 
     #[test]
@@ -400,25 +394,20 @@ mod tests {
         )
         .unwrap();
         let got = extract_reset_at(&v, t0()).unwrap();
-        assert_eq!(
-            got,
-            DateTime::parse_from_rfc3339("2026-10-13T17:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc)
-        );
+        assert_eq!(got, crate::rfc3339::parse("2026-10-13T17:00:00Z").unwrap());
     }
 
     #[test]
     fn extract_retry_after_seconds() {
         let v: Value = serde_json::from_str(r#"{"error":{"retry_after":3600}}"#).unwrap();
         let got = extract_reset_at(&v, t0()).unwrap();
-        assert_eq!(got, t0() + ChronoDuration::hours(1));
+        assert_eq!(got, t0() + SignedDuration::from_hours(1));
     }
 
     #[test]
     fn extract_try_again_in_message() {
         let got = reset_from_message("rate limit: try again in 5 hours", t0()).unwrap();
-        assert_eq!(got, t0() + ChronoDuration::hours(5));
+        assert_eq!(got, t0() + SignedDuration::from_hours(5));
     }
 
     #[test]
@@ -428,7 +417,7 @@ mod tests {
         db.upsert_task("acme-q", "/repo", None).unwrap();
         let run = db.start_run("acme-q", "claude", "m").unwrap();
         db.finish_run(run, "success", Some(0)).unwrap();
-        let at = t0() - ChronoDuration::hours(3);
+        let at = t0() - SignedDuration::from_hours(3);
         db.insert_usage_at(
             run,
             None,
@@ -440,7 +429,7 @@ mod tests {
             Some(45.0),
             Some("est"),
             "{}",
-            &at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            &crate::rfc3339::millis(at),
         )
         .unwrap();
         let w = QuotaWindow {
@@ -454,7 +443,7 @@ mod tests {
         let snap = window_usage(&db, "claude", &w, &clock).unwrap();
         assert!((snap.used - 45.0).abs() < 1e-9, "{}", snap.used);
         assert!(snap.over, "45/50 >= 0.85");
-        let later = Clock::frozen(t0() + ChronoDuration::hours(3));
+        let later = Clock::frozen(t0() + SignedDuration::from_hours(3));
         let snap = window_usage(&db, "claude", &w, &later).unwrap();
         assert!(snap.used < 1.0, "usage aged out, got {}", snap.used);
         assert!(!snap.over);
@@ -462,8 +451,8 @@ mod tests {
 
     #[test]
     fn earliest_reset_picks_the_soonest_active_window() {
-        let soon = t0() + ChronoDuration::hours(1);
-        let later = t0() + ChronoDuration::hours(5);
+        let soon = t0() + SignedDuration::from_hours(1);
+        let later = t0() + SignedDuration::from_hours(5);
         let windows = vec![
             WindowUsage {
                 window_raw: "7d".into(),
@@ -495,16 +484,16 @@ mod tests {
     fn record_limit_uses_reported_period_end() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("s.db")).unwrap();
-        let end = t0() + ChronoDuration::hours(6);
+        let end = t0() + SignedDuration::from_hours(6);
         db.upsert_provider_usage(
             "grok",
             "weekly",
             Some(0.01),
             Some(140.32),
             None,
-            Some(&end.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            Some(&crate::rfc3339::millis(end)),
             None,
-            &t0().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            &crate::rfc3339::millis(t0()),
         )
         .unwrap();
         let result = crate::runner::RunResult {
@@ -519,9 +508,7 @@ mod tests {
         };
         record_limit_for_run(&db, "grok", &result, &Clock::frozen(t0())).unwrap();
         let stored = db.quota_reset_at("grok").unwrap().unwrap();
-        let got = DateTime::parse_from_rfc3339(&stored)
-            .unwrap()
-            .with_timezone(&Utc);
+        let got = crate::rfc3339::parse(&stored).unwrap();
         assert_eq!(got, end);
     }
 

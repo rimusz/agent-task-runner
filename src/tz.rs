@@ -1,13 +1,17 @@
 use anyhow::{bail, Result};
-use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
-use chrono_tz::Tz;
+use jiff::tz::TimeZone;
+use jiff::{Timestamp, ZonedDateTime};
 
 /// Display zone for status, usage, tasks, and reports.
 /// Empty / `local` uses the system local zone.
 #[derive(Debug, Clone)]
 pub struct DisplayTz {
     pub label: String,
-    named: Option<Tz>,
+    named: Option<TimeZone>,
+}
+
+fn lookup(name: &str) -> Option<TimeZone> {
+    jiff::tz::TimeZoneDatabase::bundled().get(name).ok()
 }
 
 impl DisplayTz {
@@ -17,7 +21,7 @@ impl DisplayTz {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty() && *s != "local")
         {
-            if let Ok(tz) = from_env.parse::<Tz>() {
+            if let Some(tz) = lookup(&from_env) {
                 return Self {
                     label: from_env,
                     named: Some(tz),
@@ -27,9 +31,10 @@ impl DisplayTz {
         // LaunchAgents often have no TZ. Prefer the OS zone so "local"
         // is the machine's wall clock, not UTC.
         if let Some(iana) = iana_from_localtime() {
-            if let Ok(tz) = iana.parse::<Tz>() {
+            if let Some(tz) = lookup(&iana) {
+                let label = tz.iana_name().unwrap_or(&iana).to_string();
                 return Self {
-                    label: tz.name().to_string(),
+                    label,
                     named: Some(tz),
                 };
             }
@@ -45,65 +50,65 @@ impl DisplayTz {
         if s.is_empty() || s.eq_ignore_ascii_case("local") {
             return Ok(Self::system());
         }
-        match s.parse::<Tz>() {
-            Ok(tz) => Ok(Self {
-                label: tz.name().to_string(),
-                named: Some(tz),
-            }),
-            Err(_) => bail!("timezone {s:?} is not a valid IANA zone (or local)"),
+        match lookup(s) {
+            Some(tz) => {
+                let label = tz.iana_name().unwrap_or(s).to_string();
+                Ok(Self {
+                    label,
+                    named: Some(tz),
+                })
+            }
+            None => bail!("timezone {s:?} is not a valid IANA zone (or local)"),
         }
     }
 
-    pub fn day(&self, utc: DateTime<Utc>) -> String {
-        match self.named {
-            Some(tz) => utc.with_timezone(&tz).format("%Y-%m-%d").to_string(),
-            None => utc.with_timezone(&Local).format("%Y-%m-%d").to_string(),
+    fn zone(&self) -> TimeZone {
+        match &self.named {
+            Some(tz) => tz.clone(),
+            None => TimeZone::system(),
         }
     }
 
-    pub fn format(&self, utc: DateTime<Utc>) -> String {
-        match self.named {
-            Some(tz) => format!(
-                "{} {}",
-                utc.with_timezone(&tz).format("%Y-%m-%d %H:%M"),
-                self.label
-            ),
-            None => format!(
-                "{} {}",
-                utc.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
-                self.label
-            ),
-        }
+    fn zoned(&self, utc: Timestamp) -> ZonedDateTime {
+        utc.to_zoned_datetime(self.zone())
+    }
+
+    pub fn day(&self, utc: Timestamp) -> String {
+        format!("{}", self.zoned(utc).strftime("%Y-%m-%d"))
+    }
+
+    pub fn format(&self, utc: Timestamp) -> String {
+        format!(
+            "{} {}",
+            self.zoned(utc).strftime("%Y-%m-%d %H:%M"),
+            self.label
+        )
     }
 
     /// Compact dashboard stamp without the zone name (the page header shows it
     /// once): always `Mon DD` (date only), e.g. `Oct 16`; the full stamp goes in a hover title.
-    pub fn format_compact(&self, utc: DateTime<Utc>) -> String {
-        match self.named {
-            Some(tz) => utc.with_timezone(&tz).format("%b %d").to_string(),
-            None => utc.with_timezone(&Local).format("%b %d").to_string(),
-        }
+    pub fn format_compact(&self, utc: Timestamp) -> String {
+        format!("{}", self.zoned(utc).strftime("%b %d"))
     }
 
     /// Short stamp for usage lines, e.g. `Oct 16 07:36 UTC`.
-    pub fn format_short(&self, utc: DateTime<Utc>) -> String {
-        let (month, day, hour, minute) = match self.named {
-            Some(tz) => {
-                let t = utc.with_timezone(&tz);
-                (t.format("%b").to_string(), t.day(), t.hour(), t.minute())
-            }
-            None => {
-                let t = utc.with_timezone(&Local);
-                (t.format("%b").to_string(), t.day(), t.hour(), t.minute())
-            }
-        };
-        format!("{month} {day} {hour:02}:{minute:02} {}", self.label)
+    /// The day is unpadded (`Oct 3`, not `Oct 03`).
+    pub fn format_short(&self, utc: Timestamp) -> String {
+        let t = self.zoned(utc);
+        format!(
+            "{} {} {:02}:{:02} {}",
+            t.strftime("%b"),
+            t.day(),
+            t.hour(),
+            t.minute(),
+            self.label
+        )
     }
 
     pub fn format_opt(&self, rfc3339: Option<&str>) -> String {
         rfc3339
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| self.format(t.with_timezone(&Utc)))
+            .and_then(crate::rfc3339::parse)
+            .map(|t| self.format(t))
             .unwrap_or_else(|| "-".into())
     }
 
@@ -111,47 +116,28 @@ impl DisplayTz {
         self.format_opt(Some(rfc3339))
     }
 
-    pub fn parse_utc(rfc3339: &str) -> Option<DateTime<Utc>> {
-        DateTime::parse_from_rfc3339(rfc3339)
-            .ok()
-            .map(|t| t.with_timezone(&Utc))
+    pub fn parse_utc(rfc3339: &str) -> Option<Timestamp> {
+        crate::rfc3339::parse(rfc3339)
     }
 
     /// Wall-clock hour/minute in this zone.
-    pub fn hm(&self, utc: DateTime<Utc>) -> (u32, u32) {
-        match self.named {
-            Some(tz) => {
-                let t = utc.with_timezone(&tz);
-                (t.hour(), t.minute())
-            }
-            None => {
-                let t = utc.with_timezone(&Local);
-                (t.hour(), t.minute())
-            }
-        }
+    pub fn hm(&self, utc: Timestamp) -> (u32, u32) {
+        let t = self.zoned(utc);
+        (t.hour() as u32, t.minute() as u32)
     }
 
     /// Grok-style `11:04 AM` in this zone (no leading zero on the hour).
-    pub fn format_ampm(&self, utc: DateTime<Utc>) -> String {
+    pub fn format_ampm(&self, utc: Timestamp) -> String {
         let (h, m) = self.hm(utc);
         ampm_label(h, m)
     }
 
     pub fn now_local_hm(&self) -> (u32, u32) {
-        match self.named {
-            Some(tz) => {
-                let t = tz.from_utc_datetime(&Utc::now().naive_utc());
-                (t.hour(), t.minute())
-            }
-            None => {
-                let t = Local::now();
-                (t.hour(), t.minute())
-            }
-        }
+        self.hm(Timestamp::now())
     }
 
     pub fn today(&self) -> String {
-        self.day(Utc::now())
+        self.day(Timestamp::now())
     }
 }
 
@@ -172,7 +158,7 @@ fn iana_from_localtime() -> Option<String> {
     for marker in ["zoneinfo/", "timezone/"] {
         if let Some(idx) = s.rfind(marker) {
             let rest = s[idx + marker.len()..].trim_matches('/').trim();
-            if !rest.is_empty() && rest.parse::<Tz>().is_ok() {
+            if !rest.is_empty() && lookup(rest).is_some() {
                 return Some(rest.to_string());
             }
         }
@@ -183,18 +169,17 @@ fn iana_from_localtime() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     #[test]
     fn utc_day_and_label() {
         let tz = DisplayTz::parse("UTC").unwrap();
-        let t = Utc.with_ymd_and_hms(2026, 10, 13, 23, 30, 0).unwrap();
+        let t = crate::clock::utc(2026, 10, 13, 23, 30, 0);
         assert_eq!(tz.day(t), "2026-10-13");
         assert!(tz.format(t).contains("2026-10-13 23:30"));
         assert!(tz.format(t).contains("UTC"));
         assert_eq!(tz.format_short(t), "Oct 13 23:30 UTC");
         assert_eq!(tz.format_compact(t), "Oct 13");
-        let far = Utc.with_ymd_and_hms(2026, 11, 3, 3, 0, 0).unwrap();
+        let far = crate::clock::utc(2026, 11, 3, 3, 0, 0);
         assert_eq!(tz.format_compact(far), "Nov 03");
         let vil = DisplayTz::parse("Europe/Vilnius").unwrap();
         assert!(!vil.format_compact(t).contains("Vilnius"));
@@ -203,14 +188,14 @@ mod tests {
     #[test]
     fn new_york_rolls_the_day() {
         let tz = DisplayTz::parse("America/New_York").unwrap();
-        let t = Utc.with_ymd_and_hms(2026, 10, 14, 2, 0, 0).unwrap();
+        let t = crate::clock::utc(2026, 10, 14, 2, 0, 0);
         assert_eq!(tz.day(t), "2026-10-13");
     }
 
     #[test]
     fn short_reset_is_local_wall_clock_with_zone() {
         let tz = DisplayTz::parse("America/New_York").unwrap();
-        let t = Utc.with_ymd_and_hms(2026, 10, 14, 17, 10, 0).unwrap();
+        let t = crate::clock::utc(2026, 10, 14, 17, 10, 0);
         let s = tz.format_short(t);
         assert!(s.contains("America/New_York"), "{s}");
         assert!(
@@ -231,7 +216,95 @@ mod tests {
         assert_eq!(ampm_label(12, 0), "12:00 PM");
         assert_eq!(ampm_label(23, 4), "11:04 PM");
         let utc = DisplayTz::parse("UTC").unwrap();
-        let t = Utc.with_ymd_and_hms(2026, 10, 28, 11, 4, 0).unwrap();
+        let t = crate::clock::utc(2026, 10, 28, 11, 4, 0);
         assert_eq!(utc.format_ampm(t), "11:04 AM");
+    }
+}
+
+#[cfg(test)]
+mod pins {
+    use super::*;
+
+    #[test]
+    fn utc_stamp() {
+        let tz = DisplayTz::parse("UTC").unwrap();
+        let t = DisplayTz::parse_utc("2026-10-13T23:30:00Z").unwrap();
+        assert_eq!(tz.day(t), "2026-10-13");
+        let formatted = tz.format(t);
+        assert!(formatted.contains("2026-10-13 23:30"), "{formatted}");
+        assert!(formatted.contains("UTC"), "{formatted}");
+        assert_eq!(tz.format_short(t), "Oct 13 23:30 UTC");
+        assert_eq!(tz.format_compact(t), "Oct 13");
+        assert_eq!(tz.hm(t), (23, 30));
+    }
+
+    #[test]
+    fn november_compact_pads_the_day() {
+        let tz = DisplayTz::parse("UTC").unwrap();
+        let t = DisplayTz::parse_utc("2026-11-03T03:00:00Z").unwrap();
+        assert_eq!(tz.format_compact(t), "Nov 03");
+    }
+
+    #[test]
+    fn new_york_rolls_the_day_and_prints_wall_clock() {
+        let tz = DisplayTz::parse("America/New_York").unwrap();
+        let rolled = DisplayTz::parse_utc("2026-10-14T02:00:00Z").unwrap();
+        assert_eq!(tz.day(rolled), "2026-10-13");
+        let t = DisplayTz::parse_utc("2026-10-14T17:10:00Z").unwrap();
+        let short = tz.format_short(t);
+        assert!(short.contains("America/New_York"), "{short}");
+        assert!(short.contains("13:10"), "{short}");
+        assert!(!short.contains("17:10"), "{short}");
+        assert_eq!(tz.format_ampm(t), "1:10 PM");
+        assert_eq!(tz.hm(t), (13, 10));
+    }
+
+    #[test]
+    fn dubai_is_four_hours_ahead() {
+        let tz = DisplayTz::parse("Asia/Dubai").unwrap();
+        let t = DisplayTz::parse_utc("2026-10-13T12:00:00Z").unwrap();
+        let formatted = tz.format(t);
+        assert!(formatted.contains("16:00"), "{formatted}");
+        assert!(formatted.contains("Asia/Dubai"), "{formatted}");
+    }
+
+    #[test]
+    fn kolkata_and_lord_howe() {
+        let t = DisplayTz::parse_utc("2026-10-13T12:00:00Z").unwrap();
+        let kolkata = DisplayTz::parse("Asia/Kolkata").unwrap();
+        assert_eq!(kolkata.day(t), "2026-10-13");
+        assert_eq!(kolkata.format_short(t), "Oct 13 17:30 Asia/Kolkata");
+        let howe = DisplayTz::parse("Australia/Lord_Howe").unwrap();
+        assert_eq!(howe.day(t), "2026-10-13");
+        assert_eq!(howe.format_short(t), "Oct 13 23:00 Australia/Lord_Howe");
+    }
+
+    #[test]
+    fn legacy_and_alias_labels_parse() {
+        for label in [
+            "UTC",
+            "Etc/UTC",
+            "GMT",
+            "US/Eastern",
+            "Europe/Kiev",
+            "Etc/GMT+5",
+        ] {
+            assert!(DisplayTz::parse(label).is_ok(), "{label}");
+        }
+    }
+
+    #[test]
+    fn unknown_zone_error_text() {
+        let err = DisplayTz::parse("Not/AZone").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "timezone \"Not/AZone\" is not a valid IANA zone (or local)"
+        );
+    }
+
+    #[test]
+    fn empty_and_local_use_the_host_zone() {
+        assert!(DisplayTz::parse("").is_ok());
+        assert!(DisplayTz::parse("local").is_ok());
     }
 }

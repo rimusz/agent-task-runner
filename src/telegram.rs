@@ -3,6 +3,8 @@ use crate::config::{Config, TelegramConfig};
 use crate::providers::hit_ratio_from_sums;
 use crate::status;
 use anyhow::Result;
+use jiff::civil::Date;
+use jiff::Timestamp;
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -705,7 +707,7 @@ fn send_outgoing(shared: &Shared, cfg: &TelegramConfig, o: Outgoing) {
     let mid = send_message_mode(cfg, &token, o.chat_id, &body, markup, None);
     if interim {
         if let Ok(Some(id)) = mid {
-            let now = chrono::Utc::now().timestamp();
+            let now = Timestamp::now().as_second();
             let _ = shared
                 .db
                 .meta_set(&interim_meta_key(o.chat_id), &format!("{id}:{now}:{body}"));
@@ -755,7 +757,7 @@ fn finish_interim(
     let Some(token) = bot_token(cfg) else {
         return;
     };
-    let secs = (chrono::Utc::now().timestamp() - t).max(0) as u64;
+    let secs = (Timestamp::now().as_second() - t).max(0) as u64;
     let text = interim_done_text(provider.unwrap_or("assistant"), secs, ok);
     edit_message(cfg, &token, chat, id, &text, None);
 }
@@ -2719,12 +2721,12 @@ fn human_reset_date(raw: &str) -> Option<String> {
         return None;
     }
     if let Some(date) = s.split_whitespace().next() {
-        if let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") {
-            return Some(day_month(&d.format("%d %b").to_string()));
+        if let Ok(d) = Date::strptime("%Y-%m-%d", date) {
+            return Some(day_month(&format!("{}", d.strftime("%d %b"))));
         }
     }
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-        return Some(day_month(&dt.format("%d %b").to_string()));
+    if let Some(dt) = crate::rfc3339::parse_fixed(s) {
+        return Some(day_month(&format!("{}", dt.strftime("%d %b"))));
     }
     if s.contains('T') && s.len() > 16 {
         return Some(s.chars().take(10).collect());
@@ -3176,6 +3178,14 @@ mod tests {
     use super::*;
     use crate::app::Shared;
     use std::sync::Arc;
+
+    #[test]
+    fn human_reset_date_uses_the_offset_local_date() {
+        assert_eq!(
+            human_reset_date("2026-10-05T23:30:00-04:00").as_deref(),
+            Some("5 Oct")
+        );
+    }
 
     fn harness_shared() -> Arc<Shared> {
         harness_shared_with("")

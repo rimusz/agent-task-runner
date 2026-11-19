@@ -17,12 +17,12 @@ use crate::app::Shared;
 use crate::scheduler;
 use crate::tz::DisplayTz;
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use jiff::Timestamp;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -137,7 +137,7 @@ enum Role {
 struct Msg {
     role: Role,
     text: String,
-    at: DateTime<Utc>,
+    at: Timestamp,
 }
 
 impl App {
@@ -147,7 +147,7 @@ impl App {
             messages: vec![Msg {
                 role: Role::System,
                 text: welcome,
-                at: Utc::now(),
+                at: Timestamp::now(),
             }],
             input: String::new(),
             cursor: 0,
@@ -170,7 +170,7 @@ impl App {
         self.messages.push(Msg {
             role,
             text,
-            at: Utc::now(),
+            at: Timestamp::now(),
         });
         self.follow = true;
         self.scroll = 0;
@@ -181,7 +181,7 @@ impl App {
             self.messages.push(Msg {
                 role: Role::Assistant,
                 text: String::new(),
-                at: Utc::now(),
+                at: Timestamp::now(),
             });
         }
         &mut self.messages.last_mut().unwrap().text
@@ -1264,8 +1264,6 @@ fn centered(area: Rect, height: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
-
     fn test_app() -> App {
         App {
             messages: Vec::new(),
@@ -1288,7 +1286,7 @@ mod tests {
         app.messages.push(Msg {
             role: Role::You,
             text: "what about Helium?".into(),
-            at: Utc.with_ymd_and_hms(2026, 10, 28, 11, 4, 0).unwrap(),
+            at: crate::clock::utc(2026, 10, 28, 11, 4, 0),
         });
         app.push(Role::Assistant, "Brave: no.");
         let tz = DisplayTz::parse("UTC").unwrap();

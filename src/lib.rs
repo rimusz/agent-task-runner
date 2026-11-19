@@ -47,6 +47,7 @@ pub mod repos;
 pub mod reset;
 pub mod retry;
 pub mod review;
+pub mod rfc3339;
 pub mod runner;
 pub mod scheduler;
 pub mod scratch;

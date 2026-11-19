@@ -2,6 +2,7 @@ mod common;
 
 use atr::SubmitOutcome;
 use common::Harness;
+use jiff::{SignedDuration, Timestamp};
 use std::time::Duration;
 
 #[tokio::test]
@@ -583,8 +584,7 @@ async fn degraded_clears_after_window_and_on_success() {
         "127.0.0.1:0",
     )
     .await;
-    let past = (chrono::Utc::now() - chrono::Duration::minutes(1))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let past = atr::rfc3339::millis(Timestamp::now() - SignedDuration::from_mins(1));
     h.shared
         .db
         .set_degraded_until("claude", Some(&past))

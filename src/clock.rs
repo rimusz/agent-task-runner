@@ -1,9 +1,9 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 /// Injectable clock so quota windows can be tested with a frozen time.
 #[derive(Debug, Clone)]
 pub struct Clock {
-    frozen: Option<DateTime<Utc>>,
+    frozen: Option<Timestamp>,
 }
 
 impl Clock {
@@ -11,28 +11,36 @@ impl Clock {
         Self { frozen: None }
     }
 
-    pub fn frozen(now: DateTime<Utc>) -> Self {
+    pub fn frozen(now: Timestamp) -> Self {
         Self { frozen: Some(now) }
     }
 
-    pub fn now(&self) -> DateTime<Utc> {
-        self.frozen.unwrap_or_else(Utc::now)
+    pub fn now(&self) -> Timestamp {
+        self.frozen.unwrap_or_else(Timestamp::now)
     }
 
     pub fn rfc3339(&self) -> String {
-        self.now()
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        crate::rfc3339::millis(self.now())
     }
+}
+
+/// UTC instant for unit tests. Unavailable to integration tests.
+#[cfg(test)]
+pub fn utc(year: i16, month: i8, day: i8, hour: i8, minute: i8, second: i8) -> Timestamp {
+    jiff::civil::date(year, month, day)
+        .at(hour, minute, second, 0)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .expect("valid test time")
+        .timestamp()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     #[test]
     fn frozen_clock_does_not_advance() {
-        let t = Utc.with_ymd_and_hms(2026, 10, 13, 12, 0, 0).unwrap();
+        let t = utc(2026, 10, 13, 12, 0, 0);
         let c = Clock::frozen(t);
         assert_eq!(c.now(), t);
         assert_eq!(c.now(), t);

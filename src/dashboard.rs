@@ -4,16 +4,17 @@ use crate::providers::hit_ratio_from_sums;
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
+use jiff::{SignedDuration, Timestamp};
 use serde_json::{json, Value};
 
 const PAGE: &str = include_str!("dashboard.html");
 const LOG_LINES: usize = 50;
 
-static STARTED: std::sync::OnceLock<chrono::DateTime<chrono::Utc>> = std::sync::OnceLock::new();
+static STARTED: std::sync::OnceLock<Timestamp> = std::sync::OnceLock::new();
 
 /// Remember process start for the dashboard uptime badge (first call wins).
 pub fn mark_started() {
-    let _ = STARTED.set(chrono::Utc::now());
+    let _ = STARTED.set(Timestamp::now());
 }
 
 pub fn extra_bind(listen: &str, bind: &str) -> Option<String> {
@@ -167,10 +168,8 @@ pub fn snapshot_period(
         }
     }
 
-    let since_5h =
-        (now - chrono::Duration::hours(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let since_7d =
-        (now - chrono::Duration::days(7)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let since_5h = crate::rfc3339::millis(now - SignedDuration::from_hours(5));
+    let since_7d = crate::rfc3339::millis(now - SignedDuration::from_hours(24 * 7));
     let stats_5h = shared.db.provider_run_stats(&since_5h).unwrap_or_default();
     let stats_7d = shared.db.provider_run_stats(&since_7d).unwrap_or_default();
     let last_ok = shared.db.last_success_by_provider().unwrap_or_default();
@@ -288,7 +287,7 @@ pub fn snapshot_period(
     json!({
         "ok": true,
         "version": crate::VERSION,
-        "now": tz.format(chrono::Utc::now()),
+        "now": tz.format(Timestamp::now()),
         "timezone": tz.label,
         "bind": cfg.dashboard.bind,
         "listen": cfg.listen,
@@ -296,8 +295,8 @@ pub fn snapshot_period(
         "driver": cfg.driver_name(),
         "stats_today": stats_today,
         "health": health(&cfg, &shared.config_path, now),
-        "github_auth": crate::gh_token::status_json(&cfg, &shared.config_path, chrono::Utc::now()),
-        "telegram_health": crate::telegram_health::status_json(&cfg, &shared.config_path, chrono::Utc::now()),
+        "github_auth": crate::gh_token::status_json(&cfg, &shared.config_path, Timestamp::now()),
+        "telegram_health": crate::telegram_health::status_json(&cfg, &shared.config_path, Timestamp::now()),
         "repos": repos,
         "telegram_assistant": telegram_assistant(&cfg, &shared.db),
         "running": running,
@@ -505,11 +504,7 @@ pub fn telegram_assistant_line(v: &Value) -> Option<String> {
     ))
 }
 
-fn health(
-    cfg: &Config,
-    config_path: &std::path::Path,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Value {
+fn health(cfg: &Config, config_path: &std::path::Path, now: Timestamp) -> Value {
     let gh = crate::gh_token::status_json(cfg, config_path, now);
     let tg = crate::telegram_health::status_json(cfg, config_path, now);
     let clis: Vec<Value> = cfg
@@ -526,7 +521,7 @@ fn health(
         .collect();
     let uptime = STARTED
         .get()
-        .map(|s| secs_human((now - *s).num_seconds().max(0) as u64));
+        .map(|s| secs_human((now - *s).as_secs().max(0) as u64));
     json!({
         "github": gh,
         "telegram": {"enabled": cfg.telegram.enabled, "level": tg["level"], "message": tg["message"]},
@@ -540,7 +535,7 @@ fn health(
 fn provider_usage_cells(
     view: &crate::reported::ProviderUsageView,
     tz: &crate::tz::DisplayTz,
-    now: chrono::DateTime<chrono::Utc>,
+    now: Timestamp,
 ) -> (String, bool, Option<String>) {
     let extra = view.extra_credits.map(|u| format!("${u:.2}"));
     if view.windows.is_empty() {
@@ -557,12 +552,12 @@ fn provider_usage_cells(
     )
 }
 
-fn start_of_local_day(tz: &crate::tz::DisplayTz, now: chrono::DateTime<chrono::Utc>) -> String {
+fn start_of_local_day(tz: &crate::tz::DisplayTz, now: Timestamp) -> String {
     let (h, m) = tz.now_local_hm();
     let start = now
-        - chrono::Duration::minutes(i64::from(h) * 60 + i64::from(m))
-        - chrono::Duration::seconds(i64::from(chrono::Timelike::second(&now)));
-    start.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        - SignedDuration::from_mins(i64::from(h) * 60 + i64::from(m))
+        - SignedDuration::from_secs(i64::from(now.as_second().rem_euclid(60) as u32));
+    crate::rfc3339::millis(start)
 }
 
 pub(crate) fn first_line(body: &str, max: usize) -> String {
@@ -625,24 +620,20 @@ fn short_repo(repo: Option<&str>) -> String {
 }
 
 pub(crate) fn format_elapsed(started: &str) -> String {
-    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(started) else {
+    let Some(ts) = crate::rfc3339::parse(started) else {
         return "-".into();
     };
-    secs_human(
-        (chrono::Utc::now() - ts.with_timezone(&chrono::Utc))
-            .num_seconds()
-            .max(0) as u64,
-    )
+    secs_human((Timestamp::now() - ts).as_secs().max(0) as u64)
 }
 
 fn format_span(start: &str, end: &str) -> String {
-    let Ok(a) = chrono::DateTime::parse_from_rfc3339(start) else {
+    let Some(a) = crate::rfc3339::parse(start) else {
         return "-".into();
     };
-    let Ok(b) = chrono::DateTime::parse_from_rfc3339(end) else {
+    let Some(b) = crate::rfc3339::parse(end) else {
         return format_elapsed(start);
     };
-    secs_human((b - a).num_seconds().unsigned_abs())
+    secs_human((b - a).as_secs().unsigned_abs())
 }
 
 fn secs_human(secs: u64) -> String {
@@ -1109,7 +1100,7 @@ kind = "claude"
     #[test]
     fn provider_usage_cells_split_extra_credits() {
         let tz = crate::tz::DisplayTz::parse("UTC").unwrap();
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         let none = crate::reported::ProviderUsageView::default();
         assert_eq!(
             provider_usage_cells(&none, &tz, now),
@@ -1127,26 +1118,19 @@ kind = "claude"
 
     #[test]
     fn usage_segments_are_compact_without_zone() {
-        use chrono::TimeZone;
         let tz = crate::tz::DisplayTz::parse("Europe/Vilnius").unwrap();
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 10, 16, 12, 0, 0)
-            .unwrap();
+        let now = crate::clock::utc(2026, 10, 16, 12, 0, 0);
         let view = crate::reported::ProviderUsageView {
             windows: vec![
                 crate::reported::UsageWindowView {
                     name: "5h".into(),
                     percent_used: Some(0.0),
-                    resets_at: Some(
-                        chrono::Utc
-                            .with_ymd_and_hms(2026, 10, 16, 17, 20, 0)
-                            .unwrap(),
-                    ),
+                    resets_at: Some(crate::clock::utc(2026, 10, 16, 17, 20, 0)),
                 },
                 crate::reported::UsageWindowView {
                     name: "7d".into(),
                     percent_used: Some(4.0),
-                    resets_at: Some(chrono::Utc.with_ymd_and_hms(2026, 10, 17, 0, 0, 0).unwrap()),
+                    resets_at: Some(crate::clock::utc(2026, 10, 17, 0, 0, 0)),
                 },
             ],
             extra_credits: None,

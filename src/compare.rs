@@ -277,13 +277,13 @@ pub fn diff_stats(wt: &Path, base: &str) -> (u64, u64, u64) {
 }
 
 fn duration_ms(started: &str, ended: Option<&str>) -> i64 {
-    let (Ok(s), Some(Ok(e))) = (
-        chrono::DateTime::parse_from_rfc3339(started),
-        ended.map(chrono::DateTime::parse_from_rfc3339),
-    ) else {
+    let Some(s) = crate::rfc3339::parse(started) else {
         return 0;
     };
-    (e - s).num_milliseconds().max(0)
+    let Some(e) = ended.and_then(crate::rfc3339::parse) else {
+        return 0;
+    };
+    ((e - s).as_millis() as i64).max(0)
 }
 
 /// Gather what the judge needs about one arm from the DB and its worktree.

@@ -8,11 +8,6 @@ ignore = [
     # ratatui 0.29 depends on paste; the crate is archived (not a vuln)
     # and 0.29 has no upgrade path. Revisit when we move off 0.29.
     { id = "RUSTSEC-2024-0436", reason = "transitive paste via ratatui 0.29; unmaintained, not a vuln" },
-    # chrono 0.4.45 unmaintained notice only, no known vulnerability.
-    # atr depends on chrono and chrono-tz; migration tracked separately.
-    { id = "RUSTSEC-2026-0543", reason = "unmaintained notice only, no known vulnerability; chrono is pulled in by atr and chrono-tz; migration tracked separately (https://github.com/chronotope/chrono/issues/1768)" },
-    # chrono-tz 0.10.4 unmaintained notice only, no known vulnerability.
-    { id = "RUSTSEC-2026-0555", reason = "unmaintained notice only, no known vulnerability; chrono is pulled in by atr and chrono-tz; migration tracked separately (https://github.com/chronotope/chrono/issues/1768)" },
 ]
 
 [licenses]
