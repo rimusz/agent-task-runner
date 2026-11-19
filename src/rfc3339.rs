@@ -24,9 +24,9 @@ pub fn auto(t: Timestamp) -> String {
     let ns = t.subsec_nanosecond().unsigned_abs();
     let p = if ns == 0 {
         0
-    } else if ns % 1_000_000 == 0 {
+    } else if ns.is_multiple_of(1_000_000) {
         3
-    } else if ns % 1_000 == 0 {
+    } else if ns.is_multiple_of(1_000) {
         6
     } else {
         9

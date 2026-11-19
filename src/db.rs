@@ -3594,6 +3594,8 @@ fn prune_lessons_locked(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn queue_unless_running_never_overwrites_running() {
         let dir = tempfile::tempdir().unwrap();
@@ -3606,8 +3608,6 @@ mod tests {
         assert!(db.queue_unless_running("q-1").unwrap());
         assert_eq!(db.get_task("q-1").unwrap().unwrap().status, "queued");
     }
-
-    use super::*;
 
     #[test]
     fn ts_in_future_accepts_mixed_historical_strings() {
