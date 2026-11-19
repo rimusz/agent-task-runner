@@ -521,7 +521,7 @@ CLI / HTTP / MCP (task wins over `[labels.<name>]`):
 
 ```bash
 atr add --provider claude --labels proof --run-timeout 3h --stall-resumes 4 \
-  --check-only --repo ~/src/my-repo "prove the login still works"
+  --repo ~/src/my-repo "prove iOS+Android"
 ```
 
 `--overflow-on-cap false` stores a per-task override. Label names match

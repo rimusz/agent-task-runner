@@ -6,7 +6,7 @@
 - When one provider hits its usage limit, it moves on to the next one in your list. A run wall-clock cap is not a usage limit: a pinned provider stays put unless you allow overflow.
 - Retries transient provider errors (overloaded, 429, 5xx) with backoff, waits on `after:` task dependencies, and keeps new work queued when the host CPU or memory is busy.
 - Takes work from the terminal, GitHub issues, other agents (MCP), Telegram, HTTP or a drop folder.
-- Shows what is running on a local dashboard, in the terminal or in Telegram.
+- Shows what is running on a local [dashboard](#dashboard), in the terminal or in Telegram.
 
 atr never calls vendor APIs or handles your API keys. You sign in to each CLI yourself.
 
@@ -91,13 +91,14 @@ atr doctor             # shows anything that needs fixing
 atr ui                 # opens the dashboard at http://127.0.0.1:7420/
 ```
 
+What that page shows: [Dashboard](#dashboard).
+
 ## Your first task
 
 Ask it to do something in a folder:
 
 ```bash
 atr add "fix the spelling mistakes in README.md" --dir .
-atr add --check-only --dir . "report leftover TODOs; do not edit files"
 atr status
 ```
 
@@ -150,6 +151,16 @@ Any other `/…` line (for example `/compact`) goes to the provider as a turn. P
 - The status line under the input shows `· serve` when a live serve is registered in `state.db` or the serve pidfile is still valid. The launchd/systemd user service check is a fallback.
 
 **serve only.** `atr serve` (usually the user service) runs the scheduler, the HTTP API with the dashboard and MCP, and the GitHub, Telegram, inbox and shadow pollers. Nobody needs to be at the keyboard. On headless Linux, also run `sudo loginctl enable-linger "$USER"`. The TUI cannot reach a serve on another machine; to chat with that machine's setup, SSH in and run `atr` there. See [docs/USE-CASES.md](docs/USE-CASES.md#2-always-on-linux-server-or-cloud-vm) and [Sources](docs/CONFIG.md#sources).
+
+## Dashboard
+
+`atr ui` opens this read-only page. `atr serve` (usually `atr service install`) serves it at `http://127.0.0.1:7420/` by default.
+
+It shows running, queued, and finished tasks, and usage: tokens, cost, and tokens saved from the prompt cache. A banner is red when a GitHub token is failing and amber when one expires within 14 days.
+
+From another device on your tailnet, reach it with a Tailscale bind. See [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md).
+
+![atr dashboard: running, queued and finished tasks, with an amber GitHub token banner](docs/images/dashboard.png)
 
 ## What you can use it for
 
