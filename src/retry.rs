@@ -10,7 +10,7 @@ use crate::db::Task;
 use crate::providers::ErrorClass;
 use crate::quota;
 use crate::runner::RunResult;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use std::time::Duration;
 
 /// Why a run failed, for a status line.
@@ -100,7 +100,7 @@ pub fn classify(
     }
 }
 
-pub fn classify_result(result: &RunResult, now: DateTime<Utc>) -> Class {
+pub fn classify_result(result: &RunResult, now: Timestamp) -> Class {
     let has_reset = result
         .usage_raw
         .iter()
@@ -315,9 +315,7 @@ mod tests {
 
     #[test]
     fn waiting_uses_persisted_next_at() {
-        let now = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let now = crate::rfc3339::parse("2026-01-01T00:00:00Z").unwrap();
         let clock = Clock::frozen(now);
         let mut task = Task {
             retry_next_at: "2026-01-01T00:02:00.000Z".into(),

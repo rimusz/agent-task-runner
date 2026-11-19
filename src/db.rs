@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
@@ -16,7 +16,7 @@ pub fn canonical_usage_window(raw: &str) -> String {
 }
 
 pub fn now_rfc3339() -> String {
-    crate::rfc3339::millis(Utc::now())
+    crate::rfc3339::millis(Timestamp::now())
 }
 
 /// Keep-warm pings for one session since its last real run.
@@ -1418,7 +1418,7 @@ impl Db {
              WHERE task_key = ?1 AND provider = ?2 AND session_id = ?3
              ORDER BY id",
         )?;
-        let since_ts = chrono::DateTime::parse_from_rfc3339(since).ok();
+        let since_ts = crate::rfc3339::parse(since);
         let mut out = KeepWarmSince::default();
         let rows = stmt.query_map(params![key, provider, session], |r| {
             Ok((
@@ -1429,7 +1429,7 @@ impl Db {
         })?;
         for row in rows {
             let (at, ok, warm) = row?;
-            let after = match (chrono::DateTime::parse_from_rfc3339(&at).ok(), since_ts) {
+            let after = match (crate::rfc3339::parse(&at), since_ts) {
                 (Some(a), Some(s)) => a >= s,
                 _ => at.as_str() >= since,
             };
@@ -2770,8 +2770,9 @@ impl Db {
     }
 
     pub fn usage_by_day_tz(&self, days: u32, tz: &crate::tz::DisplayTz) -> Result<Vec<UsageDay>> {
-        let since = (Utc::now() - ChronoDuration::days(i64::from(days)))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let since = crate::rfc3339::secs(
+            Timestamp::now() - SignedDuration::from_hours(24 * i64::from(days)),
+        );
         let conn = self.lock();
         let mut stmt = conn.prepare(
             r#"SELECT provider, recorded, input, output, cache_read, cache_write,
@@ -2840,12 +2841,12 @@ impl Db {
         let since = format!("{from_day}T00:00:00Z");
         let until = format!("{to_day}T00:00:00Z");
         let since = crate::tz::DisplayTz::parse_utc(&since)
-            .map(|t| t - ChronoDuration::days(1))
-            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .map(|t| t - SignedDuration::from_hours(24))
+            .map(crate::rfc3339::secs)
             .unwrap_or(since);
         let until = crate::tz::DisplayTz::parse_utc(&until)
-            .map(|t| t + ChronoDuration::days(2))
-            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .map(|t| t + SignedDuration::from_hours(48))
+            .map(crate::rfc3339::secs)
             .unwrap_or(until);
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -2922,12 +2923,12 @@ impl Db {
         let since = format!("{from_day}T00:00:00Z");
         let until = format!("{to_day}T00:00:00Z");
         let since = crate::tz::DisplayTz::parse_utc(&since)
-            .map(|t| t - ChronoDuration::days(1))
-            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .map(|t| t - SignedDuration::from_hours(24))
+            .map(crate::rfc3339::secs)
             .unwrap_or(since);
         let until = crate::tz::DisplayTz::parse_utc(&until)
-            .map(|t| t + ChronoDuration::days(2))
-            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .map(|t| t + SignedDuration::from_hours(48))
+            .map(crate::rfc3339::secs)
             .unwrap_or(until);
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -3048,8 +3049,9 @@ impl Db {
     }
 
     pub fn usage_totals(&self, days: u32) -> Result<Vec<UsageDay>> {
-        let since = (Utc::now() - ChronoDuration::days(i64::from(days)))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let since = crate::rfc3339::secs(
+            Timestamp::now() - SignedDuration::from_hours(24 * i64::from(days)),
+        );
         let conn = self.lock();
         let mut stmt = conn.prepare(
             r#"SELECT provider, 'all',
@@ -3347,17 +3349,18 @@ pub fn pid_alive(pid: i64) -> bool {
 }
 
 pub fn cooldown_rfc3339(d: std::time::Duration) -> String {
-    (Utc::now() + ChronoDuration::from_std(d).unwrap_or(ChronoDuration::minutes(30)))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    let until =
+        Timestamp::now() + SignedDuration::try_from(d).unwrap_or(SignedDuration::from_mins(30));
+    crate::rfc3339::millis(until)
 }
 
 fn future_ts(s: Option<&str>) -> bool {
-    ts_in_future(s, Utc::now())
+    ts_in_future(s, Timestamp::now())
 }
 
-pub fn ts_in_future(s: Option<&str>, now: chrono::DateTime<Utc>) -> bool {
-    s.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|t| t.with_timezone(&Utc) > now)
+pub fn ts_in_future(s: Option<&str>, now: Timestamp) -> bool {
+    s.and_then(crate::rfc3339::parse)
+        .map(|t| t > now)
         .unwrap_or(false)
 }
 
@@ -3686,14 +3689,11 @@ mod tests {
         assert_eq!(db.clear_lessons("app", None).unwrap(), 1);
         assert!(db.list_lessons(Some("app")).unwrap().is_empty());
     }
-    use chrono::Duration as ChronoDuration;
-
     #[test]
     fn degraded_flag_clears_when_window_expires() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("s.db")).unwrap();
-        let past = (Utc::now() - ChronoDuration::minutes(1))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let past = crate::rfc3339::millis(Timestamp::now() - SignedDuration::from_mins(1));
         db.set_degraded_until("claude", Some(&past)).unwrap();
         let (cooling, degraded) = db.provider_blocked("claude").unwrap();
         assert!(!cooling);
@@ -3835,11 +3835,15 @@ mod tests {
         // 02:00 UTC is the previous calendar day in America/New_York. A few
         // days back stays inside usage_by_day_tz(30) without a calendar date
         // that ages out of the window (2026-10-14 fell out on 2026-11-17).
-        let recorded_utc = (Utc::now() - ChronoDuration::days(2))
-            .date_naive()
-            .and_time(chrono::NaiveTime::from_hms_opt(2, 0, 0).unwrap())
-            .and_utc();
-        let recorded = recorded_utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let day = (Timestamp::now() - SignedDuration::from_hours(48))
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date();
+        let recorded_utc = day
+            .at(2, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .expect("02:00 UTC")
+            .timestamp();
+        let recorded = crate::rfc3339::secs(recorded_utc);
         db.insert_usage_at(
             run,
             None,
@@ -4003,9 +4007,7 @@ mod tests {
         assert!((grok[0].utilization.unwrap() - 0.01).abs() < 1e-9);
         assert!((grok[0].balance.unwrap() - 140.32).abs() < 1e-9);
         let tz = crate::tz::DisplayTz::parse("UTC").unwrap();
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-13T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let now = crate::rfc3339::parse("2026-10-13T12:00:00Z").unwrap();
         assert_eq!(
             crate::reported::format_provider_usage(
                 &crate::reported::provider_usage_view(&db, "grok"),
@@ -4228,9 +4230,7 @@ mod tests {
         assert!((grok[0].utilization.unwrap() - 0.01).abs() < 1e-9);
         assert!((grok[0].balance.unwrap() - 140.32).abs() < 1e-9);
         let tz = crate::tz::DisplayTz::parse("UTC").unwrap();
-        let now = chrono::DateTime::parse_from_rfc3339("2026-10-13T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let now = crate::rfc3339::parse("2026-10-13T12:00:00Z").unwrap();
         assert_eq!(
             crate::reported::format_provider_usage(
                 &crate::reported::provider_usage_view(&db, "grok"),

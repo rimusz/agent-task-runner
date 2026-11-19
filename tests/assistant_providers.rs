@@ -6,6 +6,7 @@
 mod common;
 
 use common::Harness;
+use jiff::{SignedDuration, Timestamp};
 use std::time::Duration;
 
 async fn harness(grok: &str, claude_on: bool, list: &[&str]) -> Harness {
@@ -37,7 +38,7 @@ fn ask(h: &Harness) -> String {
 }
 
 fn cool(h: &Harness, provider: &str) {
-    let until = (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339();
+    let until = atr::rfc3339::auto(Timestamp::now() + SignedDuration::from_mins(10));
     h.shared.db.set_cooldown(provider, &until).unwrap();
 }
 
@@ -99,7 +100,7 @@ async fn waits_while_listed_providers_are_only_cooling() {
     let task = h.shared.db.get_task("tg42").unwrap().unwrap();
     assert_eq!(task.status, "queued");
     assert!(run_providers(&h).is_empty());
-    let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+    let past = atr::rfc3339::auto(Timestamp::now() - SignedDuration::from_mins(1));
     h.shared.db.set_cooldown("grok", &past).unwrap();
     h.shared.kick.notify_waiters();
     h.wait_status("tg42", &["waiting"], 12000).await;

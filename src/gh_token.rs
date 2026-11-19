@@ -11,7 +11,9 @@
 //! when the token expires within 14 days. Token values are never logged.
 
 use crate::config::Config;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use jiff::civil::DateTime;
+use jiff::tz::TimeZone;
+use jiff::Timestamp;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -193,36 +195,40 @@ pub fn is_auth_failure(text: &str) -> bool {
 }
 
 /// Parse `Github-Authentication-Token-Expiration` (e.g. `2027-01-12 07:28:00 UTC`).
-pub fn parse_expiration(v: &str) -> Option<DateTime<Utc>> {
+pub fn parse_expiration(v: &str) -> Option<Timestamp> {
     let v = v.trim();
-    for fmt in [
-        "%Y-%m-%d %H:%M:%S UTC",
-        "%Y-%m-%d %H:%M:%S %z",
-        "%Y-%m-%d %H:%M:%S %Z",
-    ] {
-        if let Ok(dt) = DateTime::parse_from_str(v, fmt) {
-            return Some(dt.with_timezone(&Utc));
-        }
-        if let Ok(n) = NaiveDateTime::parse_from_str(v, fmt) {
-            return Some(n.and_utc());
+    if let Ok(t) = Timestamp::strptime("%Y-%m-%d %H:%M:%S %z", v) {
+        return Some(t);
+    }
+    if let Ok(t) = Timestamp::strptime("%Y-%m-%d %H:%M:%S %:z", v) {
+        return Some(t);
+    }
+    // A trailing zone name (UTC, PST, …) or a bare datetime is UTC.
+    if v.len() >= 19 {
+        let (head, rest) = v.split_at(19);
+        let rest = rest.trim();
+        if rest.is_empty() || !rest.contains(char::is_whitespace) {
+            if let Ok(dt) = DateTime::strptime("%Y-%m-%d %H:%M:%S", head) {
+                if let Ok(zdt) = dt.to_zoned_datetime(TimeZone::UTC) {
+                    return Some(zdt.timestamp());
+                }
+            }
         }
     }
-    DateTime::parse_from_rfc3339(v)
-        .ok()
-        .map(|d| d.with_timezone(&Utc))
+    crate::rfc3339::parse(v)
 }
 
-pub fn days_left(exp: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
-    (exp - now).num_hours().div_euclid(24)
+pub fn days_left(exp: Timestamp, now: Timestamp) -> i64 {
+    (exp - now).as_hours().div_euclid(24)
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct AuthState {
-    pub failing_since: Option<DateTime<Utc>>,
-    pub last_alert: Option<DateTime<Utc>>,
-    pub last_expiry_warn: Option<DateTime<Utc>>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub last_probe: Option<DateTime<Utc>>,
+    pub failing_since: Option<Timestamp>,
+    pub last_alert: Option<Timestamp>,
+    pub last_expiry_warn: Option<Timestamp>,
+    pub expires_at: Option<Timestamp>,
+    pub last_probe: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,7 +241,7 @@ pub enum Alert {
 impl AuthState {
     /// Record one GitHub call outcome. `Some(true)` = auth ok, `Some(false)` =
     /// auth failure; returns the alert to send, if any.
-    pub fn record(&mut self, auth_ok: bool, what: &str, now: DateTime<Utc>) -> Option<Alert> {
+    pub fn record(&mut self, auth_ok: bool, what: &str, now: Timestamp) -> Option<Alert> {
         if auth_ok {
             if self.failing_since.take().is_some() {
                 self.last_alert = None;
@@ -248,8 +254,7 @@ impl AuthState {
         }
         let due = match self.last_alert {
             None => true,
-            Some(t) => (now - t)
-                .to_std()
+            Some(t) => std::time::Duration::try_from(now - t)
                 .map(|d| d >= ALERT_EVERY)
                 .unwrap_or(false),
         };
@@ -261,7 +266,7 @@ impl AuthState {
         }
     }
 
-    pub fn note_expiry(&mut self, exp: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<Alert> {
+    pub fn note_expiry(&mut self, exp: Option<Timestamp>, now: Timestamp) -> Option<Alert> {
         self.expires_at = exp;
         let exp = exp?;
         let days = days_left(exp, now);
@@ -270,8 +275,7 @@ impl AuthState {
         }
         let due = match self.last_expiry_warn {
             None => true,
-            Some(t) => (now - t)
-                .to_std()
+            Some(t) => std::time::Duration::try_from(now - t)
                 .map(|d| d >= EXPIRY_WARN_EVERY)
                 .unwrap_or(false),
         };
@@ -449,12 +453,12 @@ fn persist(config_path: Option<&Path>, key: &str, owner: Option<&str>, last_erro
     }
     let entry = serde_json::json!({
         "state": if st.failing_since.is_some() { "failing" } else { "ok" },
-        "failing_since": st.failing_since.map(|t| t.to_rfc3339()),
-        "expires_at": st.expires_at.map(|t| t.to_rfc3339()),
+        "failing_since": st.failing_since.map(crate::rfc3339::auto),
+        "expires_at": st.expires_at.map(crate::rfc3339::auto),
         "token_env": key,
         "owner": owner,
         "last_error": last_error.map(crate::github_auth::redact_secrets),
-        "checked_at": Utc::now().to_rfc3339(),
+        "checked_at": crate::rfc3339::auto(Timestamp::now()),
     });
     root["tokens"][key] = entry;
     let path = state_path(cp);
@@ -478,7 +482,7 @@ pub fn configured(cfg: &Config) -> bool {
 /// means GitHub is configured but no auth check has been recorded yet (also
 /// not a failure). `tokens` lists each token when configured. `configured`
 /// is `false` only for `off`.
-pub fn status_json(cfg: &Config, config_path: &Path, now: DateTime<Utc>) -> serde_json::Value {
+pub fn status_json(cfg: &Config, config_path: &Path, now: Timestamp) -> serde_json::Value {
     if !configured(cfg) {
         return serde_json::json!({
             "level": "off",
@@ -491,12 +495,11 @@ pub fn status_json(cfg: &Config, config_path: &Path, now: DateTime<Utc>) -> serd
     v["configured"] = serde_json::json!(true);
     v
 }
+}
 
-fn summarize_one(raw: &serde_json::Value, now: DateTime<Utc>) -> serde_json::Value {
+fn summarize_one(raw: &serde_json::Value, now: Timestamp) -> serde_json::Value {
     let s = |k: &str| raw.get(k).and_then(|v| v.as_str()).map(String::from);
-    let exp = s("expires_at")
-        .and_then(|v| DateTime::parse_from_rfc3339(&v).ok())
-        .map(|d| d.with_timezone(&Utc));
+    let exp = s("expires_at").and_then(|v| crate::rfc3339::parse(&v));
     let days = exp.map(|e| days_left(e, now));
     let label = token_label(
         &s("token_env").unwrap_or_else(|| "token".into()),
@@ -543,7 +546,7 @@ fn rank(level: &str) -> u8 {
     }
 }
 
-pub fn summarize(raw: &serde_json::Value, now: DateTime<Utc>) -> serde_json::Value {
+pub fn summarize(raw: &serde_json::Value, now: Timestamp) -> serde_json::Value {
     let entries: Vec<serde_json::Value> =
         if let Some(m) = raw.get("tokens").and_then(|t| t.as_object()) {
             m.values().map(|v| summarize_one(v, now)).collect()
@@ -606,7 +609,7 @@ pub fn observe_gh(
             crate::github_auth::redact_secrets(stderr.trim())
         );
     }
-    let alert = with_state(&key, |s| s.record(!auth_fail, what, Utc::now()));
+    let alert = with_state(&key, |s| s.record(!auth_fail, what, Timestamp::now()));
     if alert.is_some() || auth_fail {
         persist(config_path, &key, owner, auth_fail.then_some(what));
     }
@@ -619,7 +622,7 @@ pub fn observe_gh(
 pub struct Probe {
     pub status: u16,
     pub login: Option<String>,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
     pub error: Option<String>,
 }
 
@@ -742,11 +745,10 @@ pub async fn maybe_probe(cfg: &Config, config_path: &Path) {
             tracing::debug!(token = %tu.key, "GitHub token not set; skip auth probe");
             continue;
         };
-        let now = Utc::now();
+        let now = Timestamp::now();
         let due = with_state(&tu.key, |s| match s.last_probe {
             None => true,
-            Some(t) => (now - t)
-                .to_std()
+            Some(t) => std::time::Duration::try_from(now - t)
                 .map(|d| d >= PROBE_EVERY)
                 .unwrap_or(false),
         });
@@ -792,10 +794,10 @@ pub async fn maybe_probe(cfg: &Config, config_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use jiff::SignedDuration;
 
-    fn t(h: i64) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap() + chrono::Duration::hours(h)
+    fn t(h: i64) -> Timestamp {
+        crate::clock::utc(2026, 10, 1, 0, 0, 0) + SignedDuration::from_hours(h)
     }
 
     #[test]

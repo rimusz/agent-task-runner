@@ -4,6 +4,7 @@
 //! idle/finished after a successful turn and belongs in **done**, not waiting.
 
 use crate::db::Task;
+use jiff::Timestamp;
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
@@ -270,12 +271,8 @@ pub fn failing_why(result_text: &str, last_outcome: Option<&str>) -> String {
 }
 
 pub fn elapsed_secs(started: &str) -> Option<i64> {
-    let ts = chrono::DateTime::parse_from_rfc3339(started).ok()?;
-    Some(
-        (chrono::Utc::now() - ts.with_timezone(&chrono::Utc))
-            .num_seconds()
-            .max(0),
-    )
+    let ts = crate::rfc3339::parse(started)?;
+    Some((Timestamp::now() - ts).as_secs().max(0))
 }
 
 pub fn first_line(body: &str, max: usize) -> String {
@@ -638,8 +635,8 @@ fn compact_retry_why(why: &str) -> String {
         Some(i) => (&rest[..i], &rest[i..]),
         None => return why.to_string(),
     };
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(when) {
-        return format!("retry {}{suffix}", dt.format("%H:%M"));
+    if let Some(dt) = crate::rfc3339::parse_fixed(when) {
+        return format!("retry {}{suffix}", dt.strftime("%H:%M"));
     }
     why.to_string()
 }

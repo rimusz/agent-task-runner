@@ -6,6 +6,7 @@
 mod common;
 
 use common::Harness;
+use jiff::{SignedDuration, Timestamp};
 
 fn providers(claude: &str, claude_on: bool) -> Vec<(&str, bool, &str)> {
     vec![
@@ -198,7 +199,7 @@ async fn strict_arm_fails_when_pinned_provider_is_disabled() {
 #[tokio::test]
 async fn strict_arm_waits_while_pinned_provider_cools_down() {
     let h = harness("success", true).await;
-    let until = (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339();
+    let until = atr::rfc3339::auto(Timestamp::now() + SignedDuration::from_mins(10));
     h.shared.db.set_cooldown("claude", &until).unwrap();
     create(&h, "demo-c10");
     h.wait_status("demo-c10-b", &["waiting"], 15000).await;
@@ -209,7 +210,7 @@ async fn strict_arm_waits_while_pinned_provider_cools_down() {
     assert_eq!(a.status, "queued", "arm must wait, not move or fail");
     assert!(run_providers(&h, "demo-c10-a").is_empty());
     // Once the cooldown ends, the arm runs on its own provider.
-    let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+    let past = atr::rfc3339::auto(Timestamp::now() - SignedDuration::from_mins(1));
     h.shared.db.set_cooldown("claude", &past).unwrap();
     h.shared.kick.notify_waiters();
     h.wait_status("demo-c10-a", &["waiting"], 15000).await;

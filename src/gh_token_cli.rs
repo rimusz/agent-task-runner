@@ -235,7 +235,7 @@ pub fn validate(token: &str, repos: &[String]) -> (String, bool) {
     let mut out = format!("login={}", user.login.unwrap_or_else(|| "?".into()));
     match user.expires_at {
         Some(e) => {
-            let d = crate::gh_token::days_left(e, chrono::Utc::now());
+            let d = crate::gh_token::days_left(e, jiff::Timestamp::now());
             out.push_str(&format!("; expires in {d}d"));
             if d < crate::gh_token::EXPIRY_WARN_DAYS {
                 out.push_str(" (warn: <14d)");
@@ -369,7 +369,7 @@ pub fn list(config_path: &Path) -> Result<String> {
                 let p = crate::gh_token::get(&tok, "user");
                 let days = p
                     .expires_at
-                    .map(|e| crate::gh_token::days_left(e, chrono::Utc::now()));
+                    .map(|e| crate::gh_token::days_left(e, jiff::Timestamp::now()));
                 let st = match p.status {
                     0 => "?",
                     200..=299 if days.is_some_and(|d| d < crate::gh_token::EXPIRY_WARN_DAYS) => {

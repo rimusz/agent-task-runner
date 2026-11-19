@@ -10,6 +10,7 @@ use crate::providers::{
 use crate::runner;
 use crate::worktree;
 use anyhow::Result;
+use jiff::{SignedDuration, Timestamp};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -472,11 +473,11 @@ fn task_over_cap(db: &Db, cfg: &Config, key: &str) -> Result<bool> {
     let Some(first) = db.wall_clock_started(key)? else {
         return Ok(false);
     };
-    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&first) else {
+    let Some(ts) = crate::rfc3339::parse(&first) else {
         return Ok(false);
     };
-    let age = chrono::Utc::now() - ts.with_timezone(&chrono::Utc);
-    Ok(age.to_std().unwrap_or_default() > cfg.task_timeout)
+    let age = Timestamp::now() - ts;
+    Ok(std::time::Duration::try_from(age).unwrap_or_default() > cfg.task_timeout)
 }
 
 fn order_runnable(shared: &Shared) -> Result<Vec<String>> {
@@ -515,12 +516,11 @@ fn last_run_in_window(db: &Db, key: &str, provider: &Provider, clock: &Clock) ->
     if name != provider.name {
         return false;
     }
-    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&ended) else {
+    let Some(ts) = crate::rfc3339::parse(&ended) else {
         return false;
     };
     let now = clock.now();
-    now.signed_duration_since(ts.with_timezone(&chrono::Utc))
-        .to_std()
+    std::time::Duration::try_from(now.duration_since(ts))
         .map(|d| d <= provider.cache_window)
         .unwrap_or(false)
 }
@@ -2320,8 +2320,8 @@ fn try_transient_retry(
     let Some(delay) = crate::retry::backoff_delay(&cfg.retry, attempt as u32) else {
         return Ok(false);
     };
-    let next = now + chrono::Duration::from_std(delay).unwrap_or_default();
-    let next_at = next.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let next = now + SignedDuration::try_from(delay).unwrap_or_default();
+    let next_at = crate::rfc3339::millis(next);
     shared
         .db
         .set_retry(key, attempt, Some(&next_at), &class.reason)?;
@@ -3351,7 +3351,6 @@ cli = "{cli}"
 
     #[test]
     fn quota_skips_new_task_but_keeps_existing() {
-        use chrono::{Duration as ChronoDuration, TimeZone, Utc};
         let dir = tempfile::tempdir().unwrap();
         let cfg = two_provider_cfg(dir.path(), 50.0);
         let db = Db::open(&dir.path().join("state.db")).unwrap();
@@ -3361,7 +3360,7 @@ cli = "{cli}"
             .unwrap();
         let run = db.start_run("old-1", "claude", "m").unwrap();
         db.finish_run(run, "success", Some(0)).unwrap();
-        let t0 = Utc.with_ymd_and_hms(2026, 10, 13, 12, 0, 0).unwrap();
+        let t0 = crate::clock::utc(2026, 10, 13, 12, 0, 0);
         db.insert_usage_at(
             run,
             None,
@@ -3373,7 +3372,7 @@ cli = "{cli}"
             Some(45.0),
             Some("est"),
             "{}",
-            &(t0 - ChronoDuration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            &crate::rfc3339::millis(t0 - SignedDuration::from_hours(1)),
         )
         .unwrap();
         let clock = crate::clock::Clock::frozen(t0);
@@ -3388,7 +3387,7 @@ cli = "{cli}"
             .unwrap()
             .expect("existing stays on claude");
         assert_eq!(picked.name, "claude");
-        let later = crate::clock::Clock::frozen(t0 + ChronoDuration::hours(5));
+        let later = crate::clock::Clock::frozen(t0 + SignedDuration::from_hours(5));
         let picked = pick_provider(&cfg, &db, &inflight, &new_task, &later)
             .unwrap()
             .expect("window rolled off");
@@ -3397,7 +3396,6 @@ cli = "{cli}"
 
     #[test]
     fn reported_limit_skips_new_until_reset() {
-        use chrono::{Duration as ChronoDuration, TimeZone, Utc};
         let dir = tempfile::tempdir().unwrap();
         let cfg = two_provider_cfg(dir.path(), 10_000.0);
         let db = Db::open(&dir.path().join("state.db")).unwrap();
@@ -3405,14 +3403,14 @@ cli = "{cli}"
         db.upsert_task("old-2", "/repo", None).unwrap();
         db.set_provider_session("old-2", Some("claude"), Some("sid"))
             .unwrap();
-        let t0 = Utc.with_ymd_and_hms(2026, 10, 13, 12, 0, 0).unwrap();
-        let reset = t0 + ChronoDuration::hours(2);
+        let t0 = crate::clock::utc(2026, 10, 13, 12, 0, 0);
+        let reset = t0 + SignedDuration::from_hours(2);
         db.record_limit(
             "claude",
-            Some(&reset.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            Some(&crate::rfc3339::millis(reset)),
             "429",
             "{}",
-            &t0.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            &crate::rfc3339::millis(t0),
         )
         .unwrap();
         let clock = crate::clock::Clock::frozen(t0);
@@ -3430,7 +3428,7 @@ cli = "{cli}"
                 .name,
             "claude"
         );
-        let after = crate::clock::Clock::frozen(reset + ChronoDuration::minutes(1));
+        let after = crate::clock::Clock::frozen(reset + SignedDuration::from_mins(1));
         assert_eq!(
             pick_provider(&cfg, &db, &inflight, &new_task, &after)
                 .unwrap()
@@ -3442,7 +3440,6 @@ cli = "{cli}"
 
     #[test]
     fn reported_usage_skips_new_task() {
-        use chrono::{Duration as ChronoDuration, TimeZone, Utc};
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = two_provider_cfg(dir.path(), 10_000.0);
         cfg.providers[0].reported_usage = "claude_stream".into();
@@ -3452,17 +3449,17 @@ cli = "{cli}"
         db.upsert_task("old-r", "/repo", None).unwrap();
         db.set_provider_session("old-r", Some("claude"), Some("sid"))
             .unwrap();
-        let t0 = Utc.with_ymd_and_hms(2026, 10, 13, 12, 0, 0).unwrap();
-        let reset = t0 + ChronoDuration::hours(2);
+        let t0 = crate::clock::utc(2026, 10, 13, 12, 0, 0);
+        let reset = t0 + SignedDuration::from_hours(2);
         db.upsert_provider_usage(
             "claude",
             "five_hour",
             Some(0.95),
             None,
             None,
-            Some(&reset.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            Some(&crate::rfc3339::millis(reset)),
             Some("allowed"),
-            &t0.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            &crate::rfc3339::millis(t0),
         )
         .unwrap();
         let clock = crate::clock::Clock::frozen(t0);

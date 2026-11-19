@@ -12,7 +12,8 @@ use crate::db::UsageDay;
 use crate::providers::hit_ratio_from_sums;
 use crate::tz::DisplayTz;
 use anyhow::{bail, Result};
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use jiff::civil::Date;
+use jiff::Timestamp;
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +21,7 @@ pub enum Period {
     Today,
     Days(u32),
     Month,
-    Custom { from: NaiveDate, to: NaiveDate },
+    Custom { from: Date, to: Date },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +85,7 @@ impl Period {
         }
     }
 
-    pub fn range(&self, tz: &DisplayTz, now: DateTime<Utc>) -> Result<(NaiveDate, NaiveDate)> {
+    pub fn range(&self, tz: &DisplayTz, now: Timestamp) -> Result<(Date, Date)> {
         let today = parse_ymd(&tz.day(now))?;
         match self {
             Period::Today => Ok((today, today)),
@@ -92,14 +93,11 @@ impl Period {
                 if *n == 0 {
                     bail!("period days must be > 0");
                 }
-                let start = today - Duration::days(i64::from(n.saturating_sub(1)));
+                let start =
+                    today.checked_sub(jiff::Span::new().days(i64::from(n.saturating_sub(1))))?;
                 Ok((start, today))
             }
-            Period::Month => {
-                let start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
-                    .ok_or_else(|| anyhow::anyhow!("invalid month"))?;
-                Ok((start, today))
-            }
+            Period::Month => Ok((today.first_of_month(), today)),
             Period::Custom { from, to } => {
                 if to < from {
                     bail!("--to {to} is before --from {from}");
@@ -110,8 +108,8 @@ impl Period {
     }
 }
 
-pub fn parse_ymd(raw: &str) -> Result<NaiveDate> {
-    NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")
+pub fn parse_ymd(raw: &str) -> Result<Date> {
+    Date::strptime("%Y-%m-%d", raw.trim())
         .map_err(|_| anyhow::anyhow!("date {raw:?} is not YYYY-MM-DD"))
 }
 
@@ -373,8 +371,8 @@ fn total_row(rows: &[SavingsRow], from: &str, to: &str) -> SavingsRow {
 pub fn report_from_days(
     cfg: &Config,
     period: &Period,
-    from: NaiveDate,
-    to: NaiveDate,
+    from: Date,
+    to: Date,
     days: &[UsageDay],
 ) -> SavingsReport {
     let tz = &cfg.display_timezone;
@@ -386,9 +384,9 @@ pub fn report_from_days(
     let mut d = from;
     while d <= to {
         by_day_acc.entry(d.to_string()).or_default();
-        d = match d.succ_opt() {
-            Some(n) => n,
-            None => break,
+        d = match d.tomorrow() {
+            Ok(n) => n,
+            Err(_) => break,
         };
     }
 
@@ -499,7 +497,7 @@ pub fn report_filtered(
 ) -> Result<SavingsReport> {
     let cfg = shared.config.read().unwrap().clone();
     let tz = &cfg.display_timezone;
-    let (from, to) = period.range(tz, Utc::now())?;
+    let (from, to) = period.range(tz, Timestamp::now())?;
     let paths = repo.map(|f| {
         let mut out = Vec::new();
         if let Some(r) = cfg.resolve_repo_filter(f) {
@@ -822,8 +820,6 @@ impl SavingsReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
-
     #[test]
     fn period_parse_and_month_range() {
         assert_eq!(parse_period("today").unwrap(), Period::Today);
@@ -838,7 +834,7 @@ mod tests {
             }
         );
         let tz = DisplayTz::parse("UTC").unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 10, 14, 15, 0, 0).unwrap();
+        let now = crate::clock::utc(2026, 10, 14, 15, 0, 0);
         assert_eq!(
             Period::Today.range(&tz, now).unwrap(),
             (

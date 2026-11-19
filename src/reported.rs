@@ -2,7 +2,7 @@ use crate::clock::Clock;
 use crate::config::Provider;
 use crate::db::{Db, ProviderUsageRow};
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
@@ -17,7 +17,7 @@ pub struct UsageWindow {
     /// Grok extra paid credits in dollars (`prepaidBalance` cents / 100).
     /// Informational only — atr stays on the plan and never spends these.
     pub balance: Option<f64>,
-    pub resets_at: Option<DateTime<Utc>>,
+    pub resets_at: Option<Timestamp>,
     pub status: Option<String>,
 }
 
@@ -135,34 +135,29 @@ fn number_01(v: Option<&Value>) -> Option<f64> {
     }
 }
 
-fn unix_or_rfc(v: Option<&Value>) -> Option<DateTime<Utc>> {
+fn unix_or_rfc(v: Option<&Value>) -> Option<Timestamp> {
     let v = v?;
     if let Some(n) = v.as_i64().or_else(|| v.as_u64().map(|n| n as i64)) {
         if n > 1_000_000_000_000 {
-            return Utc.timestamp_millis_opt(n).single();
+            return Timestamp::from_millisecond(n).ok();
         }
-        return Utc.timestamp_opt(n, 0).single();
+        return Timestamp::from_second(n).ok();
     }
     if let Some(f) = v.as_f64() {
-        return Utc.timestamp_opt(f as i64, 0).single();
+        return Timestamp::from_second(f as i64).ok();
     }
     let s = v.as_str()?;
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|t| t.with_timezone(&Utc))
-        .or_else(|| {
-            s.parse::<i64>()
-                .ok()
-                .and_then(|n| Utc.timestamp_opt(n, 0).single())
-        })
+    crate::rfc3339::parse(s).or_else(|| {
+        s.parse::<i64>()
+            .ok()
+            .and_then(|n| Timestamp::from_second(n).ok())
+    })
 }
 
 pub fn store_windows(db: &Db, provider: &str, rows: &[UsageWindow], clock: &Clock) -> Result<()> {
     let now = clock.rfc3339();
     for r in rows {
-        let reset = r
-            .resets_at
-            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        let reset = r.resets_at.map(crate::rfc3339::millis);
         db.upsert_provider_usage(
             provider,
             &r.window,
@@ -226,7 +221,7 @@ pub fn reported_over(db: &Db, p: &Provider, clock: &Clock) -> Result<bool> {
     Ok(false)
 }
 
-fn window_over(row: &ProviderUsageRow, p: &Provider, now: DateTime<Utc>) -> bool {
+fn window_over(row: &ProviderUsageRow, p: &Provider, now: Timestamp) -> bool {
     if let Some(reset) = row.resets_at.as_deref().and_then(parse_rfc) {
         if reset <= now {
             return false;
@@ -250,44 +245,40 @@ fn window_over(row: &ProviderUsageRow, p: &Provider, now: DateTime<Utc>) -> bool
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResetDisplay {
-    At(DateTime<Utc>),
+    At(Timestamp),
     WindowReset,
 }
 
-fn window_length(name: &str) -> Option<ChronoDuration> {
+fn window_length(name: &str) -> Option<SignedDuration> {
     match crate::db::canonical_usage_window(name).as_str() {
-        "five_hour" | "fivehour" | "5h" => Some(ChronoDuration::hours(5)),
-        "seven_day" | "sevenday" | "7d" | "weekly" => Some(ChronoDuration::days(7)),
+        "five_hour" | "fivehour" | "5h" => Some(SignedDuration::from_hours(5)),
+        "seven_day" | "sevenday" | "7d" | "weekly" => Some(SignedDuration::from_hours(24 * 7)),
         other => crate::duration::parse_duration(other)
             .ok()
-            .and_then(|d| ChronoDuration::from_std(d).ok())
-            .filter(|d| *d > ChronoDuration::zero()),
+            .and_then(|d| SignedDuration::try_from(d).ok())
+            .filter(|d| *d > SignedDuration::ZERO),
     }
 }
 
-fn roll_reset_forward(
-    start: DateTime<Utc>,
-    period: ChronoDuration,
-    now: DateTime<Utc>,
-) -> DateTime<Utc> {
-    if period <= ChronoDuration::zero() || start > now {
+fn roll_reset_forward(start: Timestamp, period: SignedDuration, now: Timestamp) -> Timestamp {
+    if period <= SignedDuration::ZERO || start > now {
         return start;
     }
-    let Ok(elapsed) = now.signed_duration_since(start).to_std() else {
+    let Ok(elapsed) = std::time::Duration::try_from(now.duration_since(start)) else {
         return start;
     };
-    let Ok(step) = period.to_std() else {
+    let Ok(step) = std::time::Duration::try_from(period) else {
         return start;
     };
     let step_secs = step.as_secs().max(1);
     let steps = elapsed.as_secs() / step_secs + 1;
-    start + ChronoDuration::seconds((steps as i64).saturating_mul(step_secs as i64))
+    start + SignedDuration::from_secs((steps as i64).saturating_mul(step_secs as i64))
 }
 
 fn reset_display(
     window: &str,
-    resets_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+    resets_at: Option<Timestamp>,
+    now: Timestamp,
 ) -> Option<ResetDisplay> {
     let t = resets_at?;
     if t > now {
@@ -301,8 +292,8 @@ fn reset_display(
 
 fn format_reset_suffix(
     window: &str,
-    resets_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+    resets_at: Option<Timestamp>,
+    now: Timestamp,
     tz: &crate::tz::DisplayTz,
 ) -> String {
     match reset_display(window, resets_at, now) {
@@ -314,8 +305,8 @@ fn format_reset_suffix(
 
 fn json_reset_at(
     window: &str,
-    resets_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+    resets_at: Option<Timestamp>,
+    now: Timestamp,
     tz: &crate::tz::DisplayTz,
 ) -> Option<String> {
     match reset_display(window, resets_at, now) {
@@ -325,7 +316,7 @@ fn json_reset_at(
     }
 }
 
-pub fn reported_resets(db: &Db, provider: &str, now: DateTime<Utc>) -> Vec<DateTime<Utc>> {
+pub fn reported_resets(db: &Db, provider: &str, now: Timestamp) -> Vec<Timestamp> {
     let Ok(rows) = db.list_provider_usage(provider) else {
         return Vec::new();
     };
@@ -354,7 +345,7 @@ pub struct UsageWindowView {
     pub name: String,
     /// Percent of the plan window (1.0 = 1.0%), one decimal when formatted.
     pub percent_used: Option<f64>,
-    pub resets_at: Option<DateTime<Utc>>,
+    pub resets_at: Option<Timestamp>,
 }
 
 fn window_display_name(raw: &str) -> String {
@@ -434,7 +425,7 @@ fn extra_credits_usd(r: &ProviderUsageRow) -> Option<f64> {
 pub fn format_provider_usage(
     view: &ProviderUsageView,
     tz: &crate::tz::DisplayTz,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> String {
     if view.windows.is_empty() && view.extra_credits.is_none() {
         return "usage: not reported".into();
@@ -460,7 +451,7 @@ pub fn format_provider_usage(
 pub fn provider_usage_segments(
     view: &ProviderUsageView,
     tz: &crate::tz::DisplayTz,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Vec<serde_json::Value> {
     view.windows
         .iter()
@@ -494,7 +485,7 @@ pub fn format_providers_usage(
     db: &Db,
     names: &[&str],
     tz: &crate::tz::DisplayTz,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> String {
     let mut out = String::new();
     for name in names {
@@ -504,12 +495,7 @@ pub fn format_providers_usage(
     out
 }
 
-pub fn reported_json(
-    db: &Db,
-    provider: &str,
-    tz: &crate::tz::DisplayTz,
-    now: DateTime<Utc>,
-) -> Value {
+pub fn reported_json(db: &Db, provider: &str, tz: &crate::tz::DisplayTz, now: Timestamp) -> Value {
     let view = provider_usage_view(db, provider);
     reported_view_json(&view, tz, now)
 }
@@ -517,7 +503,7 @@ pub fn reported_json(
 pub fn reported_view_json(
     view: &ProviderUsageView,
     tz: &crate::tz::DisplayTz,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Value {
     let windows: Vec<Value> = view
         .windows
@@ -537,10 +523,8 @@ pub fn reported_view_json(
     })
 }
 
-fn parse_rfc(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|t| t.with_timezone(&Utc))
+fn parse_rfc(s: &str) -> Option<Timestamp> {
+    crate::rfc3339::parse(s)
 }
 
 fn due_for_probe(db: &Db, p: &Provider, clock: &Clock) -> bool {
@@ -550,7 +534,7 @@ fn due_for_probe(db: &Db, p: &Provider, clock: &Clock) -> bool {
     let Some(ts) = parse_rfc(&last) else {
         return true;
     };
-    clock.now() >= ts + chrono::Duration::from_std(p.reported_usage_interval).unwrap_or_default()
+    clock.now() >= ts + SignedDuration::try_from(p.reported_usage_interval).unwrap_or_default()
 }
 
 /// Probe Grok billing at most every `reported_usage_interval`. Failures leave
@@ -644,10 +628,8 @@ async fn probe_grok_billing_inner(cli: &Path) -> Result<UsageWindow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
-
-    fn t0() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 13, 12, 0, 0).unwrap()
+    fn t0() -> Timestamp {
+        crate::clock::utc(2026, 10, 13, 12, 0, 0)
     }
 
     const CLAUDE_SAMPLE: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1791968400,"rateLimitType":"five_hour","unifiedWindows":{"five_hour":{"utilization":0,"resetsAt":1791968400},"seven_day":{"utilization":0.03,"resetsAt":1792195200}}}}"#;
@@ -663,13 +645,13 @@ mod tests {
         assert_eq!(five.status.as_deref(), Some("allowed"));
         assert_eq!(
             five.resets_at,
-            Some(Utc.timestamp_opt(1791968400, 0).single().unwrap())
+            Some(Timestamp::from_second(1791968400).unwrap())
         );
         let week = rows.iter().find(|r| r.window == "seven_day").unwrap();
         assert!((week.utilization.unwrap() - 0.03).abs() < 1e-9);
         assert_eq!(
             week.resets_at,
-            Some(Utc.timestamp_opt(1792195200, 0).single().unwrap())
+            Some(Timestamp::from_second(1792195200).unwrap())
         );
     }
 
@@ -680,7 +662,7 @@ mod tests {
         assert!((row.balance.unwrap() - 140.32).abs() < 1e-9);
         assert!((row.utilization.unwrap() - 0.01).abs() < 1e-9);
         assert_eq!(
-            row.resets_at.unwrap().to_rfc3339(),
+            crate::rfc3339::auto(row.resets_at.unwrap()),
             "2026-10-13T00:00:00+00:00"
         );
         assert_eq!(row.window, "weekly");
@@ -690,7 +672,7 @@ mod tests {
     fn stores_claude_sample_and_feeds_reset() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("s.db")).unwrap();
-        let t0 = Utc.with_ymd_and_hms(2026, 10, 13, 12, 0, 0).unwrap();
+        let t0 = crate::clock::utc(2026, 10, 13, 12, 0, 0);
         let clock = Clock::frozen(t0);
         let mut p = crate::config::Provider::test_stub("claude");
         p.reported_usage = "claude_stream".into();
@@ -731,10 +713,9 @@ mod tests {
     fn reported_over_uses_skip_at_and_status() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("s.db")).unwrap();
-        let t0 = Utc.with_ymd_and_hms(2026, 10, 13, 12, 0, 0).unwrap();
+        let t0 = crate::clock::utc(2026, 10, 13, 12, 0, 0);
         let clock = Clock::frozen(t0);
-        let reset =
-            (t0 + chrono::Duration::hours(2)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let reset = crate::rfc3339::millis(t0 + SignedDuration::from_hours(2));
         db.upsert_provider_usage(
             "claude",
             "five_hour",
@@ -780,10 +761,9 @@ mod tests {
     fn grok_skip_at_uses_plan_utilization_not_extra_credits() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("s.db")).unwrap();
-        let t0 = Utc.with_ymd_and_hms(2026, 10, 13, 12, 0, 0).unwrap();
+        let t0 = crate::clock::utc(2026, 10, 13, 12, 0, 0);
         let clock = Clock::frozen(t0);
-        let end =
-            (t0 + chrono::Duration::hours(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let end = crate::rfc3339::millis(t0 + SignedDuration::from_hours(5));
         db.upsert_provider_usage(
             "grok",
             "weekly",
@@ -811,8 +791,7 @@ mod tests {
         )
         .unwrap();
         assert!(reported_over(&db, &p, &clock).unwrap());
-        let past =
-            (t0 - chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let past = crate::rfc3339::millis(t0 - SignedDuration::from_hours(1));
         db.upsert_provider_usage(
             "grok",
             "weekly",
@@ -878,7 +857,7 @@ for line in sys.stdin:
     #[test]
     fn shared_formatter_is_identical_for_every_provider() {
         let tz = crate::tz::DisplayTz::parse("UTC").unwrap();
-        let reset = Utc.with_ymd_and_hms(2026, 10, 16, 7, 36, 0).unwrap();
+        let reset = crate::clock::utc(2026, 10, 16, 7, 36, 0);
         let plan = ProviderUsageView {
             windows: vec![UsageWindowView {
                 name: "weekly".into(),
@@ -922,7 +901,7 @@ for line in sys.stdin:
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("s.db")).unwrap();
         let now = "2026-10-13T12:00:00.000+00:00";
-        let reset_s = reset.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let reset_s = crate::rfc3339::millis(reset);
         for name in ["claude", "grok", "cursor", "codex"] {
             db.upsert_provider_usage(
                 name,
@@ -950,14 +929,14 @@ for line in sys.stdin:
     #[test]
     fn old_grok_row_formats_percent_and_dollar_credits() {
         let tz = crate::tz::DisplayTz::parse("UTC").unwrap();
-        let reset = Utc.with_ymd_and_hms(2026, 10, 16, 7, 36, 0).unwrap();
+        let reset = crate::clock::utc(2026, 10, 16, 7, 36, 0);
         let old = ProviderUsageRow {
             provider: "grok".into(),
             window: "weekly".into(),
             utilization: None,
             balance: Some(14032.0),
             credit_usage_percent: Some(1.0),
-            resets_at: Some(reset.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            resets_at: Some(crate::rfc3339::millis(reset)),
             status: None,
             updated_at: "2026-10-13T12:00:00.000+00:00".into(),
         };
@@ -973,8 +952,8 @@ for line in sys.stdin:
     #[test]
     fn formatter_dedupes_weekly_window_aliases() {
         let tz = crate::tz::DisplayTz::parse("UTC").unwrap();
-        let reset = Utc.with_ymd_and_hms(2026, 10, 16, 7, 36, 0).unwrap();
-        let reset_s = reset.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let reset = crate::clock::utc(2026, 10, 16, 7, 36, 0);
+        let reset_s = crate::rfc3339::millis(reset);
         let old = ProviderUsageRow {
             provider: "grok".into(),
             window: "usage_period_type_weekly".into(),
@@ -1008,8 +987,8 @@ for line in sys.stdin:
     fn expired_reset_rolls_known_window_or_says_window_reset() {
         let tz = crate::tz::DisplayTz::parse("Europe/Vilnius").unwrap();
         // 20:05 Vilnius (EEST, UTC+3) with a stored 5h reset at 17:10 Vilnius.
-        let now = Utc.with_ymd_and_hms(2026, 10, 14, 17, 5, 0).unwrap();
-        let past = Utc.with_ymd_and_hms(2026, 10, 14, 14, 10, 0).unwrap();
+        let now = crate::clock::utc(2026, 10, 14, 17, 5, 0);
+        let past = crate::clock::utc(2026, 10, 14, 14, 10, 0);
         let five = ProviderUsageView {
             windows: vec![UsageWindowView {
                 name: "5h".into(),
@@ -1052,12 +1031,12 @@ for line in sys.stdin:
             Some(0.0),
             None,
             None,
-            Some(&past.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            Some(&crate::rfc3339::millis(past)),
             Some("allowed"),
-            &t0().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            &crate::rfc3339::millis(t0()),
         )
         .unwrap();
         let rolled = reported_resets(&db, "claude", now);
-        assert_eq!(rolled, vec![past + ChronoDuration::hours(5)]);
+        assert_eq!(rolled, vec![past + SignedDuration::from_hours(5)]);
     }
 }

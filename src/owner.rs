@@ -7,7 +7,7 @@
 //! serve can tell a live TUI turn from a leftover CLI.
 
 use crate::db::pid_alive;
-use chrono::TimeZone;
+use jiff::tz::{AmbiguousOffset, TimeZone};
 use std::sync::OnceLock;
 
 /// `owners.kind` for `atr serve` / the user service.
@@ -91,13 +91,14 @@ pub fn epoch_from_lstart(lstart: &str) -> Option<String> {
         day_raw.to_string()
     };
     let s = format!("{wday} {mon} {day} {time} {year}");
-    let naive = chrono::NaiveDateTime::parse_from_str(&s, "%a %b %d %H:%M:%S %Y").ok()?;
-    let tz = chrono::Local;
-    let dt = tz
-        .from_local_datetime(&naive)
-        .earliest()
-        .or_else(|| tz.from_local_datetime(&naive).latest())?;
-    Some(dt.timestamp().to_string())
+    let dt = jiff::civil::DateTime::strptime("%a %b %d %H:%M:%S %Y", &s).ok()?;
+    match TimeZone::system().to_ambiguous_timestamp(dt).offset() {
+        AmbiguousOffset::Unambiguous { offset } | AmbiguousOffset::Fold { before: offset, .. } => {
+            offset.to_timestamp(dt).ok()
+        }
+        AmbiguousOffset::Gap { .. } => None,
+    }
+    .map(|t| t.as_second().to_string())
 }
 
 #[cfg(not(target_os = "linux"))]

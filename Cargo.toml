@@ -12,9 +12,8 @@ default-run = "atr"
 [dependencies]
 anyhow = "1"
 axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1"] }
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
-chrono-tz = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
+jiff = { version = "1.0.1", default-features = false, features = ["std", "tz-system", "tzdb-bundle-always"] }
 crossterm = "0.28"
 libc = "0.2"
 ratatui = "0.29"

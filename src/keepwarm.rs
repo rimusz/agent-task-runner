@@ -25,7 +25,7 @@ use crate::db::Task;
 use crate::duration::parse_duration;
 use crate::providers::{CommandSpec, ParsedEvent, UsageNumbers};
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -115,12 +115,12 @@ pub struct Candidate {
     pub session: Option<String>,
     /// Provider of the task's last finished run.
     pub last_provider: Option<String>,
-    pub last_ended: Option<DateTime<Utc>>,
+    pub last_ended: Option<Timestamp>,
     /// input + cache_read + cache_write of that run.
     pub last_prompt_tokens: u64,
     /// Pings for this session since `last_ended`.
     pub pings: u32,
-    pub last_ping_at: Option<DateTime<Utc>>,
+    pub last_ping_at: Option<Timestamp>,
     /// The latest ping found the cache cold (or failed): stop for this stretch.
     pub last_ping_cold: bool,
 }
@@ -133,7 +133,7 @@ pub enum Decision {
     Ping,
 }
 
-pub fn decide(kw: &KeepWarm, provider: &str, c: &Candidate, now: DateTime<Utc>) -> Decision {
+pub fn decide(kw: &KeepWarm, provider: &str, c: &Candidate, now: Timestamp) -> Decision {
     if !ELIGIBLE_STATUS.contains(&c.status.as_str()) {
         return Decision::Skip("status");
     }
@@ -162,10 +162,7 @@ pub fn decide(kw: &KeepWarm, provider: &str, c: &Candidate, now: DateTime<Utc>) 
         return Decision::Skip("keepwarm_max_pings reached");
     }
     let warm_at = c.last_ping_at.map_or(ended, |p| p.max(ended));
-    let idle = now
-        .signed_duration_since(warm_at)
-        .to_std()
-        .unwrap_or_default();
+    let idle = std::time::Duration::try_from(now.duration_since(warm_at)).unwrap_or_default();
     if idle >= kw.ttl {
         return Decision::Skip("cache already expired");
     }
@@ -352,10 +349,8 @@ pub async fn run_ping(cfg: &Config, provider: &Provider, task: &Task, session: &
     }
 }
 
-fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|t| t.with_timezone(&Utc))
+fn parse_ts(s: &str) -> Option<Timestamp> {
+    crate::rfc3339::parse(s)
 }
 
 /// Everything [`decide`] needs for one task, read from the DB.
@@ -380,7 +375,7 @@ pub fn candidate(shared: &Shared, task: &Task, provider: &Provider) -> Result<Ca
         c.last_prompt_tokens = tokens;
     }
     if let (Some(sid), Some(ended)) = (session.as_deref(), c.last_ended) {
-        let s = db.keepwarm_since(&task.key, &provider.name, sid, &ended.to_rfc3339())?;
+        let s = db.keepwarm_since(&task.key, &provider.name, sid, &crate::rfc3339::auto(ended))?;
         c.pings = s.count;
         c.last_ping_at = s.last_at.as_deref().and_then(parse_ts);
         c.last_ping_cold = s.last_cold;
@@ -408,7 +403,7 @@ pub async fn tick(shared: &Arc<Shared>) -> Result<u32> {
         for p in &providers {
             let kw = p.keepwarm.as_ref().expect("filtered");
             let c = candidate(shared, &task, p)?;
-            if decide(kw, &p.name, &c, Utc::now()) != Decision::Ping {
+            if decide(kw, &p.name, &c, Timestamp::now()) != Decision::Ping {
                 continue;
             }
             let sid = c.session.clone().unwrap_or_default();
@@ -454,6 +449,7 @@ pub async fn keepwarm_loop(shared: Arc<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiff::SignedDuration;
     use std::path::PathBuf;
 
     fn kw() -> KeepWarm {
@@ -462,11 +458,8 @@ mod tests {
             .unwrap()
     }
 
-    fn t(min: i64) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-11-03T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc)
-            + chrono::Duration::minutes(min)
+    fn t(min: i64) -> Timestamp {
+        crate::rfc3339::parse("2026-11-03T12:00:00Z").unwrap() + SignedDuration::from_mins(min)
     }
 
     fn idle_session() -> Candidate {

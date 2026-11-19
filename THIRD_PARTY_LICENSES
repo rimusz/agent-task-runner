@@ -4,8 +4,7 @@ This file lists the licenses of crates that atr depends on.
 
 ## Crates
 
-- `ahash` 0.8.12 — MIT OR Apache-2.0
-- `android_system_properties` 0.1.6 — MIT OR Apache-2.0
+- `allocator-api2` 0.2.21 — MIT OR Apache-2.0
 - `anstream` 1.0.0 — MIT OR Apache-2.0
 - `anstyle` 1.0.14 — MIT OR Apache-2.0
 - `anstyle-parse` 1.0.0 — MIT OR Apache-2.0
@@ -15,36 +14,46 @@ This file lists the licenses of crates that atr depends on.
 - `async-trait` 0.1.92 — MIT OR Apache-2.0
 - `atomic-waker` 1.1.2 — Apache-2.0 OR MIT
 - `atr` 0.1.1 — MIT OR Apache-2.0
-- `autocfg` 1.5.1 — Apache-2.0 OR MIT
 - `axum` 0.7.9 — MIT
 - `axum-core` 0.4.5 — MIT
 - `base64` 0.22.1 — MIT OR Apache-2.0
 - `bitflags` 2.13.2 — MIT OR Apache-2.0
 - `block-buffer` 0.10.4 — MIT OR Apache-2.0
-- `bumpalo` 3.20.3 — MIT OR Apache-2.0
 - `bytes` 1.12.1 — MIT
+- `cassowary` 0.3.0 — MIT  OR  Apache-2.0
+- `castaway` 0.2.4 — MIT
 - `cc` 1.8.0 — MIT OR Apache-2.0
 - `cfg-if` 1.0.5 — MIT OR Apache-2.0
-- `chrono` 0.4.45 — MIT OR Apache-2.0
-- `chrono-tz` 0.10.4 — MIT OR Apache-2.0
 - `clap` 4.6.7 — MIT OR Apache-2.0
 - `clap_builder` 4.6.7 — MIT OR Apache-2.0
 - `clap_derive` 4.6.7 — MIT OR Apache-2.0
 - `clap_lex` 1.1.1 — MIT OR Apache-2.0
 - `colorchoice` 1.0.5 — MIT OR Apache-2.0
+- `compact_str` 0.8.2 — MIT
 - `core-foundation-sys` 0.8.7 — MIT OR Apache-2.0
 - `cpufeatures` 0.2.17 — MIT OR Apache-2.0
+- `crossbeam-deque` 0.8.8 — MIT OR Apache-2.0
+- `crossbeam-epoch` 0.9.21 — MIT OR Apache-2.0
+- `crossbeam-utils` 0.8.23 — MIT OR Apache-2.0
+- `crossterm` 0.28.1 — MIT
+- `crossterm_winapi` 0.9.1 — MIT
 - `crypto-common` 0.1.7 — MIT OR Apache-2.0
+- `darling` 0.24.1 — MIT
+- `darling_core` 0.24.1 — MIT
+- `darling_macro` 0.24.1 — MIT
 - `digest` 0.10.7 — MIT OR Apache-2.0
 - `dirs` 6.0.0 — MIT OR Apache-2.0
 - `dirs-sys` 0.5.0 — MIT OR Apache-2.0
 - `displaydoc` 0.2.7 — MIT OR Apache-2.0
+- `either` 1.19.0 — MIT OR Apache-2.0
 - `equivalent` 1.0.2 — Apache-2.0 OR MIT
 - `errno` 0.3.14 — MIT OR Apache-2.0
 - `fallible-iterator` 0.3.0 — MIT OR Apache-2.0
 - `fallible-streaming-iterator` 0.1.9 — MIT OR Apache-2.0
 - `fastrand` 2.5.0 — Apache-2.0 OR MIT
 - `find-msvc-tools` 0.1.14 — MIT OR Apache-2.0
+- `foldhash` 0.1.5 — Zlib
+- `foldhash` 0.2.0 — Zlib
 - `form_urlencoded` 1.2.2 — MIT OR Apache-2.0
 - `futures-core` 0.3.34 — MIT OR Apache-2.0
 - `futures-task` 0.3.34 — MIT OR Apache-2.0
@@ -52,9 +61,9 @@ This file lists the licenses of crates that atr depends on.
 - `generic-array` 0.14.7 — MIT
 - `getrandom` 0.2.17 — MIT OR Apache-2.0
 - `getrandom` 0.4.3 — MIT OR Apache-2.0
-- `hashbrown` 0.14.5 — MIT OR Apache-2.0
+- `hashbrown` 0.15.5 — MIT OR Apache-2.0
 - `hashbrown` 0.17.1 — MIT OR Apache-2.0
-- `hashlink` 0.9.1 — MIT OR Apache-2.0
+- `hashlink` 0.12.2 — MIT OR Apache-2.0
 - `heck` 0.5.0 — MIT OR Apache-2.0
 - `http` 1.5.0 — MIT OR Apache-2.0
 - `http-body` 1.1.0 — MIT
@@ -63,8 +72,6 @@ This file lists the licenses of crates that atr depends on.
 - `httpdate` 1.0.3 — MIT OR Apache-2.0
 - `hyper` 1.12.0 — MIT
 - `hyper-util` 0.1.21 — MIT
-- `iana-time-zone` 0.1.65 — MIT OR Apache-2.0
-- `iana-time-zone-haiku` 0.1.2 — MIT OR Apache-2.0
 - `icu_collections` 2.3.0 — Unicode-3.0
 - `icu_locale_core` 2.3.0 — Unicode-3.0
 - `icu_normalizer` 2.3.0 — Unicode-3.0
@@ -72,51 +79,73 @@ This file lists the licenses of crates that atr depends on.
 - `icu_properties` 2.3.0 — Unicode-3.0
 - `icu_properties_data` 2.3.0 — Unicode-3.0
 - `icu_provider` 2.3.1 — Unicode-3.0
+- `ident_case` 1.0.1 — MIT OR Apache-2.0
 - `idna` 1.1.0 — MIT OR Apache-2.0
 - `idna_adapter` 1.2.2 — Apache-2.0 OR MIT
 - `indexmap` 2.14.2 — Apache-2.0 OR MIT
+- `indoc` 2.0.8 — MIT OR Apache-2.0
+- `instability` 0.3.14 — MIT
 - `is_terminal_polyfill` 1.70.2 — MIT OR Apache-2.0
+- `itertools` 0.13.0 — MIT OR Apache-2.0
 - `itoa` 1.0.18 — MIT OR Apache-2.0
-- `js-sys` 0.3.106 — MIT OR Apache-2.0
+- `jiff` 1.0.1 — Unlicense OR MIT
+- `jiff-core` 1.0.1 — Unlicense OR MIT
+- `jiff-tzdb` 1.0.0 — Unlicense OR MIT
 - `lazy_static` 1.5.1 — MIT OR Apache-2.0
 - `libc` 0.2.190 — MIT OR Apache-2.0
 - `libredox` 0.1.25 — MIT
-- `libsqlite3-sys` 0.30.1 — MIT
+- `libsqlite3-sys` 0.39.1 — MIT
+- `linux-raw-sys` 0.4.15 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - `linux-raw-sys` 0.12.1 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - `litemap` 0.8.3 — Unicode-3.0
+- `lock_api` 0.4.14 — MIT OR Apache-2.0
 - `log` 0.4.34 — MIT OR Apache-2.0
+- `lru` 0.12.5 — MIT
 - `matchers` 0.2.0 — MIT
 - `matchit` 0.7.3 — MIT AND BSD-3-Clause
 - `memchr` 2.8.3 — Unlicense OR MIT
 - `mime` 0.3.17 — MIT OR Apache-2.0
 - `mio` 1.2.4 — MIT
+- `ntapi` 0.4.3 — Apache-2.0 OR MIT
 - `nu-ansi-term` 0.50.3 — MIT
-- `num-traits` 0.2.19 — MIT OR Apache-2.0
 - `once_cell` 1.21.4 — MIT OR Apache-2.0
 - `once_cell_polyfill` 1.70.2 — MIT OR Apache-2.0
 - `option-ext` 0.2.0 — MPL-2.0
+- `parking_lot` 0.12.5 — MIT OR Apache-2.0
+- `parking_lot_core` 0.9.12 — MIT OR Apache-2.0
+- `paste` 1.0.15 — MIT OR Apache-2.0
 - `percent-encoding` 2.3.2 — MIT OR Apache-2.0
-- `phf` 0.12.1 — MIT
-- `phf_shared` 0.12.1 — MIT
 - `pin-project-lite` 0.2.17 — Apache-2.0 OR MIT
 - `pkg-config` 0.3.34 — MIT OR Apache-2.0
+- `portable-atomic` 1.15.0 — Apache-2.0 OR MIT
+- `portable-atomic-util` 0.2.8 — Apache-2.0 OR MIT
 - `potential_utf` 0.1.6 — Unicode-3.0
 - `proc-macro2` 1.0.107 — MIT OR Apache-2.0
 - `quote` 1.0.47 — MIT OR Apache-2.0
 - `r-efi` 6.0.0 — MIT OR Apache-2.0 OR LGPL-2.1-or-later
+- `ratatui` 0.29.0 — MIT
+- `rayon` 1.12.0 — MIT OR Apache-2.0
+- `rayon-core` 1.13.0 — MIT OR Apache-2.0
+- `redox_syscall` 0.5.18 — MIT
 - `redox_users` 0.5.3 — MIT
 - `regex-automata` 0.4.18 — MIT OR Apache-2.0
 - `regex-syntax` 0.8.11 — MIT OR Apache-2.0
 - `ring` 0.17.14 — Apache-2.0 AND ISC
-- `rusqlite` 0.32.1 — MIT
+- `rsqlite-vfs` 0.2.0 — MIT
+- `rusqlite` 0.41.1 — MIT
+- `rustix` 0.38.44 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - `rustix` 1.1.5 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 - `rustls` 0.23.46 — Apache-2.0 OR ISC OR MIT
 - `rustls-pki-types` 1.15.1 — MIT OR Apache-2.0
-- `rustls-webpki` 0.103.15 — ISC
+- `rustls-webpki` 0.103.16 — ISC
 - `rustversion` 1.0.23 — MIT OR Apache-2.0
+- `ryu` 1.0.23 — Apache-2.0 OR BSL-1.0
+- `scopeguard` 1.2.0 — MIT OR Apache-2.0
+- `semver` 1.0.28 — MIT OR Apache-2.0
 - `serde` 1.0.229 — MIT OR Apache-2.0
 - `serde_core` 1.0.229 — MIT OR Apache-2.0
 - `serde_derive` 1.0.229 — MIT OR Apache-2.0
+- `serde_ignored` 0.1.14 — MIT OR Apache-2.0
 - `serde_json` 1.0.154 — MIT OR Apache-2.0
 - `serde_path_to_error` 0.1.20 — MIT OR Apache-2.0
 - `serde_spanned` 0.6.9 — MIT OR Apache-2.0
@@ -124,24 +153,30 @@ This file lists the licenses of crates that atr depends on.
 - `sharded-slab` 0.1.7 — MIT
 - `shellexpand` 3.1.2 — MIT OR Apache-2.0
 - `shlex` 2.0.1 — MIT OR Apache-2.0
+- `signal-hook` 0.3.18 — Apache-2.0 OR MIT
+- `signal-hook-mio` 0.2.5 — MIT OR Apache-2.0
 - `signal-hook-registry` 1.4.8 — MIT OR Apache-2.0
-- `siphasher` 1.0.4 — MIT OR Apache-2.0
 - `slab` 0.4.12 — MIT
 - `smallvec` 1.16.3 — MIT OR Apache-2.0
 - `socket2` 0.6.5 — MIT OR Apache-2.0
+- `sqlite-wasm-rs` 0.6.2 — MIT
 - `stable_deref_trait` 1.2.1 — MIT OR Apache-2.0
+- `static_assertions` 1.1.0 — MIT OR Apache-2.0
 - `strsim` 0.11.1 — MIT
+- `strum` 0.26.3 — MIT
+- `strum_macros` 0.26.4 — MIT
 - `subtle` 2.6.1 — BSD-3-Clause
 - `syn` 2.0.119 — MIT OR Apache-2.0
 - `syn` 3.0.9 — MIT OR Apache-2.0
 - `sync_wrapper` 1.0.2 — Apache-2.0
 - `synstructure` 0.14.0 — MIT
+- `sysinfo` 0.33.1 — MIT
 - `tempfile` 3.27.0 — MIT OR Apache-2.0
 - `thiserror` 2.0.21 — MIT OR Apache-2.0
 - `thiserror-impl` 2.0.21 — MIT OR Apache-2.0
 - `thread_local` 1.1.10 — MIT OR Apache-2.0
 - `tinystr` 0.8.4 — Unicode-3.0
-- `tokio` 1.53.2 — MIT
+- `tokio` 1.54.1 — MIT
 - `tokio-macros` 2.7.2 — MIT
 - `toml` 0.8.23 — MIT OR Apache-2.0
 - `toml_datetime` 0.6.11 — MIT OR Apache-2.0
@@ -157,6 +192,10 @@ This file lists the licenses of crates that atr depends on.
 - `tracing-subscriber` 0.3.23 — MIT
 - `typenum` 1.20.1 — MIT OR Apache-2.0
 - `unicode-ident` 1.0.27 — (MIT OR Apache-2.0) AND Unicode-3.0
+- `unicode-segmentation` 1.13.3 — MIT OR Apache-2.0
+- `unicode-truncate` 1.1.0 — MIT OR Apache-2.0
+- `unicode-width` 0.1.14 — MIT OR Apache-2.0
+- `unicode-width` 0.2.0 — MIT OR Apache-2.0
 - `untrusted` 0.9.0 — ISC
 - `ureq` 2.12.1 — MIT OR Apache-2.0
 - `url` 2.5.8 — MIT OR Apache-2.0
@@ -165,18 +204,17 @@ This file lists the licenses of crates that atr depends on.
 - `vcpkg` 0.2.15 — MIT OR Apache-2.0
 - `version_check` 0.9.5 — MIT OR Apache-2.0
 - `wasi` 0.11.1+wasi-snapshot-preview1 — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
-- `wasm-bindgen` 0.2.129 — MIT OR Apache-2.0
-- `wasm-bindgen-macro` 0.2.129 — MIT OR Apache-2.0
-- `wasm-bindgen-macro-support` 0.2.129 — MIT OR Apache-2.0
-- `wasm-bindgen-shared` 0.2.129 — MIT OR Apache-2.0
 - `webpki-roots` 0.26.11 — CDLA-Permissive-2.0
-- `webpki-roots` 1.0.9 — CDLA-Permissive-2.0
-- `windows-core` 0.62.2 — MIT OR Apache-2.0
-- `windows-implement` 0.60.2 — MIT OR Apache-2.0
-- `windows-interface` 0.59.3 — MIT OR Apache-2.0
+- `webpki-roots` 1.0.10 — CDLA-Permissive-2.0
+- `winapi` 0.3.9 — MIT OR Apache-2.0
+- `winapi-i686-pc-windows-gnu` 0.4.0 — MIT OR Apache-2.0
+- `winapi-x86_64-pc-windows-gnu` 0.4.0 — MIT OR Apache-2.0
+- `windows` 0.57.0 — MIT OR Apache-2.0
+- `windows-core` 0.57.0 — MIT OR Apache-2.0
+- `windows-implement` 0.57.0 — MIT OR Apache-2.0
+- `windows-interface` 0.57.0 — MIT OR Apache-2.0
 - `windows-link` 0.2.1 — MIT OR Apache-2.0
-- `windows-result` 0.4.1 — MIT OR Apache-2.0
-- `windows-strings` 0.5.1 — MIT OR Apache-2.0
+- `windows-result` 0.1.2 — MIT OR Apache-2.0
 - `windows-sys` 0.52.0 — MIT OR Apache-2.0
 - `windows-sys` 0.61.2 — MIT OR Apache-2.0
 - `windows-targets` 0.52.6 — MIT OR Apache-2.0
@@ -192,7 +230,6 @@ This file lists the licenses of crates that atr depends on.
 - `writeable` 0.6.4 — Unicode-3.0
 - `yoke` 0.8.3 — Unicode-3.0
 - `yoke-derive` 0.8.4 — Unicode-3.0
-- `zerocopy` 0.8.62 — BSD-2-Clause OR Apache-2.0 OR MIT
 - `zerofrom` 0.1.8 — Unicode-3.0
 - `zerofrom-derive` 0.1.8 — Unicode-3.0
 - `zeroize` 1.9.1 — Apache-2.0 OR MIT
@@ -205,51 +242,28 @@ This file lists the licenses of crates that atr depends on.
 
 ### MIT License
 
-===============================================================================
+# MIT License
 
-Copyright (c) 2016 Alex Crichton
-Copyright (c) 2017 The Tokio Authors
+Copyright (c) 2020 Stephen M. Coakley
+Copyright (c) The Ratatui Developers
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-	http://www.apache.org/licenses/LICENSE-2.0
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
-===============================================================================
-
-Copyright (c) 2016 Alex Crichton
-Copyright (c) 2017 The Tokio Authors
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 
 ### ISC License
@@ -706,6 +720,28 @@ agreement.
 of Data, including for example machine learning models and models'
 insights.
 
+
+### zlib License
+
+Copyright (c) 2024 Orson Peters
+
+This software is provided 'as-is', without any express or implied warranty. In
+no event will the authors be held liable for any damages arising from the use of
+this software.
+
+Permission is granted to anyone to use this software for any purpose, including
+commercial applications, and to alter it and redistribute it freely, subject to
+the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not claim
+    that you wrote the original software. If you use this software in a product,
+    an acknowledgment in the product documentation would be appreciated but is
+    not required.
+
+2. Altered source versions must be plainly marked as such, and must not be
+    misrepresented as being the original software.
+
+3. This notice may not be removed or altered from any source distribution.
 
 ### Mozilla Public License 2.0
 

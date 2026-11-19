@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::providers::check_version;
+use jiff::Timestamp;
 use serde::Serialize;
 use std::net::TcpListener;
 use std::path::Path;
@@ -779,7 +780,7 @@ async fn github_token_api_check(checks: &mut Vec<Check>, cfg: &Config, config_pa
             push(checks, &name, Status::Warn, "probe panicked".into(), None);
             continue;
         };
-        let (st, detail, hint) = token_api_verdict(&label, &user, &repo_res, chrono::Utc::now());
+        let (st, detail, hint) = token_api_verdict(&label, &user, &repo_res, Timestamp::now());
         push(checks, &name, st, detail, hint);
     }
 }
@@ -788,7 +789,7 @@ fn token_api_verdict(
     key: &str,
     user: &crate::gh_token::Probe,
     repos: &[(String, u16)],
-    now: chrono::DateTime<chrono::Utc>,
+    now: Timestamp,
 ) -> (Status, String, Option<String>) {
     let rotate = Some(format!(
         "create a new fine-grained PAT and set {key} in ~/.config/atr/shadow.env, then restart atr"
@@ -1227,7 +1228,7 @@ fn telegram_check(checks: &mut Vec<Check>, cfg: &Config, config_path: &Path) {
         push(checks, "telegram", Status::Ok, "disabled".into(), None);
         return;
     }
-    let h = crate::telegram_health::status_json(cfg, config_path, chrono::Utc::now());
+    let h = crate::telegram_health::status_json(cfg, config_path, Timestamp::now());
     let (st, hint) = match h["level"].as_str().unwrap_or("unknown") {
         "fail" => (
             Status::Fail,
@@ -1297,6 +1298,7 @@ fn telegram_check(checks: &mut Vec<Check>, cfg: &Config, config_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiff::SignedDuration;
 
     #[test]
     fn format_one_line_per_check_and_problem_count() {
@@ -1738,7 +1740,9 @@ cli = "/bin/true"
             status,
             login: Some("me".into()),
             expires_at: days.map(|d| {
-                chrono::Utc::now() + chrono::Duration::days(d) + chrono::Duration::hours(1)
+                Timestamp::now()
+                    + SignedDuration::from_hours(24 * d)
+                    + SignedDuration::from_hours(1)
             }),
             error: None,
         }
@@ -1746,7 +1750,7 @@ cli = "/bin/true"
 
     #[test]
     fn token_api_verdicts() {
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         let ok = vec![("o/r".to_string(), 200)];
         assert_eq!(
             token_api_verdict("ATR_GH_TOKEN", &probe(200, Some(60)), &ok, now).0,

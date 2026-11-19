@@ -2,32 +2,49 @@
 //!
 //! `millis` is the canonical stored form (`…sssZ`, always three fractional
 //! digits, truncated). `secs` is the whole-second `Z` form used for day-range
-//! SQL bounds. `auto` matches `DateTime::to_rfc3339` (`+00:00`, fractional
-//! digits in groups of three). Do not format an instant with `Display`.
+//! SQL bounds. `auto` is the numeric-offset form (`+00:00`, fractional digits
+//! in groups of three). Do not format an instant with `Display`.
 
-use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
+use jiff::fmt::temporal::{DateTimePrinter, Pieces};
+use jiff::tz::{Offset, TimeZone};
+use jiff::{Timestamp, ZonedDateTime};
 
-pub fn millis(t: DateTime<Utc>) -> String {
-    t.to_rfc3339_opts(SecondsFormat::Millis, true)
+const MILLIS: DateTimePrinter = DateTimePrinter::new().precision(Some(3));
+const SECS: DateTimePrinter = DateTimePrinter::new().precision(Some(0));
+
+pub fn millis(t: Timestamp) -> String {
+    MILLIS.timestamp_to_string(&t)
 }
 
-pub fn secs(t: DateTime<Utc>) -> String {
-    t.to_rfc3339_opts(SecondsFormat::Secs, true)
+pub fn secs(t: Timestamp) -> String {
+    SECS.timestamp_to_string(&t)
 }
 
-pub fn auto(t: DateTime<Utc>) -> String {
-    t.to_rfc3339()
+pub fn auto(t: Timestamp) -> String {
+    let ns = t.subsec_nanosecond().unsigned_abs();
+    let p = if ns == 0 {
+        0
+    } else if ns % 1_000_000 == 0 {
+        3
+    } else if ns % 1_000 == 0 {
+        6
+    } else {
+        9
+    };
+    DateTimePrinter::new()
+        .precision(Some(p))
+        .timestamp_with_offset_to_string(&t, Offset::UTC)
 }
 
-pub fn parse(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|t| t.with_timezone(&Utc))
+pub fn parse(s: &str) -> Option<Timestamp> {
+    s.parse().ok()
 }
 
-/// Keeps the string's own offset (chrono `DateTime<FixedOffset>`).
-pub fn parse_fixed(s: &str) -> Option<DateTime<FixedOffset>> {
-    DateTime::parse_from_rfc3339(s).ok()
+/// Keeps the string's own offset (`ZonedDateTime` in that fixed zone).
+pub fn parse_fixed(s: &str) -> Option<ZonedDateTime> {
+    let t: Timestamp = s.parse().ok()?;
+    let off = Pieces::parse(s).ok()?.to_numeric_offset()?;
+    Some(t.to_zoned_datetime(TimeZone::fixed(off)))
 }
 
 #[cfg(test)]

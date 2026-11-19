@@ -11,6 +11,7 @@ use crate::app::Shared;
 use crate::config::{Config, Provider};
 use crate::db::{Db, Lesson, NewLesson, Task};
 use anyhow::{bail, Context, Result};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::Value;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -321,8 +322,8 @@ pub fn block_for_task(
 }
 
 fn cutoff(ttl: std::time::Duration) -> String {
-    let d = chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::days(30));
-    (chrono::Utc::now() - d).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    let d = SignedDuration::try_from(ttl).unwrap_or(SignedDuration::from_hours(24 * 30));
+    crate::rfc3339::millis(Timestamp::now() - d)
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,8 +1142,7 @@ mod tests {
         let ttl = std::time::Duration::from_secs(30 * 86_400);
         assert_eq!(db.expire_lessons(&cutoff(ttl)).unwrap(), 0, "all fresh");
         // A cutoff in the future makes every lesson stale: only pinned survives.
-        let future = (chrono::Utc::now() + chrono::Duration::days(1))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let future = crate::rfc3339::millis(Timestamp::now() + SignedDuration::from_hours(24));
         assert_eq!(db.expire_lessons(&future).unwrap(), 2);
         let left: Vec<i64> = db
             .list_lessons(Some("app"))

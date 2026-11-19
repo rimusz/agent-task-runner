@@ -1061,7 +1061,7 @@ pub async fn warn_versions(providers: &[Provider]) {
 
 pub async fn warn_versions_recorded(providers: &[Provider], config_path: Option<&std::path::Path>) {
     let mut rec = serde_json::Map::new();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = crate::rfc3339::auto(jiff::Timestamp::now());
     for p in providers {
         if !p.enabled {
             continue;
