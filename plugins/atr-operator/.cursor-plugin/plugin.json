@@ -1,0 +1,33 @@
+{
+  "name": "atr-operator",
+  "displayName": "atr operator",
+  "description": "Operate atr (agent task runner) from Cursor: local stdio MCP or remote HTTP MCP, plus the atr skill.",
+  "author": { "name": "rimusz" },
+  "homepage": "https://github.com/rimusz/agent-task-runner",
+  "repository": "https://github.com/rimusz/agent-task-runner",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["atr", "mcp", "agent-task-runner", "skills"],
+  "category": "developer-tools",
+  "tags": ["atr", "mcp", "agents"],
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json",
+  "variables": {
+    "type": "object",
+    "properties": {
+      "ATR_MCP_HOST": {
+        "type": "string",
+        "title": "atr host",
+        "description": "Hostname that serves atr's /mcp over HTTPS, for example ai-stack.tailxxxx.ts.net from Tailscale Serve. No https:// and no /mcp; add :port only if HTTPS is not on 443.",
+        "minLength": 1
+      },
+      "ATR_MCP_TOKEN": {
+        "type": "string",
+        "title": "atr MCP token (secret)",
+        "description": "Bearer token from ~/.config/atr/mcp.token (or ATR_MCP_TOKEN) on the atr host. Secret: Cursor stores it and never shows it back.",
+        "writeOnly": true,
+        "format": "password",
+        "minLength": 1
+      }
+    }
+  }
+}

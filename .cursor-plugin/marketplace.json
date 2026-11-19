@@ -1,0 +1,14 @@
+{
+  "name": "agent-task-runner",
+  "owner": { "name": "rimusz" },
+  "metadata": {
+    "description": "Cursor plugins for atr (agent task runner)."
+  },
+  "plugins": [
+    {
+      "name": "atr-operator",
+      "source": "plugins/atr-operator",
+      "description": "Operate atr from Cursor: local stdio MCP or remote HTTP MCP, plus the atr skill."
+    }
+  ]
+}

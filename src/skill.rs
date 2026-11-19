@@ -117,6 +117,7 @@ pub fn install_default() -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn operator_plugin_skill_matches_repo_skill() {
@@ -172,6 +173,88 @@ mod tests {
             atr.get("headers").is_none(),
             "stdio mcp.json must not carry HTTP headers"
         );
+    }
+
+    #[test]
+    fn operator_plugin_remote_mcp_and_cursor_manifest() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let plugin: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{root}/plugins/atr-operator/plugin.json"))
+                .expect("plugin.json"),
+        )
+        .expect("plugin.json json");
+        let mcp_raw = std::fs::read_to_string(format!("{root}/plugins/atr-operator/mcp.json"))
+            .expect("mcp.json");
+        let mcp: serde_json::Value = serde_json::from_str(&mcp_raw).expect("mcp.json json");
+        let servers = mcp["mcpServers"].as_object().expect("mcpServers object");
+        let keys: BTreeSet<String> = servers.keys().cloned().collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["atr".to_string(), "atr-remote".to_string()])
+        );
+
+        let remote = &servers["atr-remote"];
+        assert_eq!(remote["type"], "streamable-http");
+        assert_eq!(remote["url"], "https://${ATR_MCP_HOST}/mcp");
+        assert_eq!(
+            remote["headers"],
+            serde_json::json!({"Authorization": "Bearer ${ATR_MCP_TOKEN}"})
+        );
+        assert!(remote.get("env").is_none(), "atr-remote must not set env");
+
+        let cursor: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!(
+                "{root}/plugins/atr-operator/.cursor-plugin/plugin.json"
+            ))
+            .expect("cursor plugin.json"),
+        )
+        .expect("cursor plugin.json json");
+        assert!(cursor.get("$schema").is_none());
+        for key in ["name", "license", "homepage", "repository"] {
+            assert_eq!(cursor[key], plugin[key], "{key}");
+        }
+        assert_eq!(cursor["author"]["name"], "rimusz");
+        assert!(cursor["author"].get("url").is_none());
+        assert_eq!(cursor["mcpServers"], "./mcp.json");
+        assert_eq!(cursor["skills"], "./skills/");
+        assert_eq!(cursor["variables"]["type"], "object");
+        assert_eq!(plugin.get("version"), cursor.get("version"));
+
+        let props = cursor["variables"]["properties"]
+            .as_object()
+            .expect("variables.properties");
+        assert_eq!(props["ATR_MCP_TOKEN"]["writeOnly"], true);
+        assert_eq!(props["ATR_MCP_TOKEN"]["format"], "password");
+        assert!(props["ATR_MCP_HOST"].get("writeOnly").is_none());
+
+        let mut placeholders = BTreeSet::new();
+        for part in mcp_raw.split("${").skip(1) {
+            let Some((name, _)) = part.split_once('}') else {
+                continue;
+            };
+            if name.is_empty() || name.contains(':') {
+                continue;
+            }
+            placeholders.insert(name.to_string());
+        }
+        let declared: BTreeSet<String> = props.keys().cloned().collect();
+        assert_eq!(placeholders, declared);
+
+        let market: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{root}/.cursor-plugin/marketplace.json"))
+                .expect("marketplace.json"),
+        )
+        .expect("marketplace.json json");
+        assert_eq!(market["name"], "agent-task-runner");
+        assert_eq!(market["plugins"][0]["name"], "atr-operator");
+        let source = market["plugins"][0]["source"]
+            .as_str()
+            .expect("plugins[0].source");
+        assert_eq!(source, "plugins/atr-operator");
+        let manifest = Path::new(root)
+            .join(source)
+            .join(".cursor-plugin/plugin.json");
+        assert!(manifest.is_file(), "{}", manifest.display());
     }
 
     #[test]
