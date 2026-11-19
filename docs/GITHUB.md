@@ -90,6 +90,8 @@ Health monitoring:
 - `atr doctor` → `github token api`: token present, valid (login), access to
   each watched repo, days to expiry (warn under 14, FAIL on 401).
 - `atr status` and the dashboard show the state (red = failing, amber = expiring).
+  When GitHub is not configured, the dashboard omits GitHub (no badge or
+  degraded health); `atr status` omits the `github auth:` line.
 
 More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#5-github-token).
 
@@ -128,7 +130,9 @@ already in its environment, run `atr service restart` after rotating it.
 
 Auth alerts, recovery notices, expiry warnings, `github-auth.json`,
 `atr status`, the dashboard banner and `atr doctor` (`github token api <owner>`)
-are all per token and name the owner and env var, never the value.
+are all per token and name the owner and env var, never the value. The
+dashboard GitHub badge/banner is only shown when GitHub is configured and a
+check has run; not-configured is omitted, not treated as degraded.
 
 ## 2. Token in `shadow.env`
 

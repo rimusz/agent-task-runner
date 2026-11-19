@@ -61,15 +61,23 @@ still read):
 `atr status` (or `--json`) shows providers, then tasks grouped as failing,
 running, waiting, and done (finished rows show the last outcome or `done`,
 not the stored `waiting` label), plus a
-`github auth:` line (`ok`, `warn`, `FAIL`). The dashboard
+`github auth:` line (`ok`, `warn`, `FAIL`) when GitHub intake or shadow is
+on. That line is omitted when GitHub is not configured. The dashboard
 (`atr ui`, or your Tailscale Serve URL) shows a **red banner** when GitHub auth
 is failing and an **amber banner** when the token expires within 14 days.
 Both read `~/.config/atr/github-auth.json`, which the running service updates.
+When GitHub is not configured, or is configured but has no auth check yet,
+the dashboard omits GitHub entirely (no badge, banner, or row) and does **not**
+mark overall health degraded for that. A real GitHub failure (configured and
+erroring) still shows as red/amber.
 
 The dashboard header shows `atr v<version> (<sha>)`, today's runs and success
-rate, and a compact health strip: `GitHub ok`, `Telegram ok`, `N CLIs ok` and
+rate, and a compact health strip: `GitHub ok` (only when GitHub is connected),
+`Telegram ok`, `N CLIs ok` and
 uptime, with details (token expiry, CLI versions) on hover. A badge expands to
-show its problem only when it is amber or red (expiring token, missing CLI). Repos lists watched repos (`direct`) and the shadow
+show its problem only when it is amber or red (expiring token, missing CLI).
+Repos, Running, Queued and Finished tables scroll inside the card after about
+five rows; column headers stay visible. Repos lists watched repos (`direct`) and the shadow
 repo (`shadow`), with the token env var NAME used. The Telegram assistant is
 not a repo: it has its own line (`Telegram assistant: provider …, workspace …,
 N chats / M runs today, last activity …`), also in `atr status` and

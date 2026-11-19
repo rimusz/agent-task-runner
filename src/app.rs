@@ -838,7 +838,7 @@ impl Shared {
             "timezone": cfg.display_timezone.label,
             "quota_reset": top_reset.map(|t| cfg.display_timezone.format(t)),
             "intake_paused": self.intake_paused.load(Ordering::Relaxed),
-            "github_auth": crate::gh_token::status_json(&self.config_path, chrono::Utc::now()),
+            "github_auth": crate::gh_token::status_json(&cfg, &self.config_path, chrono::Utc::now()),
             "telegram_health": crate::telegram_health::status_json(&cfg, &self.config_path, chrono::Utc::now()),
             "running": inflight.keys().cloned().collect::<Vec<_>>(),
             "providers": providers,
@@ -1357,29 +1357,32 @@ pub fn format_status_table_opts(shared: &Shared, cli: &StatusCli) -> String {
         }
     }
     if let Some(ga) = v.get("github_auth") {
-        let tag = |level: &str| match level {
-            "fail" => "FAIL",
-            "warn" => "warn",
-            "ok" => "ok",
-            _ => "?",
-        };
-        let toks = ga
-            .get("tokens")
-            .and_then(|t| t.as_array())
-            .cloned()
-            .unwrap_or_default();
-        if toks.is_empty() {
-            let level = ga
-                .get("level")
-                .and_then(|x| x.as_str())
-                .unwrap_or("unknown");
-            let msg = ga.get("message").and_then(|x| x.as_str()).unwrap_or("");
-            out.push_str(&format!("github auth: {}  {msg}\n", tag(level)));
-        }
-        for t in toks {
-            let level = t.get("level").and_then(|x| x.as_str()).unwrap_or("unknown");
-            let msg = t.get("message").and_then(|x| x.as_str()).unwrap_or("");
-            out.push_str(&format!("github auth: {}  {msg}\n", tag(level)));
+        let level = ga
+            .get("level")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown");
+        // `off` = GitHub not configured: omit the line (same as telegram).
+        if level != "off" {
+            let tag = |level: &str| match level {
+                "fail" => "FAIL",
+                "warn" => "warn",
+                "ok" => "ok",
+                _ => "?",
+            };
+            let toks = ga
+                .get("tokens")
+                .and_then(|t| t.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if toks.is_empty() {
+                let msg = ga.get("message").and_then(|x| x.as_str()).unwrap_or("");
+                out.push_str(&format!("github auth: {}  {msg}\n", tag(level)));
+            }
+            for t in toks {
+                let level = t.get("level").and_then(|x| x.as_str()).unwrap_or("unknown");
+                let msg = t.get("message").and_then(|x| x.as_str()).unwrap_or("");
+                out.push_str(&format!("github auth: {}  {msg}\n", tag(level)));
+            }
         }
     }
     let providers = v
@@ -1865,6 +1868,45 @@ cli = "/bin/true"
         assert!(text.contains("cache headline="), "{text}");
         assert!(!text.trim_start().starts_with('{'), "{text}");
         assert!(text.contains("waiting (1)"), "{text}");
+        assert!(
+            !text.contains("github auth:"),
+            "GitHub not configured must not appear in status text:\n{text}"
+        );
+        std::mem::forget(dir);
+    }
+
+    #[test]
+    fn status_table_github_auth_when_configured_and_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("p.md"), "p\n").unwrap();
+        let cfg = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+display_timezone = "UTC"
+[github]
+enabled = true
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "/bin/true"
+"#,
+            db = dir.path().join("s.db").display(),
+            root = dir.path().display(),
+        );
+        std::fs::write(
+            dir.path().join("github-auth.json"),
+            r#"{"state":"failing","failing_since":"x","last_error":"401"}"#,
+        )
+        .unwrap();
+        let raw: crate::config::RawConfig = toml::from_str(&cfg).unwrap();
+        let parsed = crate::config::Config::from_raw(raw).unwrap();
+        let shared = Shared::from_config(dir.path().join("c.toml"), parsed).unwrap();
+        let text = format_status_table(&shared, None);
+        assert!(text.contains("github auth: FAIL"), "{text}");
         std::mem::forget(dir);
     }
 
