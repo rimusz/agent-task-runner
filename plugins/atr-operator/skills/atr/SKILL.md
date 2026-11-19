@@ -62,7 +62,7 @@ Operators with a shell use the CLI; it shares the same code paths. `atr pause`/`
 | `/task <key>` | `atr tasks <key>` | `GET /tasks/<key>` |
 | `/add [repo or host] [--provider P] [--model M] [--agent A] [--check-only] <prompt>` | `atr add [--repo R] [--provider P] [--model M] [--check-only] <prompt>` | `POST /tasks` |
 | `/assistant [provider]` | none (per-chat default) | none |
-| `/cancel <key> [force]` | `atr cancel <key> [--force]` | `POST /tasks/<key>/cancel` |
+| `/cancel <key> [force]` | `atr cancel <key> [--force]` (kills the CLI process group/session, including `nohup` / background children that kept that pgid or sid) | `POST /tasks/<key>/cancel` |
 | `/retry <key>` | `atr retry <key>` (fresh attempt: last consumed prompt is unconsumed so the scheduler can dispatch, wall clock restarts, provider re-picked from current config unless strictly pinned; on a `held` task also clears the hold and `after` list) | `POST /tasks/<key>/retry` |
 | `/pause` | `atr pause` | `POST /intake/pause` |
 | `/resume` | `atr resume` | `POST /intake/resume` |

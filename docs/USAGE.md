@@ -150,9 +150,10 @@ atr submit my-task --body "stop, use the v2 API instead" --interrupt
 
 MCP: `steer_task` with `"interrupt": true`. HTTP: `POST /tasks/:key/messages`
 with `"interrupt": true`. TUI: Esc while a turn is busy. atr stops the live
-process group and resumes the same session with your message, then the
-unfinished task. No cooldown or failover is recorded. Providers that cannot
-resume a session are left running (the reply says `not_resumable`).
+process group/session (including `nohup` children) and resumes the same
+session with your message, then the unfinished task. No cooldown or failover
+is recorded. Providers that cannot resume a session are left running (the
+reply says `not_resumable`). `atr cancel --force` uses the same teardown.
 
 **Telegram.** After `atr telegram setup`, you get commands and a plain-language assistant. Anything that would change config asks you to Confirm first.
 

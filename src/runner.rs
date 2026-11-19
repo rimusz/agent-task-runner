@@ -26,48 +26,215 @@ pub struct RunResult {
     pub stderr: String,
 }
 
+/// One row from `ps` (pid/ppid plus the group and session the kill walk needs).
+#[derive(Debug, Clone, Copy)]
+struct ProcRow {
+    pid: u32,
+    ppid: u32,
+    pgid: u32,
+    sid: u32,
+}
+
+/// Identity of the task's process group/session, captured *before* any kill.
+/// After `setsid`, a live CLI has `pid == pgid == sid`. When the leader is
+/// already gone, children keep that sid, so we still sweep `pgid`/`sid == root`.
+#[derive(Debug, Clone, Copy)]
+struct TaskSession {
+    root: u32,
+    pgid: u32,
+    sid: u32,
+}
+
+/// SIGTERM → short wait → SIGKILL when the caller has no `kill_grace` handy
+/// (force-cancel, interrupt, probe, keepwarm, orphan reap).
+const SHORT_KILL_GRACE: Duration = Duration::from_millis(500);
+
 pub fn kill_group(pid: u32, sig: i32) {
-    unsafe {
-        libc::kill(-(pid as i32), sig);
+    kill_pgrp(pid, sig);
+}
+
+fn our_pid() -> u32 {
+    std::process::id()
+}
+
+fn our_pgid() -> u32 {
+    let g = unsafe { libc::getpgid(0) };
+    if g > 1 {
+        g as u32
+    } else {
+        0
     }
 }
 
-/// Snapshot of `root` plus every descendant, walking `ps` parent links.
-/// cursor-agent (and similar) put shell tools in their own process groups,
-/// so `killpg` on the CLI session leaves those children behind.
-pub fn descendant_pids(root: u32) -> Vec<u32> {
-    let output = match std::process::Command::new("ps")
-        .args(["-axo", "pid=,ppid="])
-        .output()
-    {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return Vec::new(),
-    };
-    let text = String::from_utf8_lossy(&output);
-    let mut pairs = Vec::new();
-    for line in text.lines() {
-        let mut it = line.split_whitespace();
-        let Some(pid) = it.next().and_then(|s| s.parse::<u32>().ok()) else {
+fn our_sid() -> u32 {
+    let s = unsafe { libc::getsid(0) };
+    if s > 1 {
+        s as u32
+    } else {
+        0
+    }
+}
+
+fn kill_pid(pid: u32, sig: i32) {
+    if pid <= 1 || pid == our_pid() {
+        return;
+    }
+    unsafe {
+        libc::kill(pid as i32, sig);
+    }
+}
+
+/// `kill(-pgid, sig)`. Never signal pid 1 or atr's own group.
+fn kill_pgrp(pgid: u32, sig: i32) {
+    if pgid <= 1 || pgid == our_pid() || pgid == our_pgid() {
+        return;
+    }
+    unsafe {
+        libc::kill(-(pgid as i32), sig);
+    }
+}
+
+fn ps_formats() -> &'static [&'static str] {
+    // GNU ps: `sid`. BSD/macOS ps: `sess`. Try the host's native name first.
+    if cfg!(target_os = "macos") {
+        &["pid=,ppid=,pgid=,sess=", "pid=,ppid=,pgid=,sid="]
+    } else {
+        &["pid=,ppid=,pgid=,sid=", "pid=,ppid=,pgid=,sess="]
+    }
+}
+
+fn list_procs() -> Vec<ProcRow> {
+    for spec in ps_formats() {
+        let output = std::process::Command::new("ps")
+            .args(["-axo", spec])
+            .output();
+        let Ok(o) = output else {
             continue;
         };
-        let Some(ppid) = it.next().and_then(|s| s.parse::<u32>().ok()) else {
+        if !o.status.success() {
             continue;
-        };
-        pairs.push((pid, ppid));
+        }
+        let text = String::from_utf8_lossy(&o.stdout);
+        let mut rows = Vec::new();
+        let mut parsed = true;
+        for line in text.lines() {
+            let mut it = line.split_whitespace();
+            let Some(pid) = it.next().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
+            let Some(ppid) = it.next().and_then(|s| s.parse::<u32>().ok()) else {
+                parsed = false;
+                break;
+            };
+            let Some(pgid) = it.next().and_then(|s| s.parse::<u32>().ok()) else {
+                parsed = false;
+                break;
+            };
+            let Some(sid) = it.next().and_then(|s| s.parse::<u32>().ok()) else {
+                parsed = false;
+                break;
+            };
+            rows.push(ProcRow {
+                pid,
+                ppid,
+                pgid,
+                sid,
+            });
+        }
+        if parsed && !rows.is_empty() {
+            return rows;
+        }
+    }
+    Vec::new()
+}
+
+fn descendants_from(procs: &[ProcRow], root: u32) -> Vec<u32> {
+    if root <= 1 {
+        return Vec::new();
     }
     let mut kids = Vec::new();
     let mut stack = vec![root];
     let mut seen = HashSet::new();
     seen.insert(root);
     while let Some(cur) = stack.pop() {
-        for (pid, ppid) in &pairs {
-            if *ppid == cur && seen.insert(*pid) {
-                kids.push(*pid);
-                stack.push(*pid);
+        for row in procs {
+            if row.ppid == cur && seen.insert(row.pid) {
+                kids.push(row.pid);
+                stack.push(row.pid);
             }
         }
     }
     kids
+}
+
+/// Snapshot of `root` plus every descendant, walking `ps` parent links.
+/// cursor-agent (and similar) put shell tools in their own process groups,
+/// so `killpg` on the CLI session leaves those children behind.
+pub fn descendant_pids(root: u32) -> Vec<u32> {
+    descendants_from(&list_procs(), root)
+}
+
+fn session_from(procs: &[ProcRow], root: u32) -> TaskSession {
+    if let Some(row) = procs.iter().find(|r| r.pid == root) {
+        return TaskSession {
+            root,
+            pgid: row.pgid,
+            sid: row.sid,
+        };
+    }
+    let pgid = unsafe { libc::getpgid(root as i32) };
+    let sid = unsafe { libc::getsid(root as i32) };
+    TaskSession {
+        root,
+        // Leader already gone: after setsid(), pid was the group and session.
+        pgid: if pgid > 1 { pgid as u32 } else { root },
+        sid: if sid > 1 { sid as u32 } else { root },
+    }
+}
+
+fn safe_group_id(id: u32) -> Option<u32> {
+    if id <= 1 || id == our_pid() || id == our_pgid() || id == our_sid() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+/// PIDs to tear down: ppid descendants plus anything still in the task's
+/// process group or session (`nohup cmd &` reparents to init but keeps pgid/sid).
+fn members_of(sess: &TaskSession, procs: &[ProcRow]) -> Vec<u32> {
+    let mut seen = HashSet::new();
+    if sess.root > 1 {
+        seen.insert(sess.root);
+    }
+    for pid in descendants_from(procs, sess.root) {
+        if pid > 1 {
+            seen.insert(pid);
+        }
+    }
+    let pgid = safe_group_id(sess.pgid);
+    let sid = safe_group_id(sess.sid);
+    let self_pid = our_pid();
+    for row in procs {
+        if row.pid <= 1 || row.pid == self_pid {
+            continue;
+        }
+        let by_pgid = pgid.is_some_and(|g| row.pgid == g);
+        let by_sid = sid.is_some_and(|s| row.sid == s);
+        if by_pgid || by_sid {
+            seen.insert(row.pid);
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// CLI pid plus every process we will signal: descendants and session mates.
+pub fn task_pids(root: u32) -> Vec<u32> {
+    if root <= 1 {
+        return Vec::new();
+    }
+    let procs = list_procs();
+    members_of(&session_from(&procs, root), &procs)
 }
 
 /// CPU and IO counters for one process, used as a heartbeat liveness probe.
@@ -77,16 +244,13 @@ pub(crate) struct ProcActivity {
     pub io_bytes: u64,
 }
 
-/// Snapshot CPU/IO for `root` and every current descendant.
+/// Snapshot CPU/IO for `root` and every current descendant / session mate.
 pub(crate) fn sample_tree_activity(root: u32) -> HashMap<u32, ProcActivity> {
     let mut map = HashMap::new();
     if root == 0 {
         return map;
     }
-    if let Some(s) = sample_pid_activity(root) {
-        map.insert(root, s);
-    }
-    for pid in descendant_pids(root) {
+    for pid in task_pids(root) {
         if let Some(s) = sample_pid_activity(pid) {
             map.insert(pid, s);
         }
@@ -236,36 +400,70 @@ pub(crate) fn silence_is_live(
     saw_output && (descendant_activity || worktree_activity)
 }
 
-fn apply_kill(root: u32, tree: &[u32], sig: i32) {
+fn apply_kill(sess: &TaskSession, tree: &[u32], sig: i32) {
     for &pid in tree.iter().rev() {
-        unsafe {
-            libc::kill(-(pid as i32), sig);
-            libc::kill(pid as i32, sig);
+        kill_pgrp(pid, sig);
+        kill_pid(pid, sig);
+    }
+    if let Some(g) = safe_group_id(sess.pgid) {
+        kill_pgrp(g, sig);
+    }
+    if let Some(s) = safe_group_id(sess.sid) {
+        if s != sess.pgid {
+            kill_pgrp(s, sig);
         }
     }
-    kill_group(root, sig);
-    unsafe {
-        libc::kill(root as i32, sig);
-    }
+    kill_pgrp(sess.root, sig);
+    kill_pid(sess.root, sig);
 }
 
 /// Kill the CLI session and every descendant, including those that called `setsid`.
 pub fn kill_process_tree(root: u32, sig: i32) {
-    if root == 0 {
+    if root <= 1 {
         return;
     }
-    let tree = descendant_pids(root);
-    apply_kill(root, &tree, sig);
+    let procs = list_procs();
+    let sess = session_from(&procs, root);
+    let tree = members_of(&sess, &procs);
+    apply_kill(&sess, &tree, sig);
 }
 
-/// Force-cancel: TERM then KILL the snapshotted tree so orphans cannot reparent.
+/// Force-cancel: SIGTERM the snapshotted group/session, wait a short grace,
+/// then SIGKILL. Re-scans pgid/sid after TERM so reparented survivors go too.
 pub fn terminate_tree_now(root: u32) {
-    if root == 0 {
+    terminate_tree_grace(root, SHORT_KILL_GRACE);
+}
+
+/// Same as [`terminate_tree_now`] with an explicit grace (stall / run_timeout).
+pub fn terminate_tree_grace(root: u32, grace: Duration) {
+    if root <= 1 {
         return;
     }
-    let tree = descendant_pids(root);
-    apply_kill(root, &tree, libc::SIGTERM);
-    apply_kill(root, &tree, libc::SIGKILL);
+    let procs = list_procs();
+    let sess = session_from(&procs, root);
+    let mut tree: HashSet<u32> = members_of(&sess, &procs).into_iter().collect();
+    let snap: Vec<u32> = tree.iter().copied().collect();
+    apply_kill(&sess, &snap, libc::SIGTERM);
+    let start = std::time::Instant::now();
+    while start.elapsed() < grace {
+        if tree_dead(sess.root, &snap) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let procs = list_procs();
+    for pid in members_of(&sess, &procs) {
+        tree.insert(pid);
+    }
+    let leftover: Vec<u32> = tree
+        .iter()
+        .copied()
+        .filter(|&p| crate::db::pid_alive(i64::from(p)))
+        .collect();
+    if leftover.is_empty() && !crate::db::pid_alive(i64::from(sess.root)) {
+        return;
+    }
+    apply_kill(&sess, &leftover, libc::SIGKILL);
 }
 
 /// Prompt/system files for a run. Dir workspaces keep these in the state
@@ -282,6 +480,27 @@ pub fn runtime_files_dir(
     } else {
         worktree.join(".atr")
     }
+}
+
+/// Put this child in its own session and process group (`setsid`).
+///
+/// `CommandExt::process_group(0)` / `setpgid(0,0)` is not used: that makes
+/// the child a group leader *in atr's session*, after which `setsid()` fails
+/// with EPERM. A unique session is required so a later sid-walk cannot collide
+/// with other tasks or with atr itself. `setsid()` already creates a new
+/// process group (`pid == pgid == sid`), so `kill(-pgid)` reaches `nohup`
+/// children that never called `setsid` themselves.
+pub(crate) fn isolate_session(cmd: &mut Command) {
+    unsafe {
+        cmd.pre_exec(enter_own_session);
+    }
+}
+
+fn enter_own_session() -> std::io::Result<()> {
+    if unsafe { libc::setsid() } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// The agent child process: argv, cwd, piped stdio, and the spec's env.
@@ -302,6 +521,7 @@ pub(crate) fn agent_command(spec: &crate::providers::CommandSpec) -> Command {
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
+    isolate_session(&mut cmd);
     cmd
 }
 
@@ -425,14 +645,6 @@ pub async fn run_cli(
                 }
             }
         }
-    }
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
     }
 
     let mut child = crate::util::retry_exec_busy(|| cmd.spawn())
@@ -892,21 +1104,34 @@ fn finish(
 }
 
 async fn terminate(pid: u32, grace: Duration) {
-    if pid == 0 {
+    if pid <= 1 {
         return;
     }
-    let tree = descendant_pids(pid);
-    apply_kill(pid, &tree, libc::SIGTERM);
+    let procs = list_procs();
+    let sess = session_from(&procs, pid);
+    let mut tree: HashSet<u32> = members_of(&sess, &procs).into_iter().collect();
+    let snap: Vec<u32> = tree.iter().copied().collect();
+    apply_kill(&sess, &snap, libc::SIGTERM);
     let start = Instant::now();
     while start.elapsed() < grace {
-        if tree_dead(pid, &tree) {
+        if tree_dead(sess.root, &snap) {
             return;
         }
         sleep(Duration::from_millis(40)).await;
     }
-    if !tree_dead(pid, &tree) {
-        apply_kill(pid, &tree, libc::SIGKILL);
+    let procs = list_procs();
+    for p in members_of(&sess, &procs) {
+        tree.insert(p);
     }
+    let leftover: Vec<u32> = tree
+        .iter()
+        .copied()
+        .filter(|&p| crate::db::pid_alive(i64::from(p)))
+        .collect();
+    if leftover.is_empty() && !crate::db::pid_alive(i64::from(sess.root)) {
+        return;
+    }
+    apply_kill(&sess, &leftover, libc::SIGKILL);
 }
 
 fn tree_dead(root: u32, tree: &[u32]) -> bool {
@@ -915,10 +1140,10 @@ fn tree_dead(root: u32, tree: &[u32]) -> bool {
 }
 
 fn note_descendants(root: u32, into: &mut HashSet<u32>) {
-    if root == 0 {
+    if root <= 1 {
         return;
     }
-    for p in descendant_pids(root) {
+    for p in task_pids(root) {
         into.insert(p);
     }
 }
@@ -936,34 +1161,51 @@ fn reap_leftovers(pids: &HashSet<u32>, grace: Duration) {
     reap_leftovers_now(&alive, grace);
 }
 
-/// TERM then KILL leftover pids (and their groups) after the CLI has exited.
+/// TERM then KILL leftover pids (and their groups/sessions) after the CLI has exited.
 pub fn reap_leftovers_now(pids: &[u32], grace: Duration) {
+    let procs = list_procs();
+    let mut all: HashSet<u32> = HashSet::new();
+    let mut sessions: Vec<TaskSession> = Vec::new();
     for &p in pids {
-        if p == 0 || !crate::db::pid_alive(i64::from(p)) {
+        if p <= 1 || !crate::db::pid_alive(i64::from(p)) {
             continue;
         }
-        unsafe {
-            libc::kill(-(p as i32), libc::SIGTERM);
-            libc::kill(p as i32, libc::SIGTERM);
+        let sess = session_from(&procs, p);
+        for m in members_of(&sess, &procs) {
+            all.insert(m);
         }
+        sessions.push(sess);
+    }
+    if all.is_empty() {
+        return;
+    }
+    let snap: Vec<u32> = all.iter().copied().collect();
+    for sess in &sessions {
+        apply_kill(sess, &snap, libc::SIGTERM);
     }
     let start = std::time::Instant::now();
     while start.elapsed() < grace {
-        if pids
-            .iter()
-            .all(|p| *p == 0 || !crate::db::pid_alive(i64::from(*p)))
-        {
+        if snap.iter().all(|p| !crate::db::pid_alive(i64::from(*p))) {
             return;
         }
         std::thread::sleep(Duration::from_millis(40));
     }
-    for &p in pids {
-        if p > 0 && crate::db::pid_alive(i64::from(p)) {
-            unsafe {
-                libc::kill(-(p as i32), libc::SIGKILL);
-                libc::kill(p as i32, libc::SIGKILL);
-            }
+    let procs = list_procs();
+    for sess in &sessions {
+        for m in members_of(sess, &procs) {
+            all.insert(m);
         }
+    }
+    let leftover: Vec<u32> = all
+        .iter()
+        .copied()
+        .filter(|&p| crate::db::pid_alive(i64::from(p)))
+        .collect();
+    if leftover.is_empty() {
+        return;
+    }
+    for sess in &sessions {
+        apply_kill(sess, &leftover, libc::SIGKILL);
     }
 }
 
@@ -999,7 +1241,46 @@ fn display_args(spec: &CommandSpec) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::CommandExt;
     use std::process::{Command as StdCommand, Stdio as StdStdio};
+
+    fn spawn_isolated(program: &str, args: &[&str]) -> std::process::Child {
+        let mut cmd = StdCommand::new(program);
+        cmd.args(args)
+            .stdin(StdStdio::null())
+            .stdout(StdStdio::null())
+            .stderr(StdStdio::null());
+        unsafe {
+            cmd.pre_exec(enter_own_session);
+        }
+        cmd.spawn().expect("spawn isolated child")
+    }
+
+    fn wait_pidfile(path: &Path, timeout: Duration) -> u32 {
+        let start = std::time::Instant::now();
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if let Ok(pid) = text.trim().parse::<u32>() {
+                    return pid;
+                }
+            }
+            if start.elapsed() > timeout {
+                panic!("pid file {} not written", path.display());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn assert_dead(pid: u32, label: &str) {
+        let start = std::time::Instant::now();
+        while crate::db::pid_alive(i64::from(pid)) && start.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !crate::db::pid_alive(i64::from(pid)),
+            "{label} pid {pid} must be dead"
+        );
+    }
 
     #[test]
     fn kill_process_tree_reaches_setsid_grandchild() {
@@ -1058,6 +1339,91 @@ time.sleep(600)
             !crate::db::pid_alive(i64::from(orphan)),
             "setsid grandchild {orphan} must not be left under init"
         );
+    }
+
+    #[test]
+    fn terminate_tree_kills_reparented_nohup_child() {
+        // `nohup cmd &` from a non-interactive shell keeps the task pgid/sid
+        // after the launcher exits and the child is reparented to init.
+        let dir = tempfile::tempdir().unwrap();
+        let orphan_file = dir.path().join("orphan.pid");
+        let script = format!(
+            r#"
+import os, subprocess, time
+path = {path:?}
+pid = os.fork()
+if pid == 0:
+    subprocess.Popen(
+        ["nohup", "sh", "-c", "echo $$ > " + path + "; while :; do sleep 1; done"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=False,
+    )
+    os._exit(0)
+os.waitpid(pid, 0)
+time.sleep(600)
+"#,
+            path = orphan_file.display().to_string()
+        );
+        let mut child = spawn_isolated("python3", &["-c", &script]);
+        let parent_pid = child.id();
+        let orphan = wait_pidfile(&orphan_file, Duration::from_secs(3));
+        assert!(
+            crate::db::pid_alive(i64::from(orphan)),
+            "nohup child should be alive before kill"
+        );
+        // Wait until the launcher subshell has exited so ppid is no longer
+        // the CLI (the 2026-11-19 leak: walk-by-ppid misses this pid).
+        let start = std::time::Instant::now();
+        while descendant_pids(parent_pid).contains(&orphan)
+            && start.elapsed() < Duration::from_secs(2)
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        terminate_tree_now(parent_pid);
+        let _ = child.wait();
+        assert_dead(parent_pid, "session leader");
+        assert_dead(orphan, "reparented nohup child");
+    }
+
+    #[test]
+    fn terminate_tree_kills_double_fork_same_session() {
+        // Classic daemonize minus setsid: grandchild's ppid is 1, but it
+        // still carries the task sid. A grandchild that *also* called
+        // setsid after the intermediate exited cannot be found this way.
+        let dir = tempfile::tempdir().unwrap();
+        let orphan_file = dir.path().join("orphan.pid");
+        let script = format!(
+            r#"
+import os, time
+pid = os.fork()
+if pid == 0:
+    pid2 = os.fork()
+    if pid2 == 0:
+        open({orphan:?}, "w").write(str(os.getpid()) + "\n")
+        time.sleep(600)
+        os._exit(0)
+    os._exit(0)
+os.waitpid(pid, 0)
+time.sleep(600)
+"#,
+            orphan = orphan_file
+        );
+        let mut child = spawn_isolated("python3", &["-c", &script]);
+        let parent_pid = child.id();
+        let orphan = wait_pidfile(&orphan_file, Duration::from_secs(3));
+        assert!(
+            crate::db::pid_alive(i64::from(orphan)),
+            "double-fork grandchild should be alive before kill"
+        );
+        assert!(
+            !descendant_pids(parent_pid).contains(&orphan),
+            "grandchild should already be reparented off the CLI"
+        );
+        terminate_tree_now(parent_pid);
+        let _ = child.wait();
+        assert_dead(parent_pid, "session leader");
+        assert_dead(orphan, "double-fork grandchild");
     }
 
     #[test]

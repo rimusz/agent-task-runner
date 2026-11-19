@@ -294,6 +294,155 @@ async fn stall_kills_process_group() {
     }
 }
 
+fn orphan_pids(h: &Harness, kind: &str) -> Vec<u32> {
+    std::fs::read_to_string(h.fake_dir.join(format!("{kind}.orphans")))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .filter(|p| *p > 1)
+        .collect()
+}
+
+async fn wait_live_orphans(h: &Harness, key: &str, kind: &str) -> (u32, Vec<u32>) {
+    h.wait_until(key, 8000, |h| {
+        let live = h
+            .shared
+            .inflight
+            .lock()
+            .unwrap()
+            .get(key)
+            .is_some_and(|i| i.kill.lock().unwrap().is_some_and(|p| p > 0));
+        live && !orphan_pids(h, kind).is_empty()
+    })
+    .await;
+    let cli = h
+        .shared
+        .inflight
+        .lock()
+        .unwrap()
+        .get(key)
+        .and_then(|i| i.kill.lock().ok().and_then(|g| *g))
+        .expect("live cli pid");
+    let orphans = orphan_pids(h, kind);
+    (cli, orphans)
+}
+
+async fn assert_pids_dead(pids: &[u32], label: &str) {
+    let start = std::time::Instant::now();
+    loop {
+        let alive: Vec<u32> = pids
+            .iter()
+            .copied()
+            .filter(|&p| atr::db::pid_alive(i64::from(p)))
+            .collect();
+        if alive.is_empty() {
+            return;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("{label} still alive after cancel/timeout: {alive:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_force_kills_nohup_background_child() {
+    let h = Harness::with_providers(
+        &[
+            ("claude", true, "nohup_bg"),
+            ("grok", false, "success"),
+            ("cursor", false, "success"),
+            ("codex", false, "success"),
+        ],
+        "127.0.0.1:0",
+    )
+    .await;
+    h.submit("demo-nohup", "start a detached driver");
+    let (cli, orphans) = wait_live_orphans(&h, "demo-nohup", "claude").await;
+    h.wait_until("demo-nohup", 3000, |_| {
+        orphans
+            .iter()
+            .all(|p| !atr::runner::descendant_pids(cli).contains(p))
+    })
+    .await;
+    for p in &orphans {
+        assert!(
+            atr::db::pid_alive(i64::from(*p)),
+            "nohup child {p} must be alive before cancel"
+        );
+    }
+    h.shared.cancel("demo-nohup", true).unwrap();
+    h.wait_status("demo-nohup", &["failed"], 8000).await;
+    let mut all = orphans;
+    all.push(cli);
+    assert_pids_dead(&all, "nohup cancel --force").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_force_kills_double_fork_grandchild() {
+    let h = Harness::with_providers(
+        &[
+            ("claude", true, "double_fork"),
+            ("grok", false, "success"),
+            ("cursor", false, "success"),
+            ("codex", false, "success"),
+        ],
+        "127.0.0.1:0",
+    )
+    .await;
+    h.submit("demo-dfork", "daemonize a helper");
+    let (cli, orphans) = wait_live_orphans(&h, "demo-dfork", "claude").await;
+    h.wait_until("demo-dfork", 3000, |_| {
+        orphans
+            .iter()
+            .all(|p| !atr::runner::descendant_pids(cli).contains(p))
+    })
+    .await;
+    h.shared.cancel("demo-dfork", true).unwrap();
+    h.wait_status("demo-dfork", &["failed"], 8000).await;
+    let mut all = orphans;
+    all.push(cli);
+    assert_pids_dead(&all, "double-fork cancel --force").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_timeout_kills_nohup_background_child() {
+    let h = Harness::with_providers(
+        &[
+            ("claude", true, "nohup_bg"),
+            ("grok", false, "success"),
+            ("cursor", false, "success"),
+            ("codex", false, "success"),
+        ],
+        "127.0.0.1:0",
+    )
+    .await;
+    {
+        let mut cfg = h.shared.config.write().unwrap();
+        for p in &mut cfg.providers {
+            p.run_timeout = Duration::from_secs(2);
+            p.heartbeat_timeout = Duration::from_secs(60);
+            p.health.heartbeat_timeout = Duration::from_secs(60);
+            p.health.startup_timeout = Duration::from_secs(5);
+        }
+    }
+    h.submit("demo-cap-nohup", "driver that outlives the cap");
+    let (cli, orphans) = wait_live_orphans(&h, "demo-cap-nohup", "claude").await;
+    h.wait_until("demo-cap-nohup", 10000, |h| {
+        h.shared
+            .db
+            .list_runs(Some("demo-cap-nohup"))
+            .ok()
+            .and_then(|r| r.last().and_then(|r| r.outcome.clone()))
+            .as_deref()
+            == Some(atr::config::RUN_TIMEOUT_OUTCOME)
+    })
+    .await;
+    let mut all = orphans;
+    all.push(cli);
+    assert_pids_dead(&all, "run_timeout nohup").await;
+}
+
 #[tokio::test]
 async fn grok_stall_retry_resumes_generated_session_id() {
     let h = Harness::with_providers(

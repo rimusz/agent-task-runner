@@ -388,6 +388,55 @@ PY
     emit_success
     exit 0
     ;;
+  nohup_bg)
+    echo "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"${sid}\"}"
+    # Launcher subshell exits; the sleeper is reparented to init while this
+    # CLI stays up (atr cancel --force used to leave it running).
+    orphan="$DIR/${KIND}.orphans"
+    sh -c "nohup sh -c 'echo \$\$ > \"$orphan\"; while :; do sleep 1; done' >/dev/null 2>&1 &"
+    for _ in $(seq 1 40); do
+      echo '{"type":"system","subtype":"progress"}'
+      if [[ -s "$DIR/${KIND}.orphans" ]]; then
+        break
+      fi
+      sleep 0.05
+    done
+    while :; do
+      echo '{"type":"system","subtype":"progress"}'
+      sleep 0.2
+    done
+    ;;
+  double_fork)
+    echo "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"${sid}\"}"
+    python3 - "$DIR/${KIND}.orphans" <<'PY' &
+import os, sys, time
+path = sys.argv[1]
+pid = os.fork()
+if pid == 0:
+    pid2 = os.fork()
+    if pid2 == 0:
+        with open(path, "w") as f:
+            f.write(str(os.getpid()) + "\n")
+            f.flush()
+        while True:
+            time.sleep(1)
+    os._exit(0)
+os.waitpid(pid, 0)
+while True:
+    time.sleep(1)
+PY
+    for _ in $(seq 1 40); do
+      echo '{"type":"system","subtype":"progress"}'
+      if [[ -s "$DIR/${KIND}.orphans" ]]; then
+        break
+      fi
+      sleep 0.05
+    done
+    while :; do
+      echo '{"type":"system","subtype":"progress"}'
+      sleep 0.2
+    done
+    ;;
   weaken_tests)
     mkdir -p tests .atr
     if [[ -f tests/check.sh ]]; then

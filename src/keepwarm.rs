@@ -294,14 +294,6 @@ pub async fn run_ping(cfg: &Config, provider: &Provider, task: &Task, session: &
     let mut cmd = crate::runner::agent_command(&spec);
     cmd.env("ATR_PROVIDER", &provider.name);
     cmd.env("ATR_KEEPWARM", "1");
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return fail(format!("spawn: {e}")),

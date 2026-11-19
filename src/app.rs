@@ -2,7 +2,7 @@ use crate::config::{load_config, Config};
 use crate::db::Db;
 use crate::http;
 use crate::providers::{check_version, hit_ratio_from_sums, VersionCheck};
-use crate::runner::terminate_tree_now;
+use crate::runner::{terminate_tree_grace, terminate_tree_now};
 use crate::scheduler::{self, reconcile};
 use crate::status::{self, Caps, Enrich, GroupFilter, GroupRow};
 use anyhow::{bail, Result};
@@ -487,10 +487,20 @@ impl Shared {
         // Mark first so the scheduler reads `interrupted`, not a failure.
         self.db.finish_run(run_id, "interrupted", Some(-2))?;
         if pid > 0 {
-            terminate_tree_now(pid);
+            self.kill_task_tree(pid);
         }
         self.kick.notify_waiters();
         Ok(InterruptOutcome::Interrupted)
+    }
+
+    fn kill_task_tree(&self, pid: u32) {
+        let grace = self
+            .config
+            .read()
+            .ok()
+            .map(|c| c.kill_grace)
+            .unwrap_or(Duration::from_millis(500));
+        terminate_tree_grace(pid, grace.min(Duration::from_secs(2)));
     }
 
     /// (run id, provider, pid) of the task's live run: this process's
@@ -526,23 +536,35 @@ impl Shared {
     }
 
     pub fn cancel(&self, key: &str, force: bool) -> Result<()> {
-        let running = self.inflight.lock().unwrap().get(key).cloned();
-        if let Some(info) = running {
-            if !force {
-                bail!("task {key} is running; re-run with --force to kill the live process group");
-            }
+        let inflight = self.inflight.lock().unwrap().get(key).cloned();
+        let live = self.live_run(key)?;
+        if (inflight.is_some() || live.is_some()) && !force {
+            bail!("task {key} is running; re-run with --force to kill the live process group");
+        }
+        if inflight.is_some() || live.is_some() {
             tracing::warn!(task = %key, "force-cancel live run");
-            let pid = info
-                .kill
-                .lock()
-                .ok()
-                .and_then(|g| *g)
-                .filter(|p| *p > 0)
-                .unwrap_or(info.pid);
-            if pid > 0 {
-                terminate_tree_now(pid);
+            let pid = inflight
+                .as_ref()
+                .and_then(|info| {
+                    info.kill
+                        .lock()
+                        .ok()
+                        .and_then(|g| *g)
+                        .filter(|p| *p > 0)
+                        .or_else(|| (info.pid > 0).then_some(info.pid))
+                })
+                .or_else(|| live.as_ref().map(|(_, _, p)| *p).filter(|p| *p > 0));
+            if let Some(pid) = pid.filter(|p| *p > 0) {
+                self.kill_task_tree(pid);
             }
-            self.db.finish_run(info.run_id, "cancelled", Some(-2))?;
+            let run_id = inflight
+                .as_ref()
+                .map(|i| i.run_id)
+                .or_else(|| live.as_ref().map(|(id, _, _)| *id))
+                .unwrap_or(0);
+            if run_id > 0 {
+                self.db.finish_run(run_id, "cancelled", Some(-2))?;
+            }
             self.db.set_status(key, "failed")?;
             self.inflight.lock().unwrap().remove(key);
             let _ = crate::deps::hold_dependents(&self.db, key);
@@ -551,6 +573,13 @@ impl Shared {
         if let Some(task) = self.db.get_task(key)? {
             if task.status == "running" && !force {
                 bail!("task {key} is running; re-run with --force to cancel");
+            }
+            if force {
+                if let Ok(runs) = self.db.list_runs(Some(key)) {
+                    if let Some(pid) = runs.iter().rev().find_map(|r| r.pid).filter(|p| *p > 0) {
+                        terminate_tree_now(pid as u32);
+                    }
+                }
             }
             self.db.set_status(key, "failed")?;
             let _ = crate::deps::hold_dependents(&self.db, key);

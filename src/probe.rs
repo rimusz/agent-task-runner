@@ -179,15 +179,6 @@ pub async fn run_turn(
     );
     let mut cmd = crate::runner::agent_command(&spec);
     cmd.env("ATR_PROVIDER", &p.name).env("ATR_PROBE", "1");
-    #[cfg(unix)]
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     let mut child = match crate::util::retry_exec_busy(|| cmd.spawn()) {
         Ok(c) => c,
         Err(e) => {

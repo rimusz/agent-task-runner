@@ -62,14 +62,7 @@ pub async fn run(
         .env("ATR_HOOK_URL", hook_url)
         .env("ATR_PLUGIN_TEST", test_command)
         .envs(hook_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    crate::runner::isolate_session(&mut cmd);
 
     let mut child = cmd
         .spawn()
@@ -105,7 +98,8 @@ pub async fn run(
 
     loop {
         if started.elapsed() > run_timeout {
-            let _ = child.kill().await;
+            crate::runner::terminate_tree_now(pid);
+            let _ = child.wait().await;
             return Ok(finish(
                 crate::config::RUN_TIMEOUT_OUTCOME,
                 None,
@@ -152,6 +146,9 @@ pub async fn run(
     }
     drop(stdin);
     let status = child.wait().await.ok();
+    if pid > 0 {
+        crate::runner::terminate_tree_now(pid);
+    }
     let code = status.and_then(|s| s.code());
     let outcome = if saw_error {
         match classified {

@@ -273,7 +273,11 @@ quota with a reset already handled by `quota.rs`, and task-logic failures
 Stall hangs still use `[[provider]].health.stall_resumes`. A stall retry
 reuses the same worktree without checkout/reset. Heartbeat silence is not a
 stall while the CLI process tree is still burning CPU/IO or the worktree is
-being written (a detached test driver counts). The per-run wall-clock cap
+being written (a detached test driver counts). Cancel `--force`, a stall,
+`run_timeout`, and `task_timeout` tear down the CLI's process group and
+session, including `nohup` / background children that reparented to init;
+they do not catch a descendant that called `setsid` after its parent chain
+had already exited. The per-run wall-clock cap
 (`[[provider]] run_timeout`, default `90m`) is a different event: outcome
 `run_timeout`, Telegram `cap reached …`, skip reason `wall_clock_cap`. It
 does not mark the provider degraded or cooling, and a pinned provider does

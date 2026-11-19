@@ -131,6 +131,13 @@ stall retry also reuses the worktree (including detached HEAD). Raise
 `[[provider]] heartbeat_timeout` / `[provider.health] heartbeat_timeout` if
 the work is legitimately silent for longer than that window.
 
+**`atr cancel --force` killed the CLI but a `nohup` / background script kept
+running.** That was a missed process-group/session sweep (children
+reparented to init). Current atr SIGTERMs the CLI's session, waits
+`kill_grace`, then SIGKILLs anything still in that pgid/sid. A descendant
+that called `setsid` after its parent chain had already exited still cannot
+be found; kill that pid by hand.
+
 **Telegram said `stalled … (CLI hang / heartbeat)` but the CLI was still
 working, then overflowed to another provider.** That was a run wall-clock
 cap (`[[provider]] run_timeout`, default `90m`) mislabeled as a stall. Cap

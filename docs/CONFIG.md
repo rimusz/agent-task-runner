@@ -497,6 +497,11 @@ Telegram `cap_reached` — never `stalled` / CLI hang / heartbeat, and never a
 usage `limit`. Same-session resumes still use `stall_resumes` (default 1).
 Exhausting them does not cool the provider.
 
+`kill_grace` (default `30s`) is how long atr waits after SIGTERM to the CLI's
+process group/session before SIGKILL. Cancel `--force`, interrupt, stall,
+`run_timeout`, and `task_timeout` all use that teardown, including `nohup` /
+background children that reparented to init but kept the task pgid or sid.
+
 A task that pinned a provider (`--provider`, `provider:` label, `--model`, or
 a compare-arm strict pin) does **not** overflow to another provider when the
 cap is exhausted; the task goes to `needs_attention` unless you allow

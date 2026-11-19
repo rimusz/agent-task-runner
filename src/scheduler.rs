@@ -318,6 +318,19 @@ pub fn record_task_timeout(shared: &Arc<Shared>, cfg: &Config, task: &crate::db:
         .db
         .insert_event(run_id, "task_timeout", &detail.to_string());
     let _ = shared.db.finish_run(run_id, "task_timeout", None);
+    // Sweep the last attempt's session: a dead CLI pid still identifies
+    // `nohup` children that kept that sid after reparenting to init.
+    if let Ok(runs) = shared.db.list_runs(Some(key)) {
+        if let Some(pid) = runs
+            .iter()
+            .rev()
+            .find(|r| r.id != run_id)
+            .and_then(|r| r.pid)
+            .filter(|p| *p > 0)
+        {
+            crate::runner::terminate_tree_now(pid as u32);
+        }
+    }
     let _ = crate::output::capture(shared, key);
     if cfg.lessons_enabled_for(task) {
         crate::lessons::spawn_reflect(

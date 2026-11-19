@@ -330,6 +330,15 @@ A stall marks the provider degraded for a short configurable window; the flag
 clears when that window expires and on the next successful run.
 `atr cancel --force` does not cool the provider.
 
+Each provider CLI is spawned with `setsid()` (its own session and process
+group). Cancel (`--force`), interrupt, stall, `run_timeout`, `task_timeout`,
+probe/keepwarm timeouts, and a normal CLI exit all SIGTERM the group, wait
+`kill_grace`, then SIGKILL. The walk is the live ppid tree captured before
+the kill **plus** any process still carrying that task's pgid or sid, so
+`nohup cmd &` children that were reparented to init still die. A descendant
+that called `setsid` itself *and* whose parent chain was already gone before
+the snapshot cannot be found (new session, ppid 1).
+
 Stall, cancel, **and a normal CLI exit** kill leftover descendants.
 
 Wall-clock cap (`run_timeout` per provider, default `90m`); per-task and
