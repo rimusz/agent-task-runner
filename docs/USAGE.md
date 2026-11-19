@@ -19,7 +19,7 @@ atr add "what is 2+2?"
 atr add "fix the typo in notes.txt" --dir ~/notes
 atr add "open a PR for the README typo" --repo ~/src/my-repo --output pr
 atr add --check-only --repo ~/src/my-repo "prove the login still works"
-atr add --provider claude --labels proof --run-timeout 3h --stall-resumes 4 --check-only --repo ~/src/my-repo "prove iOS+Android"
+atr add --provider claude --labels proof --run-timeout 3h --stall-resumes 4 --repo ~/src/my-repo "prove iOS+Android"
 atr submit my-task --body "also fix the footer"
 atr ask "what is 2+2?"
 ```
@@ -77,7 +77,7 @@ atr add "what is 2+2?"                                  # answer only, no worksp
 atr add "fix the typo in notes.txt" --dir ~/notes       # edit a plain folder in place
 atr add "fix the README typo" --repo ~/src/my-repo --output pr   # git worktree, opens a PR
 atr add --check-only --repo ~/src/my-repo "prove the login still works"
-atr add --provider claude --labels proof --run-timeout 3h --stall-resumes 4 --check-only --repo ~/src/my-repo "prove iOS+Android"
+atr add --provider claude --labels proof --run-timeout 3h --stall-resumes 4 --repo ~/src/my-repo "prove iOS+Android"
 atr add "deploy" --after build,test                     # wait until those keys succeed
 ```
 
