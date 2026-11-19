@@ -49,7 +49,8 @@ Full version, including MCP setup: [docs/INSTALL.md](docs/INSTALL.md#full-agent-
 Pick your platform: `macos-arm64`, `linux-x86_64`, `linux-arm64` or `linux-x86_64-musl` (Alpine).
 
 ```bash
-ver=0.1.7 platform=macos-arm64
+ver=$(curl -fsSL https://api.github.com/repos/rimusz/agent-task-runner/releases/latest | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)
+platform=macos-arm64
 curl -fsSL "https://github.com/rimusz/agent-task-runner/releases/download/v$ver/atr-$ver-$platform.tar.gz" | tar -xz -C /tmp
 mkdir -p ~/.local/bin && install -m 755 /tmp/atr ~/.local/bin/atr
 ```
@@ -155,8 +156,9 @@ Any other `/…` line (for example `/compact`) goes to the provider as a turn. P
 - **Background runner on your Mac**: queue work and close the terminal. [More](docs/USE-CASES.md#1-background-runner-on-your-laptop)
 - **Always-on Linux box or VM**: runs around the clock. [More](docs/USE-CASES.md#2-always-on-linux-server-or-cloud-vm)
 - **GitHub issue worker**: label an issue, get a pull request. [More](docs/USE-CASES.md#3-github-issue-worker)
+- **Mobile app proofs**: prove a PR head with Maestro on an iOS simulator, an Android emulator or a cabled phone. [More](docs/USE-CASES.md#9-mobile-app-proofs)
 - **Backend for other agents**: Claude, Codex, Cursor or Grok hand work to atr over MCP. [More](docs/USE-CASES.md#4-backend-for-ai-agents-mcp)
-- **Grok Bot operator**: import the [atr Operator](https://x.ai/bot/oDG33vy41WVZKy-HFKVk0) bot template to queue work and watch atr from Grok Bot.
+- **Grok Bot operator**: import the [atr Operator](https://x.ai/bot/8N21KO1uz_jDJt3eqELFA) bot template to queue work and watch atr from Grok Bot. A bot needs MCP over HTTP (Tailscale plus a token), not stdio.
 - **Inbox folder**: scripts drop a task file and atr runs it. [More](docs/USAGE.md#hand-work-to-atr)
 - **Telegram**: add tasks and check progress from your phone. Private chats only; optional `[telegram] events` filter. [More](docs/USE-CASES.md#7-control-from-your-phone)
 - **Terminal TUI**: chat with your coding CLIs in the terminal, with atr as the proxy. [More](#interactive-tui)
@@ -219,5 +221,3 @@ Setup, config and safety details: [docs/USAGE.md](docs/USAGE.md#providers-and-op
 atr is not affiliated with or endorsed by Anthropic, xAI, Anysphere, OpenAI or the OpenCode authors. Claude, Grok, Cursor, Codex, ChatGPT and OpenCode are trademarks of their owners. Use atr with **your own** CLI accounts and follow each provider's terms. Do not resell access or share accounts.
 
 Licensed under MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`). Dependency licenses: `THIRD_PARTY_LICENSES`.
-
-shadow-edit

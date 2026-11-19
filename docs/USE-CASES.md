@@ -12,6 +12,7 @@ atr is one program with many ways in. Pick the uses that fit you; they all run t
 | [6. Plain folders and quick questions](#6-plain-folders-and-quick-questions) | Nothing extra: `atr add` with `--dir` or no workspace |
 | [7. Control from your phone](#7-control-from-your-phone) | `atr telegram setup`; for the dashboard off-machine, a Tailscale bind |
 | [8. Several AI providers with fallback](#8-several-ai-providers-with-fallback) | Two or more signed-in CLIs, ordered with `atr providers move` |
+| [9. Mobile app proofs](#9-mobile-app-proofs) | Hosts with Maestro plus an iOS simulator, Android emulator or cabled phone; Tailscale to reach each host |
 
 ### 1. Background runner on your laptop
 
@@ -45,7 +46,7 @@ gh issue edit 12 --add-label for:atr
 
 ### 4. Backend for AI agents (MCP)
 
-Let Claude Code, Codex, Cursor, Grok Build, Grok Bot or OpenCode hand work to atr and get the answer back. Grok Bot can import the [atr Operator](https://x.ai/bot/oDG33vy41WVZKy-HFKVk0) template to queue work and watch atr. On the same machine they run `atr mcp`; from another machine they connect over Tailscale with a token. They add work with `add_task`, wait with `wait_task`, and fetch the answer, diff or PR link with `get_result`.
+Let Claude Code, Codex, Cursor, Grok Build, Grok Bot or OpenCode hand work to atr and get the answer back. Grok Bot can import the [atr Operator](https://x.ai/bot/8N21KO1uz_jDJt3eqELFA) template to queue work and watch atr. On the same machine they run `atr mcp`; from another machine they connect over Tailscale with a token. They add work with `add_task`, wait with `wait_task`, and fetch the answer, diff or PR link with `get_result`.
 
 ```json
 {
@@ -109,4 +110,26 @@ atr providers add deepseek
 atr providers move claude --to 1
 atr providers enable cursor
 atr usage --period 7d
+```
+
+### 9. Mobile app proofs
+
+A cloud agent or a person writes the code. atr proves the pull-request head with Maestro on an iOS simulator, an Android emulator or a cabled phone. An operator bot reads the result and posts **PASS** or **NOT PASS** on the PR.
+
+Several hosts can each run their own atr. Reach a host over Tailscale with SSH (`atr add`) or MCP over HTTP (bearer token). Local stdio (`atr mcp`) is only for an agent on that same machine.
+
+Queue **one platform per task**, wait for it to finish, then queue the next. Do not chain platforms with `--after`. Do not use `--check-only`: Maestro proofs write evidence files, and a check-only run that modified files is parked in `needs_attention`.
+
+Pin the worker with `--provider` and keep it there when the wall-clock cap is hit (`--overflow-on-cap false`). Give a long `--run-timeout`, tag the task `--labels proof`, and put the brief in `--body-file`. The brief pins the head SHA, the pass criteria for that one platform, and the evidence path.
+
+Before the flows: `adb kill-server` then `adb start-server`, check the device is online, `pm clear` after install, and take a device lock so nothing else drives it.
+
+The verdict should report counts per platform, the first real failure, the evidence path, elapsed time, and keep infrastructure failures separate from app failures.
+
+```bash
+atr add --provider claude --overflow-on-cap false --run-timeout 3h \
+  --labels proof --body-file ios-brief.md --repo ~/src/my-repo
+# wait until that task is done, then:
+atr add --provider claude --overflow-on-cap false --run-timeout 3h \
+  --labels proof --body-file android-brief.md --repo ~/src/my-repo
 ```
