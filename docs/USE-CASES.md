@@ -10,7 +10,7 @@ atr is one program with many ways in. Pick the uses that fit you; they all run t
 | [4. Backend for AI agents (MCP)](#4-backend-for-ai-agents-mcp) | `atr mcp` in your agent's MCP config; for remote use, Tailscale + an MCP token |
 | [5. Scripts and automations](#5-scripts-and-automations) | `curl` to `POST /tasks`, or the inbox folder turned on in config |
 | [6. Plain folders and quick questions](#6-plain-folders-and-quick-questions) | Nothing extra: `atr add` with `--dir` or no workspace |
-| [7. Control from your phone](#7-control-from-your-phone) | `atr telegram setup`; for the dashboard off-machine, a Tailscale bind |
+| [7. Control from your phone](#7-control-from-your-phone) | `atr telegram setup`; for the [dashboard](../README.md#dashboard) off-machine, a Tailscale bind |
 | [8. Several AI providers with fallback](#8-several-ai-providers-with-fallback) | Two or more signed-in CLIs, ordered with `atr providers move` |
 | [9. Mobile app proofs](#9-mobile-app-proofs) | Hosts with Maestro plus an iOS simulator, Android emulator or cabled phone; Tailscale to reach each host |
 
@@ -85,7 +85,7 @@ atr add "explain what a race condition is"
 
 ### 7. Control from your phone
 
-Connect a Telegram bot to queue work and check progress from anywhere. The read-only dashboard at `http://127.0.0.1:7420/` shows what is running, queued and done; reach it from your phone over Tailscale (see [CONFIG.md](CONFIG.md#dashboard)).
+Connect a Telegram bot to queue work and check progress from anywhere. The read-only [dashboard](../README.md#dashboard) at `http://127.0.0.1:7420/` shows what is running, queued and finished; reach it from your phone over Tailscale (see [CONFIG.md](CONFIG.md#dashboard)).
 
 ```bash
 atr telegram setup
