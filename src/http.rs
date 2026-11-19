@@ -446,7 +446,12 @@ async fn cancel(
     }
 }
 
-async fn retry(State(shared): State<Arc<Shared>>, Path(key): Path<String>) -> impl IntoResponse {
+async fn retry(
+    State(shared): State<Arc<Shared>>,
+    Path(key): Path<String>,
+    // Consume leftover POST bytes so the kernel does not RST (macOS EINVAL).
+    _body: Bytes,
+) -> impl IntoResponse {
     match shared.retry(&key) {
         Ok(()) => (StatusCode::OK, Json(json!({"ok": true, "key": key}))),
         Err(e) => (
@@ -456,12 +461,12 @@ async fn retry(State(shared): State<Arc<Shared>>, Path(key): Path<String>) -> im
     }
 }
 
-async fn intake_pause(State(shared): State<Arc<Shared>>) -> impl IntoResponse {
+async fn intake_pause(State(shared): State<Arc<Shared>>, _body: Bytes) -> impl IntoResponse {
     shared.set_intake_paused(true);
     Json(json!({"ok": true, "intake_paused": true}))
 }
 
-async fn intake_resume(State(shared): State<Arc<Shared>>) -> impl IntoResponse {
+async fn intake_resume(State(shared): State<Arc<Shared>>, _body: Bytes) -> impl IntoResponse {
     shared.set_intake_paused(false);
     Json(json!({"ok": true, "intake_paused": false}))
 }
