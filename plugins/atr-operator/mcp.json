@@ -5,6 +5,13 @@
       "type": "stdio",
       "command": "atr",
       "args": ["mcp"]
+    },
+    "atr-remote": {
+      "type": "streamable-http",
+      "url": "https://${ATR_MCP_HOST}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${ATR_MCP_TOKEN}"
+      }
     }
   }
 }
