@@ -7,6 +7,7 @@
 - Retries transient provider errors (overloaded, 429, 5xx) with backoff, waits on `after:` task dependencies, and keeps new work queued when the host CPU or memory is busy.
 - Takes work from the terminal, GitHub issues, other agents (MCP), Telegram, HTTP or a drop folder.
 - Shows what is running on a local [dashboard](#dashboard), in the terminal or in Telegram.
+- Keeps each provider's session and reuses that CLI's prompt cache. Cache hit % shows in `atr usage`, `atr status`, the [dashboard](#dashboard) and the TUI; the dashboard also shows tokens saved. [More](#prompt-caching-and-token-savings).
 
 atr never calls vendor APIs or handles your API keys. You sign in to each CLI yourself.
 
@@ -111,7 +112,7 @@ gh issue edit 12 --add-label for:atr
 
 ## Interactive TUI
 
-A bare `atr` (same as `atr tui`) opens a chat in your terminal. It behaves like the provider CLI (Claude Code, Grok Build, Cursor, Codex or OpenCode) with atr in the middle as a proxy: atr keeps the session, reuses the prompt cache and shows tokens and cache use under the input. atr never writes the replies itself.
+A bare `atr` (same as `atr tui`) opens a chat in your terminal. It behaves like the provider CLI (Claude Code, Grok Build, Cursor, Codex or OpenCode) with atr in the middle as a proxy: atr keeps the session, [reuses the prompt cache](#prompt-caching-and-token-savings) and shows tokens and cache hit % under the input. atr never writes the replies itself.
 
 ```bash
 atr                      # chat with no workspace (answer-only)
@@ -156,11 +157,19 @@ Any other `/…` line (for example `/compact`) goes to the provider as a turn. P
 
 `atr ui` opens this read-only page. `atr serve` (usually `atr service install`) serves it at `http://127.0.0.1:7420/` by default.
 
-It shows running, queued, and finished tasks, and usage: tokens, cost, and tokens saved from the prompt cache. A banner is red when a GitHub token is failing and amber when one expires within 14 days.
+It shows running, queued, and finished tasks, and usage: tokens, cost, and [tokens saved](#prompt-caching-and-token-savings) from the prompt cache. A banner is red when a GitHub token is failing and amber when one expires within 14 days.
 
 From another device on your tailnet, reach it with a Tailscale bind. See [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md).
 
 ![atr dashboard: running, queued and finished tasks, with an amber GitHub token banner](docs/images/dashboard.png)
+
+## Prompt caching and token savings
+
+atr stores the session for Claude, Grok, Cursor, Codex and OpenCode and resumes it on the next turn. A resume sends only the new text, so the CLI can reuse its prompt cache. On the first turn, standing instructions go in that CLI's system-prompt slot (Claude, Grok, Codex and OpenCode). Cursor has no slot, so they are part of the prompt. A retry of a no-shell model, and a retry of a planning run, starts a fresh session.
+
+`atr usage` and `atr status` print cache hit %. The dashboard shows that hit % and tokens saved (tokens read back from the cache). The TUI status line shows the last turn's cache hit %.
+
+Settings: [docs/CONFIG.md](docs/CONFIG.md#cache). How the prefix stays stable: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#token-caching).
 
 ## What you can use it for
 
@@ -178,7 +187,7 @@ From another device on your tailnet, reach it with a Tailscale bind. See [docs/R
 
 Claude Code, Grok Build, Cursor, Codex and OpenCode. OpenCode also opens the door to DeepSeek, Kimi, Qwen, local Ollama, self-hosted vLLM and more. See [docs/USAGE.md](docs/USAGE.md#providers-and-opencode).
 
-Each CLI gets atr's instructions in its own system-prompt slot. For Codex that is `-c model_instructions_file`, which replaces Codex's built-in base prompt with atr's (details in [docs/CONFIG.md](docs/CONFIG.md#cache)).
+Each CLI gets atr's instructions in its own system-prompt slot. For Codex that is `-c model_instructions_file`, which replaces Codex's built-in base prompt with atr's (details in [docs/CONFIG.md](docs/CONFIG.md#cache); see also [Prompt caching](#prompt-caching-and-token-savings)).
 
 ### Local models (OpenCode 2.x + Ollama)
 
