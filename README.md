@@ -171,6 +171,16 @@ atr stores the session for Claude, Grok, Cursor, Codex and OpenCode and resumes 
 
 Settings: [docs/CONFIG.md](docs/CONFIG.md#cache). How the prefix stays stable: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#token-caching).
 
+## Telegram assistant
+
+A line that starts with `/` is a bot command (`/add`, `/status`, and the rest). Any other sentence, in an allowed private chat, is answered by a provider CLI when `[telegram.assistant] enabled = true`. That switch is off by default; with it off, the chat is told how to turn it on. Groups, supergroups and channels are ignored. The chat must be private, its id must be allowed (`allowed_chat_ids`, or the chat id file), and `from.id` must be in `allowed_user_ids` (or in the chat allowlist when that user list is empty).
+
+The assistant answers questions about atr. It is told not to use a shell, edit files, or run git or gh, and it has no tools of its own. To change anything it proposes the same `/` commands. Queuing a task and other changes wait for Confirm. A plain answer does not. Typing the `/` command yourself skips the assistant and uses that same Confirm rule.
+
+It does not use the driver. A turn uses this chat's `/assistant` provider, or `@provider` on that message. Otherwise it takes the first name in `[telegram.assistant] providers` that is enabled and not busy, cooling down, rate-limited or at quota. An empty list uses `provider`. An empty `provider` uses the first available provider in order. `providers` wins when both are set. The model is that provider's `[[provider]] model`. There is no assistant model key. A provider at its limit is skipped for the next name in `providers`. If every listed provider is only busy or cooling down, the turn waits. Each turn is capped by `timeout` (default 10 minutes).
+
+Settings: [docs/CONFIG.md](docs/CONFIG.md#telegram). Provider choice: [docs/CONFIG.md](docs/CONFIG.md#choosing-the-driver-provider-and-model). From your phone: [docs/USE-CASES.md](docs/USE-CASES.md#7-control-from-your-phone).
+
 ## What you can use it for
 
 - **Background runner on your Mac**: queue work and close the terminal. [More](docs/USE-CASES.md#1-background-runner-on-your-laptop)
@@ -180,7 +190,7 @@ Settings: [docs/CONFIG.md](docs/CONFIG.md#cache). How the prefix stays stable: [
 - **Backend for other agents**: Claude, Codex, Cursor or Grok hand work to atr over MCP. [More](docs/USE-CASES.md#4-backend-for-ai-agents-mcp)
 - **Grok Bot operator**: import the [atr Operator](https://x.ai/bot/8N21KO1uz_jDJt3eqELFA) bot template to queue work and watch atr from Grok Bot. A bot needs MCP over HTTP (Tailscale plus a token), not stdio.
 - **Inbox folder**: scripts drop a task file and atr runs it. [More](docs/USAGE.md#hand-work-to-atr)
-- **Telegram**: add tasks and check progress from your phone. Private chats only; optional `[telegram] events` filter. [More](docs/USE-CASES.md#7-control-from-your-phone)
+- **Telegram**: add tasks, check progress, or ask the [assistant](#telegram-assistant) in an allowed private chat. Optional `[telegram] events` filter. [More](docs/USE-CASES.md#7-control-from-your-phone)
 - **Terminal TUI**: chat with your coding CLIs in the terminal, with atr as the proxy. [More](#interactive-tui)
 
 ## Providers
