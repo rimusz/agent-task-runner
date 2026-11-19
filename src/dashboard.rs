@@ -296,7 +296,7 @@ pub fn snapshot_period(
         "driver": cfg.driver_name(),
         "stats_today": stats_today,
         "health": health(&cfg, &shared.config_path, now),
-        "github_auth": crate::gh_token::status_json(&shared.config_path, chrono::Utc::now()),
+        "github_auth": crate::gh_token::status_json(&cfg, &shared.config_path, chrono::Utc::now()),
         "telegram_health": crate::telegram_health::status_json(&cfg, &shared.config_path, chrono::Utc::now()),
         "repos": repos,
         "telegram_assistant": telegram_assistant(&cfg, &shared.db),
@@ -510,7 +510,7 @@ fn health(
     config_path: &std::path::Path,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Value {
-    let gh = crate::gh_token::status_json(config_path, now);
+    let gh = crate::gh_token::status_json(cfg, config_path, now);
     let tg = crate::telegram_health::status_json(cfg, config_path, now);
     let clis: Vec<Value> = cfg
         .providers
@@ -853,6 +853,57 @@ kind = "claude"
     }
 
     #[test]
+    fn snapshot_github_not_configured_is_neutral() {
+        let (shared, dir) = harness();
+        std::fs::write(
+            dir.path().join("github-auth.json"),
+            r#"{"state":"failing","failing_since":"x","last_error":"401"}"#,
+        )
+        .unwrap();
+        let snap = snapshot(&shared);
+        assert_eq!(snap["github_auth"]["level"], "off");
+        assert_eq!(snap["github_auth"]["configured"], false);
+        assert_eq!(snap["health"]["github"]["level"], "off");
+        assert_eq!(snap["health"]["github"]["configured"], false);
+        assert_ne!(snap["health"]["github"]["level"], "fail");
+        assert_ne!(snap["health"]["github"]["level"], "warn");
+    }
+
+    #[test]
+    fn snapshot_github_fail_when_configured() {
+        let (shared, dir) = harness();
+        shared.config.write().unwrap().github.enabled = true;
+        std::fs::write(
+            dir.path().join("github-auth.json"),
+            r#"{"state":"failing","failing_since":"x","last_error":"401"}"#,
+        )
+        .unwrap();
+        let snap = snapshot(&shared);
+        assert_eq!(snap["github_auth"]["level"], "fail");
+        assert_eq!(snap["github_auth"]["configured"], true);
+        assert_eq!(snap["health"]["github"]["level"], "fail");
+        assert!(
+            snap["health"]["github"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("401"),
+            "{snap}"
+        );
+    }
+
+    #[test]
+    fn snapshot_github_unknown_when_configured_but_not_connected() {
+        let (shared, _dir) = harness();
+        shared.config.write().unwrap().github.enabled = true;
+        let snap = snapshot(&shared);
+        assert_eq!(snap["github_auth"]["level"], "unknown");
+        assert_eq!(snap["github_auth"]["configured"], true);
+        assert_eq!(snap["health"]["github"]["level"], "unknown");
+        assert_ne!(snap["health"]["github"]["level"], "fail");
+        assert_ne!(snap["health"]["github"]["level"], "warn");
+    }
+
+    #[test]
     fn snapshot_has_version_and_tz_once_in_meta() {
         let (shared, _dir) = harness();
         let snap = snapshot(&shared);
@@ -1129,6 +1180,20 @@ kind = "claude"
     }
 
     #[test]
+    fn page_omits_github_when_not_live_and_scrolls_unbounded_lists() {
+        assert!(PAGE.contains("function githubLive"));
+        assert!(PAGE.contains("function healthProblem"));
+        assert!(PAGE.contains("githubLive(hl.github)"));
+        assert!(PAGE.contains("list-scroll"));
+        assert!(PAGE.contains("position: sticky"));
+        assert!(PAGE.contains("max-height: calc(2.15rem * 6)"));
+        assert!(PAGE.contains("null, [\"\",\"\",\"\",\"\",\"\",\"wrap\"], true"));
+        assert!(PAGE.contains("null, null, true"));
+        assert!(!PAGE.contains("GitHub not connected"));
+        assert!(!PAGE.to_ascii_lowercase().contains("github not connected"));
+    }
+
+    #[test]
     fn telegram_assistant_block_and_line() {
         let (shared, _dir) = harness();
         let mut cfg = shared.config.read().unwrap().clone();
@@ -1169,7 +1234,8 @@ kind = "claude"
     fn page_numeric_columns_do_not_wrap() {
         assert!(PAGE.contains("white-space: nowrap; word-break: normal"));
         assert!(PAGE.contains("td.wrap, td.wide { white-space: normal;"));
-        assert!(PAGE.contains("class=\"scroll\""));
+        assert!(PAGE.contains("class=\"scroll'"));
+        assert!(PAGE.contains("list-scroll"));
         assert!(PAGE.contains("shortTime(p.last_success"));
         assert!(PAGE.contains("{t:\"elapsed\",num:true}"));
     }

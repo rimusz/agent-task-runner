@@ -464,10 +464,32 @@ fn persist(config_path: Option<&Path>, key: &str, owner: Option<&str>, last_erro
     }
 }
 
-/// GitHub auth summary for `atr status` / dashboard. Overall `level` is the
-/// worst token (fail > warn > ok > unknown); `tokens` lists each one.
-pub fn status_json(config_path: &Path, now: DateTime<Utc>) -> serde_json::Value {
-    summarize(&read_state_file(config_path), now)
+/// GitHub is in play when intake watches GitHub or shadow mode is on.
+/// Off is not a health problem: dashboard and `/status` treat it as neutral.
+pub fn configured(cfg: &Config) -> bool {
+    cfg.intake_allows(crate::task::SourceKind::Github) || cfg.shadow.enabled
+}
+
+/// GitHub auth summary for `atr status` / dashboard.
+///
+/// `level` is fail > warn > ok > unknown > off. `off` means GitHub is not
+/// configured (intake and shadow both off) and is not a health problem —
+/// leftover `github-auth.json` from a previous enable is ignored. `unknown`
+/// means GitHub is configured but no auth check has been recorded yet (also
+/// not a failure). `tokens` lists each token when configured. `configured`
+/// is `false` only for `off`.
+pub fn status_json(cfg: &Config, config_path: &Path, now: DateTime<Utc>) -> serde_json::Value {
+    if !configured(cfg) {
+        return serde_json::json!({
+            "level": "off",
+            "message": "GitHub not configured",
+            "tokens": [],
+            "configured": false,
+        });
+    }
+    let mut v = summarize(&read_state_file(config_path), now);
+    v["configured"] = serde_json::json!(true);
+    v
 }
 
 fn summarize_one(raw: &serde_json::Value, now: DateTime<Utc>) -> serde_json::Value {
@@ -913,6 +935,63 @@ mod tests {
             run_hook(&crate::config::NotifyConfig::default(), "k", "m", &[]),
             None
         );
+    }
+
+    fn parse_cfg(extra: &str) -> crate::config::Config {
+        crate::config::parse_config_toml(&format!(
+            "{extra}\n[[provider]]\nname = \"claude\"\nkind = \"claude\"\ncli = \"/bin/true\"\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn status_json_off_when_github_not_configured_ignores_leftover_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("github-auth.json"),
+            r#"{"state":"failing","failing_since":"x","last_error":"401"}"#,
+        )
+        .unwrap();
+        let cfg = parse_cfg("");
+        let v = status_json(&cfg, &dir.path().join("c.toml"), t(0));
+        assert_eq!(v["level"], "off");
+        assert_eq!(v["configured"], false);
+        assert_eq!(v["message"], "GitHub not configured");
+        assert_eq!(v["tokens"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn status_json_fail_when_github_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("github-auth.json"),
+            r#"{"state":"failing","failing_since":"x","last_error":"401"}"#,
+        )
+        .unwrap();
+        let cfg = parse_cfg("[github]\nenabled = true\nrepo = \"acme/app\"\n");
+        let v = status_json(&cfg, &dir.path().join("c.toml"), t(0));
+        assert_eq!(v["level"], "fail");
+        assert_eq!(v["configured"], true);
+        assert!(v["message"].as_str().unwrap().contains("401"), "{v}");
+    }
+
+    #[test]
+    fn status_json_unknown_when_configured_but_not_connected() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = parse_cfg("[github]\nenabled = true\n");
+        let v = status_json(&cfg, &dir.path().join("c.toml"), t(0));
+        assert_eq!(v["level"], "unknown");
+        assert_eq!(v["configured"], true);
+        assert_eq!(v["message"], "no GitHub auth check yet");
+    }
+
+    #[test]
+    fn status_json_configured_when_only_shadow() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = parse_cfg("[shadow]\nenabled = true\nrepo = \"acme/app\"\n");
+        let v = status_json(&cfg, &dir.path().join("c.toml"), t(0));
+        assert_eq!(v["configured"], true);
+        assert_eq!(v["level"], "unknown");
     }
 
     #[test]

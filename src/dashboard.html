@@ -124,6 +124,18 @@ td.wrap { min-width: 10rem; }
 .seg { white-space: nowrap; }
 td.num, th.num { min-width: 4.5rem; }
 .scroll { overflow-x: auto; max-width: 100%; }
+/* Unbounded lists (Repos, Running, Queued, Finished): ~5 rows, header stays. */
+.list-scroll {
+  max-height: calc(2.15rem * 6);
+  overflow: auto;
+}
+.list-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--card);
+  z-index: 1;
+  box-shadow: 0 1px 0 var(--border);
+}
 .badge[title] { cursor: help; }
 th { color: var(--muted); font-weight: 600; }
 .ok { color: var(--ok); }
@@ -286,10 +298,10 @@ function kpi(label, value, sub) {
     (sub ? '<div class="kpi-sub">' + sub + '</div>' : "") + "</div>";
 }
 // headers: string or {t: label, tip: tooltip, num: true}
-function rows(id, headers, items, cells, totalRow, colCls) {
+function rows(id, headers, items, cells, totalRow, colCls, yScroll) {
   if ((!items || !items.length) && !totalRow) return '<p class="empty">(none)</p>';
   const hs = headers.map(h => typeof h === "string" ? {t: h} : h);
-  let h = '<div class="scroll"><table data-id="' + id + '"><thead><tr>' + hs.map((x, i) =>
+  let h = '<div class="scroll' + (yScroll ? ' list-scroll' : '') + '"><table data-id="' + id + '"><thead><tr>' + hs.map((x, i) =>
     '<th class="sortable' + (x.num ? ' num' : '') + '" data-col="' + i + '"' + (x.tip ? ' title="' + esc(x.tip) + '"' : '') + '>' +
     (x.tip ? '<abbr>' + esc(x.t) + '</abbr>' : esc(x.t)) + "</th>").join("") + "</tr></thead><tbody>";
   const cellHtml = (cs) => cs.map((x, i) => {
@@ -389,11 +401,21 @@ function setStatus(level, label) {
   if (dot) dot.className = "dot" + (level && level !== "ok" ? " " + level : "");
   if (txt) txt.textContent = label || (level === "fail" ? "Failing" : level === "warn" ? "Degraded" : "Online");
 }
+// GitHub is shown only when it is configured and has a real ok/warn/fail.
+// `off` (not configured) and `unknown` (not connected yet) are omitted and
+// must not mark overall/host health degraded.
+function githubLive(g) {
+  const l = g && g.level;
+  return l === "ok" || l === "warn" || l === "fail";
+}
+function healthProblem(level) {
+  return level === "fail" || level === "warn";
+}
 function paint(d) {
   last = d;
   const ga = d.github_auth || {};
   const gb = $("ghauth");
-  if (ga.level === "fail" || ga.level === "warn") {
+  if (githubLive(ga) && (ga.level === "fail" || ga.level === "warn")) {
     gb.className = "banner " + ga.level;
     gb.textContent = (ga.level === "fail" ? "GitHub auth failing: " : "GitHub token: ") + (ga.message || "");
     gb.hidden = false;
@@ -436,14 +458,15 @@ function paint(d) {
     kpi("Tokens saved", compact(saved), esc(sav0.period || "today") + (sav0.from ? " " + sav0.from + (sav0.to ? ".." + sav0.to : "") : ""));
   const hl = d.health || {};
   let hb = "";
-  const toks = (hl.github && hl.github.tokens) || [];
+  const gh = githubLive(hl.github) ? hl.github : null;
+  const toks = (gh && gh.tokens) || [];
   // Healthy items stay compact (details on hover); amber/red ones expand.
-  const bad = l => cls(l) === "warn" || cls(l) === "fail";
+  const bad = l => healthProblem(l);
   const tokTip = t => (t.owner || t.token_env || "token") + (t.days_left != null ? " " + t.days_left + "d" : "") + (t.message ? ": " + t.message : "");
   const badToks = toks.filter(t => bad(t.level)), okToks = toks.filter(t => !bad(t.level));
   if (okToks.length) hb += badge("ok", "GitHub ok", okToks.map(tokTip).join("\n"));
   badToks.forEach(t => hb += badge(t.level, "GitHub " + tokTip(t), t.message));
-  if (!toks.length && hl.github) hb += bad(hl.github.level) ? badge(hl.github.level, "GitHub: " + (hl.github.message || hl.github.level), hl.github.message) : badge(hl.github.level, "GitHub ok", hl.github.message);
+  if (gh && !toks.length) hb += bad(gh.level) ? badge(gh.level, "GitHub: " + (gh.message || gh.level), gh.message) : badge(gh.level, "GitHub ok", gh.message);
   if (hl.telegram && hl.telegram.enabled) hb += bad(hl.telegram.level) ? badge(hl.telegram.level, "Telegram failing", "details in the banner above") : badge(hl.telegram.level, "Telegram ok", hl.telegram.message);
   // CLIs collapse to one badge; only missing ones get their own (red) badge.
   const clis = hl.clis || [];
@@ -453,20 +476,20 @@ function paint(d) {
   if (hl.uptime) hb += badge("ok", "up " + hl.uptime, "service uptime");
   $("health").innerHTML = hb;
   const levels = [];
-  if (hl.github) levels.push(hl.github.level);
+  if (gh) levels.push(gh.level);
   toks.forEach(t => levels.push(t.level));
-  if (hl.telegram && hl.telegram.enabled) levels.push(hl.telegram.level);
+  if (hl.telegram && hl.telegram.enabled && healthProblem(hl.telegram.level)) levels.push(hl.telegram.level);
   badClis.forEach(() => levels.push("fail"));
-  if (ga.level) levels.push(ga.level);
-  if (th.level) levels.push(th.level);
+  if (githubLive(ga)) levels.push(ga.level);
+  if (healthProblem(th.level)) levels.push(th.level);
   if (d.intake_paused) levels.push("warn");
-  const overall = levels.some(l => cls(l) === "fail") ? "fail" : levels.some(l => cls(l) === "warn") ? "warn" : "ok";
+  const overall = levels.some(l => l === "fail") ? "fail" : levels.some(l => healthProblem(l)) ? "warn" : "ok";
   setStatus(overall);
   setOptions($("repoFilter"), (d.repos || []).filter(r => r.mode === "direct").map(r => r.name).filter(Boolean));
   setOptions($("providerFilter"), (d.providers || []).map(p => p.name));
   $("repos").innerHTML = rows("repos", ["name","mode","github","label",{t:"token env",tip:"env var used for GitHub (name only, never the value)"},"path"], d.repos, r => [
     esc(r.name) + (r.enabled ? "" : ' <span class="warn">(disabled)</span>'), esc(r.mode), esc(r.github || "-"), esc(r.label || "-"), esc(r.token_env || "-"), esc(r.path || "-")
-  ], null, ["","","","","","wrap"]);
+  ], null, ["","","","","","wrap"], true);
   const ta = d.telegram_assistant, tae = $("tgAssistant"), tac = $("tgCard");
   if (ta && ta.enabled) {
     tae.innerHTML = "provider " + esc(ta.provider_display || "-") +
@@ -482,18 +505,18 @@ function paint(d) {
   $("running").innerHTML = rows("running", ["key","repo","role","provider / model","elapsed","progress"], run, t => [
     taskKey(t.key), esc(t.repo), esc(t.role || "worker"), provModel(t.provider, t.model),
     '<span class="live" data-since="' + esc(t.started_utc) + '">' + elapsedSince(t.started_utc) + '</span>', esc(t.progress || "-")
-  ], null, ["","","","","","wrap"]);
+  ], null, ["","","","","","wrap"], true);
   const q = (d.queued || []).filter(t => keep(t, t.state || "queued", t.started_utc));
   $("queued").innerHTML = rows("queued", ["key","repo","role","parent","provider","model","waiting"], q, t => [
     taskKey(t.key), esc(t.repo), esc(t.role || "worker"), esc(t.parent || "-"), esc(t.provider), esc(t.model),
     esc(t.reason || (t.state === "held" ? "held" : t.elapsed) || "-")
-  ]);
+  ], null, null, true);
   const finRows = (d.finished || []).filter(t => keep(t, t.result, t.ended_utc));
   $("finished").innerHTML = rows("finished", [{t:"finished",tip:"local time; hover for the full date"},"key","prompt","repo","provider / model",{t:"elapsed",num:true},{t:"tokens",num:true},{t:"cost",num:true,tip:"as reported by the CLI"},"result"], finRows, t => [
     shortTime(t.finished_at, d.now), '<a href="' + esc(t.result_url) + '" title="result / diff">' + taskKey(t.key) + '</a>', esc(t.prompt || t.title || "-"),
     esc(t.repo), provModel(t.provider, t.model), esc(t.elapsed), t.tokens ? num(t.tokens) : "-", usd(t.cost_usd),
     '<span class="'+cls(t.result)+'">'+esc(t.result)+"</span>" + (t.reason && t.reason !== t.result ? ' <span class="meta">' + esc(t.reason) + "</span>" : "")
-  ], null, ["nowrap","nowrap","wide","nowrap","nowrap","nowrap","nowrap","nowrap","wide"]);
+  ], null, ["nowrap","nowrap","wide","nowrap","nowrap","nowrap","nowrap","nowrap","wide"], true);
   const max5 = Math.max(1, ...(d.providers || []).map(p => Number(p.tokens_5h) || 0));
   const max7 = Math.max(1, ...(d.providers || []).map(p => Number(p.tokens_7d) || 0));
   const bar = (v, m, kind) => '<span class="bar' + (kind === "out" ? " out" : "") + '" style="width:' + Math.round((Number(v) || 0) / m * 60) + 'px"></span>';
