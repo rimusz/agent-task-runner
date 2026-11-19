@@ -871,6 +871,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_expiration_corpus_via_auto() {
+        let cases = [
+            ("2027-01-12 07:28:00 UTC", "2027-01-12T07:28:00+00:00"),
+            ("2027-01-12 07:28:00 +0000", "2027-01-12T07:28:00+00:00"),
+            ("2027-01-12 07:28:00 -08:00", "2027-01-12T15:28:00+00:00"),
+            ("2027-01-12 07:28:00 PST", "2027-01-12T07:28:00+00:00"),
+            ("2027-01-12 07:28:00", "2027-01-12T07:28:00+00:00"),
+            ("2027-01-12T07:28:00Z", "2027-01-12T07:28:00+00:00"),
+        ];
+        for (input, expected) in cases {
+            let parsed = parse_expiration(input).unwrap_or_else(|| panic!("parse {input}"));
+            assert_eq!(crate::rfc3339::auto(parsed), expected, "{input}");
+        }
+    }
+
+    #[test]
     fn expiry_parse_and_daily_warning() {
         let exp = parse_expiration("2026-10-10 00:00:00 UTC").unwrap();
         assert_eq!(days_left(exp, t(0)), 9);

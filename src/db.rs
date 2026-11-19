@@ -16,7 +16,7 @@ pub fn canonical_usage_window(raw: &str) -> String {
 }
 
 pub fn now_rfc3339() -> String {
-    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    crate::rfc3339::millis(Utc::now())
 }
 
 /// Keep-warm pings for one session since its last real run.
@@ -3605,6 +3605,16 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn ts_in_future_accepts_mixed_historical_strings() {
+        let now = crate::rfc3339::parse("2026-10-13T12:00:00Z").unwrap();
+        assert!(!ts_in_future(Some("2026-10-13T12:00:00.000Z"), now));
+        assert!(!ts_in_future(Some("2026-10-13T12:00:00Z"), now));
+        assert!(!ts_in_future(Some("2026-10-13T12:00:00.000+00:00"), now));
+        assert!(ts_in_future(Some("2026-10-13T12:00:00.001Z"), now));
+        assert!(!ts_in_future(Some("2026-10-13T11:59:59.000Z"), now));
+    }
 
     fn new_lesson<'a>(repo: &'a str, text: &'a str) -> NewLesson<'a> {
         NewLesson {

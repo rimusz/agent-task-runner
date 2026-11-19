@@ -235,3 +235,91 @@ mod tests {
         assert_eq!(utc.format_ampm(t), "11:04 AM");
     }
 }
+
+#[cfg(test)]
+mod pins {
+    use super::*;
+
+    #[test]
+    fn utc_stamp() {
+        let tz = DisplayTz::parse("UTC").unwrap();
+        let t = DisplayTz::parse_utc("2026-10-13T23:30:00Z").unwrap();
+        assert_eq!(tz.day(t), "2026-10-13");
+        let formatted = tz.format(t);
+        assert!(formatted.contains("2026-10-13 23:30"), "{formatted}");
+        assert!(formatted.contains("UTC"), "{formatted}");
+        assert_eq!(tz.format_short(t), "Oct 13 23:30 UTC");
+        assert_eq!(tz.format_compact(t), "Oct 13");
+        assert_eq!(tz.hm(t), (23, 30));
+    }
+
+    #[test]
+    fn november_compact_pads_the_day() {
+        let tz = DisplayTz::parse("UTC").unwrap();
+        let t = DisplayTz::parse_utc("2026-11-03T03:00:00Z").unwrap();
+        assert_eq!(tz.format_compact(t), "Nov 03");
+    }
+
+    #[test]
+    fn new_york_rolls_the_day_and_prints_wall_clock() {
+        let tz = DisplayTz::parse("America/New_York").unwrap();
+        let rolled = DisplayTz::parse_utc("2026-10-14T02:00:00Z").unwrap();
+        assert_eq!(tz.day(rolled), "2026-10-13");
+        let t = DisplayTz::parse_utc("2026-10-14T17:10:00Z").unwrap();
+        let short = tz.format_short(t);
+        assert!(short.contains("America/New_York"), "{short}");
+        assert!(short.contains("13:10"), "{short}");
+        assert!(!short.contains("17:10"), "{short}");
+        assert_eq!(tz.format_ampm(t), "1:10 PM");
+        assert_eq!(tz.hm(t), (13, 10));
+    }
+
+    #[test]
+    fn dubai_is_four_hours_ahead() {
+        let tz = DisplayTz::parse("Asia/Dubai").unwrap();
+        let t = DisplayTz::parse_utc("2026-10-13T12:00:00Z").unwrap();
+        let formatted = tz.format(t);
+        assert!(formatted.contains("16:00"), "{formatted}");
+        assert!(formatted.contains("Asia/Dubai"), "{formatted}");
+    }
+
+    #[test]
+    fn kolkata_and_lord_howe() {
+        let t = DisplayTz::parse_utc("2026-10-13T12:00:00Z").unwrap();
+        let kolkata = DisplayTz::parse("Asia/Kolkata").unwrap();
+        assert_eq!(kolkata.day(t), "2026-10-13");
+        assert_eq!(kolkata.format_short(t), "Oct 13 17:30 Asia/Kolkata");
+        let howe = DisplayTz::parse("Australia/Lord_Howe").unwrap();
+        assert_eq!(howe.day(t), "2026-10-13");
+        assert_eq!(howe.format_short(t), "Oct 13 23:00 Australia/Lord_Howe");
+    }
+
+    #[test]
+    fn legacy_and_alias_labels_parse() {
+        for label in [
+            "UTC",
+            "Etc/UTC",
+            "GMT",
+            "US/Eastern",
+            "Europe/Kiev",
+            "Etc/GMT+5",
+        ] {
+            assert!(DisplayTz::parse(label).is_ok(), "{label}");
+        }
+    }
+
+    #[test]
+    fn unknown_zone_error_text() {
+        let err = DisplayTz::parse("Not/AZone").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "timezone \"Not/AZone\" is not a valid IANA zone (or local)"
+        );
+    }
+
+    #[test]
+    fn empty_and_local_use_the_host_zone() {
+        assert!(DisplayTz::parse("").is_ok());
+        assert!(DisplayTz::parse("local").is_ok());
+    }
+}

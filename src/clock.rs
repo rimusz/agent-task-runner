@@ -20,8 +20,7 @@ impl Clock {
     }
 
     pub fn rfc3339(&self) -> String {
-        self.now()
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        crate::rfc3339::millis(self.now())
     }
 }
 

@@ -840,6 +840,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compact_retry_why_uses_the_offset_hour() {
+        assert_eq!(
+            compact_retry_why("retry 2026-10-13T17:05:00.000+03:00 (x)"),
+            "retry 17:05 (x)"
+        );
+    }
+
+    #[test]
     fn stored_waiting_is_done_not_waiting() {
         assert_eq!(classify("waiting", false), Bucket::Done);
         assert_eq!(classify("done", false), Bucket::Done);

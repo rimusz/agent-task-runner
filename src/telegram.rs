@@ -3177,6 +3177,14 @@ mod tests {
     use crate::app::Shared;
     use std::sync::Arc;
 
+    #[test]
+    fn human_reset_date_uses_the_offset_local_date() {
+        assert_eq!(
+            human_reset_date("2026-10-05T23:30:00-04:00").as_deref(),
+            Some("5 Oct")
+        );
+    }
+
     fn harness_shared() -> Arc<Shared> {
         harness_shared_with("")
     }
