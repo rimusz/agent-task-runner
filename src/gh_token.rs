@@ -495,7 +495,6 @@ pub fn status_json(cfg: &Config, config_path: &Path, now: Timestamp) -> serde_js
     v["configured"] = serde_json::json!(true);
     v
 }
-}
 
 fn summarize_one(raw: &serde_json::Value, now: Timestamp) -> serde_json::Value {
     let s = |k: &str| raw.get(k).and_then(|v| v.as_str()).map(String::from);
