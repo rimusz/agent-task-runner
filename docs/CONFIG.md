@@ -92,12 +92,57 @@ atr v0.1.35 and earlier sent `instructions_file`, which codex-cli ignores, so
 Codex ran on its own base prompt without atr's instructions.
 
 OpenCode providers only: `allow_shell` (default `false`). When false, atr
-denies the model's `shell`/`execute` tools (plus `subagent`, `question`,
-`webfetch`, `websearch`, `external_directory`, and `skill`, so a worker never
-loads skills that tell it to run commands it can't run) through
-`OPENCODE_CONFIG_CONTENT`, and atr does every commit, push, PR and comment
-itself. `allow_shell = true` keeps the shell for a trusted model; leaving the
-worktree stays denied.
+denies the model's `shell` and `execute` tools, plus `subagent`, `question`,
+`webfetch`, `websearch`, `external_directory`, and `skill` (so a worker never
+loads skills that tell it to run commands it can't run), through
+`OPENCODE_CONFIG_CONTENT`. atr does every commit, push, PR and comment
+itself. `[code_mode] enabled` stops denying `execute` only. `allow_shell = true`
+keeps the shell for a trusted model; leaving the worktree stays denied.
+
+### Code mode
+
+```toml
+[code_mode]
+enabled = false   # default
+```
+
+Off, nothing changes. On, this is a prompt and permission experiment. atr
+does not run the model's tool loop, and this flag does not add a sandbox,
+a timeout, or an output cap of its own.
+
+- Shell-capable providers (Claude, Grok, Cursor, Codex, and OpenCode with
+  `allow_shell`) get a stable-prefix rule: batch reads, searches, and checks
+  into one script in the worktree, run it once, and print only the short
+  result (paths, counts, failing lines). The script still runs inside that
+  CLI's own tool loop and sandbox (Codex `-s`, Claude's permission mode, and
+  so on). It must stay under `shell_command_timeout`. Do not print file
+  bodies, logs, the environment, or secrets: a script that dumps them puts
+  them in the CLI's tool result and in atr's event log.
+- OpenCode with `allow_shell = false` still has `shell` denied. `execute`
+  (OpenCode's code-mode scripts) is no longer denied. The no-shell guards
+  (scratch cleanup, the main-checkout guard, a fresh session on retry, extra
+  verify retries) still apply, and `external_directory` stays denied.
+- The Telegram assistant ignores the flag (no contract, and `execute` stays
+  denied).
+- Turning the flag on changes the provider-contract prefix, so the next
+  resume of an existing session misses the prompt cache once.
+
+Codex's `codex-code-mode-host` is that CLI's own sandbox helper. atr does
+not start it and does not pass it flags. A macOS quarantine hang on that
+binary is a Codex install problem, not this flag (see the operator skill).
+
+**Measure one task.** The contract is part of the stable prefix, and a resume
+does not re-send that prefix (the CLI keeps its snapshot). Compare two fresh
+sessions, not a resume of the same one. Run the task with the flag off. Then
+set `enabled = true`, reload (`atr service restart` or SIGHUP), and run the
+same prompt as a new task (a no-shell `atr retry` already starts a fresh
+session). In `[log] path` search for `task tokens`. Fields on that line:
+`task`, `run_id`, `provider`, `kind`, `input`, `output`, `cache_read`,
+`cache_write`, `code_mode`, `recorded`. The same numbers are the `usage` row
+for that run (`input` is uncached; Codex subtracts cached input before
+storing). `recorded=false` means the CLI printed no usage object, so there is
+no `usage` row. Compare `input` between the off run and the on run. For a
+full prompt total, add `cache_read` and, except Codex, `cache_write`.
 
 ### Scratch files
 

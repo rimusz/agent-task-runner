@@ -43,8 +43,35 @@ pub fn provider_preamble(p: &Provider) -> String {
     if p.kind == "opencode" && !p.allow_shell {
         out.push_str(NO_SHELL_CONTRACT);
     }
+    if p.code_mode {
+        if p.kind == "opencode" && !p.allow_shell {
+            out.push_str(CODE_MODE_NO_SHELL);
+        } else {
+            out.push_str(CODE_MODE_SHELL);
+        }
+    }
     out
 }
+
+/// Shell-capable CLIs already run tools. This asks them to batch that work
+/// into one script so intermediate output stays out of the model context.
+/// The script still runs inside the CLI's own tool loop and sandbox.
+pub const CODE_MODE_SHELL: &str = "\
+## Code mode
+Batch reads, searches, and checks into one short script in the worktree and run that script once. \
+Print only the final lines you need (paths, counts, failing lines). Do not print file bodies, full logs, \
+the environment, or secrets. Stay inside the worktree and under the shell-command timeout in the task header. \
+Do not commit, push, or run gh from that script; atr does that after you finish.
+";
+
+/// OpenCode without a shell. `execute` is the only extra tool the flag allows.
+pub const CODE_MODE_NO_SHELL: &str = "\
+## Code mode
+You still have no shell. You may run one code-mode script with the execute tool to batch reads and searches \
+inside the worktree. Print only a short result (paths, counts, failing lines). Do not print file bodies, \
+secrets, or the environment. This is the only exception to the no-script line above. Do not use it for git, \
+gh, or tests; atr runs checks and publishes after you finish.
+";
 
 /// Appended to the provider contract when atr denies the model's shell.
 /// It overrides any instruction above to run commands, `git`, or `gh`.
@@ -294,6 +321,73 @@ mod tests {
         assert!(!provider_preamble(&p).contains("You have no shell tool"));
         let c = crate::providers::tests::stub("claude");
         assert!(!provider_preamble(&c).contains("You have no shell tool"));
+    }
+
+    #[test]
+    fn code_mode_contract_stays_in_the_stable_prefix() {
+        let mut shell = crate::providers::tests::stub("claude");
+        assert!(!provider_preamble(&shell).contains("## Code mode"));
+        shell.code_mode = true;
+        let text = provider_preamble(&shell);
+        assert!(text.contains("run that script once"), "{text}");
+        assert!(!text.contains("execute tool"), "{text}");
+
+        let mut local = crate::providers::tests::stub("opencode");
+        local.code_mode = true;
+        let text = provider_preamble(&local);
+        assert!(text.contains("You have no shell tool"), "{text}");
+        let no_shell = text.find("You have no shell tool").unwrap();
+        let code = text.find("execute tool").unwrap();
+        assert!(no_shell < code, "code mode follows the no-shell contract");
+        assert!(text.contains("only exception"), "{text}");
+
+        local.allow_shell = true;
+        let text = provider_preamble(&local);
+        assert!(!text.contains("You have no shell tool"), "{text}");
+        assert!(text.contains("run that script once"), "{text}");
+
+        let dir = tempdir().unwrap();
+        let sys = dir.path().join("sys.md");
+        std::fs::write(&sys, "STABLE SYSTEM\n").unwrap();
+        let cfg_txt = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{sys}"
+[code_mode]
+enabled = true
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "/bin/true"
+"#,
+            db = dir.path().join("s.db").display(),
+            root = dir.path().display(),
+            sys = sys.display(),
+        );
+        let cfg = crate::config::parse_config_toml(&cfg_txt).unwrap();
+        let p = cfg.provider("claude").unwrap();
+        let stable = assemble_stable(&cfg, p, dir.path());
+        let rendered = render(
+            &stable,
+            "acme-1",
+            Path::new("/tmp/wt"),
+            "repo",
+            None,
+            "15m",
+            None,
+            &["fix it".into()],
+            false,
+            false,
+            None,
+        );
+        let (head, tail) = rendered.split_once(VARIABLE_MARKER).unwrap();
+        assert!(head.contains("## Code mode"), "{head}");
+        assert!(!tail.contains("## Code mode"), "{tail}");
+        let again = assemble_stable(&cfg, p, dir.path());
+        assert_eq!(hash_prefix(&stable), hash_prefix(&again));
     }
 
     #[test]

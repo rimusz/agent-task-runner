@@ -1112,8 +1112,8 @@ pub fn doctor_cache(config: &Config) -> (bool, String) {
             && ta.contains("acme-cache-a")
             && tb.contains("acme-cache-b")
             && !ha.contains("Checklist")
-            && ha.find("## Task header").is_some()
-            && ha.find("## Provider contract").is_some();
+            && ha.contains("## Task header")
+            && ha.contains("## Provider contract");
         if prefix_ok {
             out.push_str(&format!("cache\t{}\tok\tsha256={hash}\n", p.name));
         } else {

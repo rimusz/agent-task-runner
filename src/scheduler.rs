@@ -1057,6 +1057,8 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     if assistant {
         provider =
             crate::telegram::apply_assistant_timeout(&provider, cfg.telegram.assistant.timeout);
+        // The assistant answers in chat. Code mode must not give it execute.
+        provider.code_mode = false;
     }
     if crate::tui::is_tui_key(&key) {
         crate::tui::apply_session_model(&mut provider, &shared.db, &key);
@@ -1610,6 +1612,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         &provider,
         &result,
         resume_delta,
+        &key,
     )?;
 
     if should_warn_low_cache(&shared.db, &key, result.session_id.as_deref())? {
@@ -2751,6 +2754,7 @@ fn record_run_usage(
     provider: &Provider,
     result: &runner::RunResult,
     is_resume: bool,
+    task_key: &str,
 ) -> Result<()> {
     let (u, raw) = if let Some(raw) = result.usage_raw.last() {
         (extract_usage(&provider.kind, raw), raw.to_string())
@@ -2763,8 +2767,16 @@ fn record_run_usage(
     {
         (result.usage.clone(), "{}".into())
     } else {
+        log_task_tokens(
+            task_key,
+            run_id,
+            provider,
+            &crate::providers::UsageNumbers::default(),
+            false,
+        );
         return Ok(());
     };
+    log_task_tokens(task_key, run_id, provider, &u, true);
     db.insert_usage(
         run_id,
         turn_id,
@@ -2778,6 +2790,31 @@ fn record_run_usage(
         &raw,
     )?;
     db.set_usage_resume(run_id, is_resume)
+}
+
+/// One info line per run: `task tokens` with `input` and `output`.
+/// `recorded=false` means the CLI printed no usage object, so the `usage`
+/// table has no row. `input` is uncached (Codex subtracts cached input).
+fn log_task_tokens(
+    task_key: &str,
+    run_id: i64,
+    provider: &Provider,
+    u: &crate::providers::UsageNumbers,
+    recorded: bool,
+) {
+    tracing::info!(
+        task = %task_key,
+        run_id,
+        provider = %provider.name,
+        kind = %provider.kind,
+        input = u.input,
+        output = u.output,
+        cache_read = u.cache_read,
+        cache_write = u.cache_write,
+        code_mode = provider.code_mode,
+        recorded,
+        "task tokens"
+    );
 }
 
 /// Low-cache warning is only meaningful after a session has had a successful
@@ -3160,8 +3197,8 @@ mod tests {
             classified: None,
             stderr: String::new(),
         };
-        record_run_usage(&db, run, Some(1), &grok, &result, false).unwrap();
-        record_run_usage(&db, run, Some(1), &grok, &result, false).unwrap();
+        record_run_usage(&db, run, Some(1), &grok, &result, false, "acme-u").unwrap();
+        record_run_usage(&db, run, Some(1), &grok, &result, false, "acme-u").unwrap();
         let rows = db.list_usage_for_run(run).unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].input, 10);
@@ -3197,11 +3234,32 @@ mod tests {
             classified: None,
             stderr: String::new(),
         };
-        record_run_usage(&db, run, Some(1), &cursor, &result, false).unwrap();
+        record_run_usage(&db, run, Some(1), &cursor, &result, false, "acme-c").unwrap();
         let rows = db.list_usage_for_run(run).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].cost_kind.as_deref(), Some("plan"));
         assert!(rows[0].cost_usd.is_none());
+    }
+
+    #[test]
+    fn record_run_usage_skips_the_row_when_the_cli_reports_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        db.upsert_task("acme-z", "/repo", None).unwrap();
+        let run = db.start_run("acme-z", "cursor", "m").unwrap();
+        let cursor = stub_provider("cursor", "--resume");
+        let result = runner::RunResult {
+            outcome: "success".into(),
+            exit_code: Some(0),
+            session_id: None,
+            usage: crate::providers::UsageNumbers::default(),
+            usage_raw: Vec::new(),
+            snippet: String::new(),
+            classified: None,
+            stderr: String::new(),
+        };
+        record_run_usage(&db, run, Some(1), &cursor, &result, false, "acme-z").unwrap();
+        assert!(db.list_usage_for_run(run).unwrap().is_empty());
     }
 
     #[test]
@@ -3266,6 +3324,7 @@ mod tests {
             keep_alive: String::new(),
             capabilities: Vec::new(),
             allow_shell: false,
+            code_mode: false,
         }
     }
 

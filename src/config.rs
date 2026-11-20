@@ -52,6 +52,9 @@ pub struct RawConfig {
     pub checklist: RawChecklist,
     #[serde(default)]
     pub scratch: RawScratch,
+    /// Prompt experiment: batch tool work into one script. Off by default.
+    #[serde(default)]
+    pub code_mode: RawCodeMode,
     #[serde(default)]
     pub lessons: RawLessons,
     #[serde(default)]
@@ -689,6 +692,7 @@ pub struct RawProvider {
     pub capabilities: Vec<String>,
     /// OpenCode only: let the model use its shell tool. Default false: atr
     /// denies `shell`/`execute` and does git, gh, and comments itself.
+    /// `[code_mode] enabled` stops denying `execute` only.
     #[serde(default)]
     pub allow_shell: bool,
 }
@@ -755,6 +759,8 @@ pub struct Config {
     pub verify: VerifyConfig,
     pub checklist: ChecklistConfig,
     pub scratch: ScratchConfig,
+    /// `[code_mode]`: ask the model to batch tool work into one script.
+    pub code_mode: CodeModeConfig,
     pub lessons: LessonsConfig,
     pub log: LogConfig,
     pub gc: GcConfig,
@@ -1067,13 +1073,15 @@ pub struct Provider {
     pub capabilities: Vec<String>,
     /// OpenCode only: keep the model's shell tool (default: denied).
     pub allow_shell: bool,
+    /// Copied from `[code_mode] enabled`. The assistant run clears this.
+    pub code_mode: bool,
 }
 
 impl Provider {
     /// False for a provider whose shell atr denies (OpenCode without
     /// `allow_shell`): the model cannot run tests or commands itself.
     pub fn has_shell(&self) -> bool {
-        !(self.kind == "opencode" && !self.allow_shell)
+        self.kind != "opencode" || self.allow_shell
     }
 
     pub fn is_ollama(&self) -> bool {
@@ -1166,6 +1174,7 @@ impl Provider {
             keep_alive: String::new(),
             capabilities: Vec::new(),
             allow_shell: false,
+            code_mode: false,
         }
     }
 }
@@ -1817,6 +1826,21 @@ pub struct ScratchConfig {
     pub scope: ScratchScope,
 }
 
+/// `[code_mode]`: off by default. When on, the stable provider contract tells
+/// a shell-capable CLI to batch reads and checks into one worktree script.
+/// OpenCode without `allow_shell` still has no shell; atr stops denying the
+/// `execute` (code-mode script) permission only.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RawCodeMode {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodeModeConfig {
+    pub enabled: bool,
+}
+
 impl ScratchConfig {
     /// Whether cleanup runs for this provider (`None`: unknown provider,
     /// treated as having a shell).
@@ -2295,6 +2319,7 @@ fn known_field_names() -> Vec<String> {
         introspect::fields::<RawVerify>(),
         introspect::fields::<RawVerifyRepo>(),
         introspect::fields::<RawChecklist>(),
+        introspect::fields::<RawCodeMode>(),
         introspect::fields::<RawLessons>(),
     ] {
         for f in fields {
@@ -2494,6 +2519,7 @@ impl Config {
                 cli: pr.cli,
             });
         }
+        let code_mode = raw.code_mode.enabled;
         let mut providers = Vec::with_capacity(raw.providers.len());
         let mut seen = std::collections::HashSet::new();
         for p in raw.providers {
@@ -2574,6 +2600,7 @@ impl Config {
                 keepwarm,
                 capabilities: p.capabilities.clone(),
                 allow_shell: p.allow_shell,
+                code_mode,
                 name: p.name,
                 kind: p.kind.clone(),
                 preset: p.preset.clone(),
@@ -2870,6 +2897,7 @@ impl Config {
                 revert_docs: raw.scratch.revert_docs,
                 scope: raw.scratch.scope,
             },
+            code_mode: CodeModeConfig { enabled: code_mode },
             lessons: LessonsConfig {
                 enabled: raw.lessons.enabled,
                 max_entries: raw.lessons.max_entries.clamp(1, 200),
@@ -3460,6 +3488,24 @@ mod tests {
         assert_eq!(s.scope, ScratchScope::All);
         assert!(s.applies_to(Some(&Provider::test_stub("claude"))));
         assert!(parse_config_toml(&format!("[scratch]\nscope = \"bogus\"\n{P}")).is_err());
+    }
+
+    #[test]
+    fn code_mode_is_off_unless_enabled() {
+        const P: &str = "[[provider]]\nname = \"claude\"\nkind = \"claude\"\ncli = \"/bin/true\"\n";
+        let cfg = parse_config_toml(P).unwrap();
+        assert!(!cfg.code_mode.enabled);
+        assert!(!cfg.provider("claude").unwrap().code_mode);
+        let cfg = parse_config_toml(&format!("[code_mode]\nenabled = true\n{P}")).unwrap();
+        assert!(cfg.code_mode.enabled);
+        assert!(cfg.providers[0].code_mode);
+        assert!(cfg.providers[0].has_shell());
+        let oc = parse_config_toml(
+            "[code_mode]\nenabled = true\n[[provider]]\nname = \"spark\"\nkind = \"opencode\"\ncli = \"/bin/true\"\n",
+        )
+        .unwrap();
+        assert!(oc.providers[0].code_mode);
+        assert!(!oc.providers[0].has_shell());
     }
 
     #[test]

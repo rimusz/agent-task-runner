@@ -176,6 +176,10 @@ with it.
 | TUI | Tracing never writes to the TUI (composer / transcript). Follow `[log] path`. |
 
 Search for `ERROR`, `GitHub auth failure`, `github poll failed`, `telegram`.
+Per-run token totals are the `task tokens` line (`input`, `output`,
+`cache_read`, `cache_write`, `code_mode`, `recorded`). `recorded=false`
+means that CLI printed no usage object. `[code_mode] enabled = true` is a
+prompt experiment, not a sandbox; see [CONFIG.md](CONFIG.md#code-mode).
 
 ## 4. Service
 

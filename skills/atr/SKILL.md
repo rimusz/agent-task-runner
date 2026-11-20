@@ -164,6 +164,7 @@ atr triage run --repo R --issue N                 # suggest-only; nothing posted
 
 Rules for agents:
 - **Never set `allow_shell = true`** on a local model unless the user explicitly asks. atr injects a deny list on every OpenCode run: `shell`, `execute`, `subagent`, `question`, `webfetch`, `websearch`, `external_directory`, `skill`. The model only edits files in its worktree; atr runs verify, commits, pushes, opens the PR and posts comments itself.
+- **`[code_mode]` stays off** unless the user asks to try it. `enabled = true` tells shell-capable CLIs to batch tool work into one script, and stops denying OpenCode `execute` only (`shell` stays denied). It is not a sandbox. The Telegram assistant ignores it. Measure with the `task tokens` log line (`input`, `output`, `code_mode`). See CONFIG.md.
 - **Configure `[[verify.repo]]` commands first.** Verify is the model's only test loop (it gets `no_shell_extra_retries`, default 1, extra follow-ups).
 - **Use triage for labels and comments, and never auto-approve.** Show the suggestion (`atr triage show <id>`) and let the user approve.
 - **Read the PR notes.** "Dropped scratch files" and "Reverted unrequested edits" list what atr removed. A `NO-OP <key>` or `BLOCKED <key>` result means nothing was delivered; report it, don't retry in a loop.

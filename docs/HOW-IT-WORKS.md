@@ -157,6 +157,36 @@ fresh session on retry; [CONFIG.md](CONFIG.md#guards-no-shell-providers-vs-every
 One run at a time per Ollama model. Usage for OpenCode, Cursor,
 and Codex shows `not reported`.
 
+### Code mode (off by default)
+
+atr does not own the tool loop. Claude, Grok, Cursor, Codex, and OpenCode
+each run their own tools; atr spawns the CLI, parses JSON events (including
+`tool_call`, which it stores and does not execute), and records usage.
+`[code_mode] enabled = false` leaves that alone.
+
+Codex's `codex-code-mode-host` is the Codex CLI's sandbox helper. atr's Codex
+command is `codex exec --json` with `-s` when a sandbox is set
+(`workspace-write` by default) and `-c model_instructions_file=…` for the
+stable prefix. atr never starts `codex-code-mode-host` and never passes it a
+flag. No provider runs tool calls as one script unless the model itself
+writes that script. OpenCode 2.x has an `execute` permission for code-mode
+scripts; atr denies it next to `shell`.
+
+When the flag is on, the stable provider contract (same bytes for every task
+on that provider, so the prefix hash stays stable while the flag stays on)
+tells a shell-capable CLI to batch reads, searches, and checks into one
+worktree script and print only a short result. A resume does not re-send the
+prefix, so a session that started with the flag off does not pick the
+contract up mid-session. OpenCode without `allow_shell`
+still has no shell; atr stops denying `execute` only, and the no-shell guards
+stay on. The Telegram assistant never gets the contract or `execute`. The
+script is not a new atr sandbox: timeouts, output size, and filesystem jail
+are whatever that CLI already applies. Token totals stay the CLI's usage
+events. Each run logs `task tokens` (`input`, `output`, `cache_read`,
+`cache_write`, `code_mode`, `recorded`) and, when `recorded=true`, writes the
+same numbers to the run's `usage` row. See
+[CONFIG.md](CONFIG.md#code-mode).
+
 ## Token caching
 
 atr never calls vendor HTTP APIs. Cache hits come from the official CLIs only.

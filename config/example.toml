@@ -148,6 +148,14 @@ drop = true
 revert_docs = true
 scope = "no_shell"
 
+# Experiment, off by default. When true, the stable provider contract tells a
+# shell-capable CLI to batch reads and checks into one worktree script and
+# print only a short result. OpenCode without allow_shell still has no shell;
+# atr stops denying the execute (code-mode script) tool only. Not a sandbox.
+# The Telegram assistant ignores this. See docs/CONFIG.md.
+[code_mode]
+enabled = false
+
 [checklist]
 enabled = true
 max_bytes = 4096

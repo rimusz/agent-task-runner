@@ -333,6 +333,7 @@ fn build_opencode(
         opencode_config_content(
             major,
             p.allow_shell,
+            p.code_mode,
             std::env::var("OPENCODE_CONFIG_CONTENT").ok().as_deref(),
         ),
     )];
@@ -345,7 +346,7 @@ fn build_opencode(
     }
 }
 
-/// Tools atr denies on every OpenCode worker run. OpenCode 2.x names its
+/// Tools atr denies on an OpenCode worker run. OpenCode 2.x names its
 /// permission actions `shell` (was `bash`), `execute` (Code Mode scripts),
 /// `subagent` (was `task`), `question`, `webfetch`, `websearch`, and
 /// `external_directory`, and `skill`; 1.x uses a `permission` map with
@@ -357,6 +358,8 @@ fn build_opencode(
 /// read-only to it). `skill` is denied because a worker loading skills
 /// (e.g. the atr operator skill) gets instructions to run commands it cannot
 /// run. `allow_shell = true` on the provider keeps `shell`.
+/// `[code_mode] enabled` keeps `execute` (OpenCode's code-mode scripts) and
+/// still denies `shell` unless `allow_shell` is set.
 pub const OPENCODE_V2_DENY: &[&str] = &[
     "shell",
     "execute",
@@ -376,6 +379,7 @@ pub const OPENCODE_V2_DENY: &[&str] = &[
 pub fn opencode_config_content(
     major: Option<u32>,
     allow_shell: bool,
+    allow_execute: bool,
     existing: Option<&str>,
 ) -> String {
     let mut root = existing
@@ -392,6 +396,9 @@ pub fn opencode_config_content(
             .unwrap_or_default();
         for action in OPENCODE_V2_DENY {
             if allow_shell && *action == "shell" {
+                continue;
+            }
+            if allow_execute && *action == "execute" {
                 continue;
             }
             rules.push(serde_json::json!({
@@ -1244,6 +1251,7 @@ pub(crate) mod tests {
             keep_alive: String::new(),
             capabilities: Vec::new(),
             allow_shell: false,
+            code_mode: false,
         }
     }
 
@@ -1471,6 +1479,31 @@ pub(crate) mod tests {
         assert_eq!(j["permission"]["bash"], "deny", "{v}");
         assert_eq!(j["permission"]["external_directory"], "deny", "{v}");
         assert_eq!(j["permission"]["skill"], "deny", "{v}");
+        p.code_mode = true;
+        let spec = build_command(
+            &p,
+            Path::new("/wt"),
+            Path::new("/wt/.atr/prompt.md"),
+            "x",
+            None,
+            true,
+        );
+        let (_, v) = spec
+            .env
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+            .unwrap();
+        let j: Value = serde_json::from_str(v).unwrap();
+        let denied: Vec<&str> = j["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["effect"] == "deny")
+            .map(|r| r["action"].as_str().unwrap())
+            .collect();
+        assert!(denied.contains(&"shell"), "{v}");
+        assert!(!denied.contains(&"execute"), "{v}");
+        assert!(denied.contains(&"external_directory"), "{v}");
         // Other CLIs get no extra env.
         let c = build_command(
             &stub("claude"),
@@ -1486,20 +1519,26 @@ pub(crate) mod tests {
     #[test]
     fn opencode_config_content_by_version_and_opt_in() {
         let v2: Value =
-            serde_json::from_str(&opencode_config_content(Some(2), false, None)).unwrap();
+            serde_json::from_str(&opencode_config_content(Some(2), false, false, None)).unwrap();
         assert!(v2.get("permission").is_none(), "{v2}");
         assert!(v2["permissions"]
             .as_array()
             .unwrap()
             .iter()
             .any(|r| r["action"] == "shell"));
+        assert!(v2["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["action"] == "execute"));
         let v1: Value =
-            serde_json::from_str(&opencode_config_content(Some(1), false, None)).unwrap();
+            serde_json::from_str(&opencode_config_content(Some(1), false, false, None)).unwrap();
         assert!(v1.get("permissions").is_none(), "{v1}");
         assert_eq!(v1["permission"]["bash"], "deny");
-        // allow_shell keeps the shell but still denies leaving the worktree.
+        // allow_shell keeps the shell but still denies leaving the worktree
+        // and still denies code-mode scripts until allow_execute.
         let ok: Value =
-            serde_json::from_str(&opencode_config_content(Some(2), true, None)).unwrap();
+            serde_json::from_str(&opencode_config_content(Some(2), true, false, None)).unwrap();
         let acts: Vec<_> = ok["permissions"]
             .as_array()
             .unwrap()
@@ -1507,18 +1546,36 @@ pub(crate) mod tests {
             .map(|r| r["action"].clone())
             .collect();
         assert!(!acts.contains(&Value::from("shell")), "{ok}");
+        assert!(acts.contains(&Value::from("execute")), "{ok}");
         assert!(acts.contains(&Value::from("external_directory")), "{ok}");
+        let code: Value =
+            serde_json::from_str(&opencode_config_content(Some(2), false, true, None)).unwrap();
+        let code_acts: Vec<_> = code["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["action"].clone())
+            .collect();
+        assert!(code_acts.contains(&Value::from("shell")), "{code}");
+        assert!(!code_acts.contains(&Value::from("execute")), "{code}");
+        assert!(
+            code_acts.contains(&Value::from("external_directory")),
+            "{code}"
+        );
         // The caller's own config content is kept; atr's denies come last.
         let mine =
             r#"{"model":"x/y","permissions":[{"action":"read","resource":"*","effect":"allow"}]}"#;
         let m: Value =
-            serde_json::from_str(&opencode_config_content(Some(2), false, Some(mine))).unwrap();
+            serde_json::from_str(&opencode_config_content(Some(2), false, false, Some(mine)))
+                .unwrap();
         assert_eq!(m["model"], "x/y");
         let rules = m["permissions"].as_array().unwrap();
         assert_eq!(rules[0]["action"], "read");
         assert_eq!(rules.last().unwrap()["effect"], "deny");
         // Junk is ignored, not an error.
-        assert!(opencode_config_content(None, false, Some("not json")).contains("permissions"));
+        assert!(
+            opencode_config_content(None, false, false, Some("not json")).contains("permissions")
+        );
     }
 
     #[test]
