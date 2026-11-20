@@ -471,10 +471,12 @@ fn grok_rules_flag_is_text(flag: &str) -> bool {
 fn grok_rules_arg_limit() -> usize {
     #[cfg(unix)]
     {
-        let page = sysconf_usize(libc::_SC_PAGESIZE).unwrap_or(4096);
         let arg_max = sysconf_usize(libc::_SC_ARG_MAX).unwrap_or(256 * 1024);
+        // Linux MAX_ARG_STRLEN is 32 pages. macOS has no per-string cap of
+        // that form; one argument is bounded by ARG_MAX with the rest of
+        // argv and the environment.
         #[cfg(target_os = "linux")]
-        let per_arg = 32 * page - 1;
+        let per_arg = 32 * sysconf_usize(libc::_SC_PAGESIZE).unwrap_or(4096) - 1;
         #[cfg(not(target_os = "linux"))]
         let per_arg = arg_max.saturating_sub(1);
         let total_budget = arg_max.saturating_sub(64 * 1024);
