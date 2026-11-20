@@ -1168,20 +1168,30 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                     &base_branch,
                 )?
             } else if cfg.cache.worktree_pool {
-                let existing_wt = task
-                    .worktree
-                    .as_deref()
-                    .filter(|w| !worktree::is_none_workspace(std::path::Path::new(w)));
-                let slot = pick_pool_slot(
-                    &shared,
+                let existing_wt = task.worktree.as_deref().filter(|w| {
+                    !w.is_empty() && !worktree::is_none_workspace(std::path::Path::new(w))
+                });
+                let inflight_keys: Vec<String> =
+                    shared.inflight.lock().unwrap().keys().cloned().collect();
+                let Some((slot, dest)) = prepare_pool_slot(
+                    &shared.db,
+                    &cfg.worktree_root,
                     &repo,
                     &provider.name,
                     &key,
-                    existing_wt,
+                    existing_wt.map(std::path::Path::new),
                     provider.max_parallel.max(1),
-                );
-                let dest =
-                    worktree::pool_slot_path(&cfg.worktree_root, &repo, &provider.name, slot);
+                    &inflight_keys,
+                )?
+                else {
+                    tracing::info!(
+                        task = %key,
+                        provider = %provider.name,
+                        "worktree slots full; waiting"
+                    );
+                    let _ = shared.db.set_status(&key, "queued");
+                    return Ok(());
+                };
                 // Same task/session (stall retry, resume, fork, follow-up):
                 // reuse the tree as-is, including detached HEAD. Reset only
                 // when this slot is going to a different task.
@@ -1195,6 +1205,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
                     &branch_prefix,
                     &base_branch,
                     !keep,
+                    false,
                 )?
             } else {
                 worktree::ensure_worktree(
@@ -2685,63 +2696,51 @@ fn ensure_session(db: &Db, key: &str, provider: &Provider) -> Result<(Option<Str
     Ok((Some(sid), true))
 }
 
-/// One usage row per run. Last CLI usage event wins (streaming CLIs repeat totals).
-fn pick_pool_slot(
-    shared: &Shared,
+/// Claim a pool slot, or `None` when the task must wait.
+///
+/// Ownership is a `pool_slots` row keyed by task id, taken in one transaction
+/// (`Db::allocate_pool_slot`). A stored worktree path is only a preference:
+/// it is never used while another live task owns that directory. `None` also
+/// means the directory we would have checked out belongs to someone else; the
+/// claim is dropped so the next pass can take a different slot.
+fn prepare_pool_slot(
+    db: &Db,
+    root: &std::path::Path,
     repo: &std::path::Path,
     provider: &str,
     key: &str,
-    existing: Option<&str>,
+    existing: Option<&std::path::Path>,
     max_slots: u32,
-) -> u32 {
-    if let Some(path) = existing {
-        if let Some(slot) = worktree::slot_from_pool_path(std::path::Path::new(path), provider) {
-            if slot < max_slots {
-                return slot;
-            }
-        }
-    }
-    let inflight = shared.inflight.lock().unwrap();
-    let mut used = std::collections::HashSet::new();
-    let reserve = |used: &mut std::collections::HashSet<u32>, t: &crate::db::Task| {
-        if t.key == key {
-            return;
-        }
-        if t.provider.as_deref() != Some(provider) {
-            return;
-        }
-        let Some(wt) = t.worktree.as_deref() else {
-            return;
-        };
-        let Some(slot) = worktree::slot_from_pool_path(std::path::Path::new(wt), provider) else {
-            return;
-        };
-        let repo_ok = t
-            .repo
-            .as_deref()
-            .is_some_and(|r| crate::config::paths_eq(std::path::Path::new(r), repo));
-        if repo_ok {
-            used.insert(slot);
-        }
+    inflight: &[String],
+) -> Result<Option<(u32, std::path::PathBuf)>> {
+    let max_slots = max_slots.max(1);
+    let paths: Vec<std::path::PathBuf> = (0..max_slots)
+        .map(|slot| worktree::pool_slot_path(root, repo, provider, slot))
+        .collect();
+    let candidates: Vec<(u32, &std::path::Path)> = paths
+        .iter()
+        .enumerate()
+        .map(|(i, path)| (i as u32, path.as_path()))
+        .collect();
+    let Some(slot) = db.allocate_pool_slot(key, &candidates, existing, inflight)? else {
+        return Ok(None);
     };
-    for k in inflight.keys() {
-        if let Ok(Some(t)) = shared.db.get_task(k) {
-            reserve(&mut used, &t);
-        }
+    let dest = paths
+        .get(slot as usize)
+        .cloned()
+        .unwrap_or_else(|| worktree::pool_slot_path(root, repo, provider, slot));
+    if let Some(other) = db.worktree_blocked_by(&dest, key, inflight)? {
+        tracing::error!(
+            task = %key,
+            other = %other,
+            slot,
+            worktree = %dest.display(),
+            "refusing to check out a worktree another live task owns"
+        );
+        db.release_pool_slots(key)?;
+        return Ok(None);
     }
-    if let Ok(tasks) = shared.db.list_tasks() {
-        for t in tasks {
-            if matches!(t.status.as_str(), "queued" | "running" | "waiting") {
-                reserve(&mut used, &t);
-            }
-        }
-    }
-    for i in 0..max_slots {
-        if !used.contains(&i) {
-            return i;
-        }
-    }
-    0
+    Ok(Some((slot, dest)))
 }
 
 fn record_run_usage(
@@ -2792,6 +2791,7 @@ fn should_warn_low_cache(db: &Db, key: &str, session: Option<&str>) -> Result<bo
 pub(crate) fn fail_claimed(shared: &Shared, key: &str, err: &anyhow::Error) {
     let reason = format!("{err:#}");
     tracing::error!(task = %key, "run failed: {reason}");
+    let _ = shared.db.release_pool_slots(key);
     if let Ok(Some(run_id)) = shared.db.open_run_for_task(key) {
         let _ = shared.db.finish_run(run_id, "failed", Some(-1));
     }
@@ -2871,6 +2871,7 @@ fn try_resume_restart_orphan(shared: &Shared, run: &crate::db::RunRow) -> Result
         .db
         .set_task_result(&run.task_key, RESTART_RESULT, "", None);
     shared.db.set_status(&run.task_key, "queued")?;
+    reserve_restart_pool_slot(shared, &task, &run.provider);
     tracing::info!(
         task = %run.task_key,
         run = run.id,
@@ -2878,6 +2879,30 @@ fn try_resume_restart_orphan(shared: &Shared, run: &crate::db::RunRow) -> Result
         "resuming task interrupted by atr restart"
     );
     Ok(true)
+}
+
+/// Keep the pool directory this task was using so a task dispatched after
+/// restart cannot check it out before the resume runs.
+fn reserve_restart_pool_slot(shared: &Shared, task: &crate::db::Task, provider: &str) {
+    let Some(wt) = task.worktree.as_deref().filter(|w| !w.is_empty()) else {
+        return;
+    };
+    let path = std::path::Path::new(wt);
+    if !worktree::is_pool_worktree(path) {
+        return;
+    }
+    let Some(slot) = worktree::slot_from_pool_path(path, provider) else {
+        return;
+    };
+    match shared.db.hold_pool_slot(&task.key, slot, path, &[]) {
+        Ok(true) => tracing::info!(task = %task.key, slot, "kept pool slot across restart"),
+        Ok(false) => tracing::warn!(
+            task = %task.key,
+            slot,
+            "pool slot held by another live task; resume will take a free slot"
+        ),
+        Err(e) => tracing::warn!(task = %task.key, "pool slot hold: {e:#}"),
+    }
 }
 
 fn last_finished_was_restarted(db: &Db, key: &str, except_run_id: i64) -> Result<bool> {
@@ -4172,6 +4197,139 @@ cli = "{cli}"
         );
         assert!(prompt::RESTART_PREAMBLE.contains("atr restart"));
         assert!(prompt::RESTART_PREAMBLE.contains("git push"));
+    }
+
+    #[test]
+    fn restart_resume_keeps_its_pool_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_for_reconcile(dir.path());
+        let repo = dir.path().join("ios");
+        std::fs::create_dir_all(&repo).unwrap();
+        let slot0 = worktree::pool_slot_path(dir.path(), &repo, "claude", 0);
+        let slot1 = worktree::pool_slot_path(dir.path(), &repo, "claude", 1);
+        std::fs::create_dir_all(&slot0).unwrap();
+        shared
+            .db
+            .upsert_task("mini-299-fa2180dd-ios", &repo.display().to_string(), None)
+            .unwrap();
+        shared
+            .db
+            .set_status("mini-299-fa2180dd-ios", "running")
+            .unwrap();
+        shared
+            .db
+            .set_worktree("mini-299-fa2180dd-ios", &slot0.display().to_string())
+            .unwrap();
+        let run = shared
+            .db
+            .start_run("mini-299-fa2180dd-ios", "claude", "")
+            .unwrap();
+        shared.db.set_run_pid(run, 1_999_999_999).unwrap();
+        shared.db.set_run_owner(run, None).unwrap();
+        shared
+            .db
+            .set_task_owner("mini-299-fa2180dd-ios", None)
+            .unwrap();
+
+        assert_eq!(recover_restart_orphans(&shared).unwrap(), 1);
+        let resumed = shared
+            .db
+            .get_task("mini-299-fa2180dd-ios")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.status, "queued");
+
+        shared
+            .db
+            .upsert_task("mini-282-05f5f64e-ios", &repo.display().to_string(), None)
+            .unwrap();
+        shared
+            .db
+            .set_status("mini-282-05f5f64e-ios", "running")
+            .unwrap();
+        let other = prepare_pool_slot(
+            &shared.db,
+            dir.path(),
+            &repo,
+            "claude",
+            "mini-282-05f5f64e-ios",
+            None,
+            2,
+            &[],
+        )
+        .unwrap();
+        let (slot, dest) = other.expect("second task gets the free slot");
+        assert_eq!(slot, 1);
+        assert_eq!(dest, slot1);
+
+        let again = prepare_pool_slot(
+            &shared.db,
+            dir.path(),
+            &repo,
+            "claude",
+            "mini-299-fa2180dd-ios",
+            Some(&slot0),
+            2,
+            &[],
+        )
+        .unwrap();
+        let (slot, dest) = again.expect("resumed task keeps claude-0");
+        assert_eq!(slot, 0);
+        assert_eq!(dest, slot0);
+    }
+
+    #[test]
+    fn prepare_pool_slot_refuses_tree_another_live_task_owns() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_for_reconcile(dir.path());
+        let repo = dir.path().join("ios");
+        std::fs::create_dir_all(&repo).unwrap();
+        let slot0 = worktree::pool_slot_path(dir.path(), &repo, "claude", 0);
+        shared
+            .db
+            .upsert_task("mini-299-fa2180dd-ios", &repo.display().to_string(), None)
+            .unwrap();
+        shared
+            .db
+            .set_status("mini-299-fa2180dd-ios", "running")
+            .unwrap();
+        shared
+            .db
+            .set_worktree("mini-299-fa2180dd-ios", &slot0.display().to_string())
+            .unwrap();
+        shared
+            .db
+            .upsert_task("mini-282-05f5f64e-ios", &repo.display().to_string(), None)
+            .unwrap();
+        shared
+            .db
+            .set_status("mini-282-05f5f64e-ios", "running")
+            .unwrap();
+        shared
+            .db
+            .set_worktree("mini-282-05f5f64e-ios", &slot0.display().to_string())
+            .unwrap();
+        assert_eq!(
+            prepare_pool_slot(
+                &shared.db,
+                dir.path(),
+                &repo,
+                "claude",
+                "mini-282-05f5f64e-ios",
+                Some(&slot0),
+                2,
+                &[],
+            )
+            .unwrap()
+            .map(|(slot, _)| slot),
+            Some(1),
+            "B must not be handed the worktree A is running in"
+        );
+        let owner = shared
+            .db
+            .worktree_blocked_by(&slot0, "mini-282-05f5f64e-ios", &[])
+            .unwrap();
+        assert_eq!(owner.as_deref(), Some("mini-299-fa2180dd-ios"));
     }
 
     #[test]

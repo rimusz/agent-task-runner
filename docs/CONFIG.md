@@ -486,8 +486,9 @@ when the process tree is also idle (no CPU/IO on the CLI or its descendants)
 and the worktree has no recent file writes. A long-running child the agent
 started (test driver, build) keeps the run alive. There is no per-task
 heartbeat override; set it on the provider. A stall retry of the same session
-reuses the worktree as-is (no checkout/reset). A new task on that pool slot
-still prepares the tree.
+reuses the worktree as-is (no checkout/reset) while that task still owns the
+pool slot. A new task never checks out a slot a live task owns; it takes
+another slot or waits. When it does land on a free slot, it prepares the tree.
 
 ### Run wall-clock cap
 

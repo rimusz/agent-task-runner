@@ -545,6 +545,7 @@ impl Shared {
             }
             self.db.finish_run(info.run_id, "cancelled", Some(-2))?;
             self.db.set_status(key, "failed")?;
+            let _ = self.db.release_pool_slots(key);
             self.inflight.lock().unwrap().remove(key);
             let _ = crate::deps::hold_dependents(&self.db, key);
             return Ok(());
@@ -554,6 +555,7 @@ impl Shared {
                 bail!("task {key} is running; re-run with --force to cancel");
             }
             self.db.set_status(key, "failed")?;
+            let _ = self.db.release_pool_slots(key);
             let _ = crate::deps::hold_dependents(&self.db, key);
             Ok(())
         } else {
