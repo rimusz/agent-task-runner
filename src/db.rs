@@ -676,6 +676,20 @@ impl Db {
             CREATE INDEX IF NOT EXISTS keepwarm_task ON keepwarm_pings(task_key, provider);
             "#,
         )?;
+        // One owner task per pool worktree. Released when that task is no
+        // longer running, in flight, in a live run, or queued to continue
+        // on this path. See `allocate_pool_slot`.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS pool_slots (
+                path TEXT PRIMARY KEY,
+                slot INTEGER NOT NULL,
+                task_key TEXT NOT NULL,
+                acquired TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS pool_slots_task ON pool_slots(task_key);
+            "#,
+        )?;
         drop(conn);
         self.normalize_legacy_usage()?;
         Ok(())
@@ -1222,6 +1236,7 @@ impl Db {
         );
         let _ = conn.execute("DELETE FROM runs WHERE task_key = ?1", params![key]);
         let _ = conn.execute("DELETE FROM idempotency WHERE task_key = ?1", params![key]);
+        let _ = conn.execute("DELETE FROM pool_slots WHERE task_key = ?1", params![key]);
         conn.execute("DELETE FROM tasks WHERE key = ?1", params![key])?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(())
@@ -1317,6 +1332,152 @@ impl Db {
         conn.execute(
             "UPDATE tasks SET worktree = NULL, updated = ?1 WHERE key = ?2",
             params![now_rfc3339(), key],
+        )?;
+        Ok(())
+    }
+
+    /// Claim one pool slot for `task_key`, or `None` when every candidate is
+    /// already owned by a live task.
+    ///
+    /// The choice and the insert happen in one write-locked transaction so
+    /// two serves (or two tasks spawned in one tick) cannot both take slot 0.
+    /// A row is kept while its task is running, listed in `inflight`, has a
+    /// live open run, or is queued to continue on this same path. Idle
+    /// finished tasks (`waiting` and the other removable statuses) are dropped
+    /// here. When `candidates` is empty the pool has no room.
+    pub fn allocate_pool_slot(
+        &self,
+        task_key: &str,
+        candidates: &[(u32, &Path)],
+        preferred: Option<&Path>,
+        inflight: &[String],
+    ) -> Result<Option<u32>> {
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.lock();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<Option<u32>> {
+            reconcile_pool_slots(&conn, candidates, inflight, task_key)?;
+            let rows = load_pool_slots(&conn)?;
+            if let Some(slot) = owned_candidate(&rows, task_key, candidates) {
+                return Ok(Some(slot));
+            }
+            let taken = |path: &Path| {
+                rows.iter().any(|r| {
+                    r.task_key != task_key && crate::config::paths_eq(Path::new(&r.path), path)
+                })
+            };
+            if let Some(pref) = preferred {
+                if let Some((slot, path)) = candidates
+                    .iter()
+                    .find(|(_, path)| crate::config::paths_eq(path, pref))
+                {
+                    if !taken(path) {
+                        claim_pool_slot(&conn, task_key, *slot, path)?;
+                        return Ok(Some(*slot));
+                    }
+                }
+            }
+            for (slot, path) in candidates {
+                if !taken(path) {
+                    claim_pool_slot(&conn, task_key, *slot, path)?;
+                    return Ok(Some(*slot));
+                }
+            }
+            Ok(None)
+        })();
+        match result {
+            Ok(slot) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(slot)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Reserve `path` for a task that will resume on it (serve restart).
+    /// Does not steal a slot another live task already holds.
+    pub fn hold_pool_slot(
+        &self,
+        task_key: &str,
+        slot: u32,
+        path: &Path,
+        inflight: &[String],
+    ) -> Result<bool> {
+        let conn = self.lock();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<bool> {
+            let rows = load_pool_slots(&conn)?;
+            for r in &rows {
+                if r.task_key == task_key && crate::config::paths_eq(Path::new(&r.path), path) {
+                    return Ok(true);
+                }
+            }
+            for r in &rows {
+                if r.task_key != task_key
+                    && crate::config::paths_eq(Path::new(&r.path), path)
+                    && pool_slot_held(&conn, &r.task_key, path, inflight)?
+                {
+                    return Ok(false);
+                }
+            }
+            let live = live_worktrees(&conn, inflight)?;
+            if live
+                .iter()
+                .any(|(key, wt)| key != task_key && crate::config::paths_eq(Path::new(wt), path))
+            {
+                return Ok(false);
+            }
+            claim_pool_slot(&conn, task_key, slot, path)?;
+            Ok(true)
+        })();
+        match result {
+            Ok(held) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(held)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Another live task that owns `path`, or whose worktree is `path`.
+    pub fn worktree_blocked_by(
+        &self,
+        path: &Path,
+        task_key: &str,
+        inflight: &[String],
+    ) -> Result<Option<String>> {
+        let conn = self.lock();
+        let rows = load_pool_slots(&conn)?;
+        for r in &rows {
+            if r.task_key != task_key
+                && crate::config::paths_eq(Path::new(&r.path), path)
+                && pool_slot_held(&conn, &r.task_key, path, inflight)?
+            {
+                return Ok(Some(r.task_key.clone()));
+            }
+        }
+        for (key, wt) in live_worktrees(&conn, inflight)? {
+            if key != task_key && crate::config::paths_eq(Path::new(&wt), path) {
+                return Ok(Some(key));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Drop every pool slot owned by `task_key`.
+    pub fn release_pool_slots(&self, task_key: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM pool_slots WHERE task_key = ?1",
+            params![task_key],
         )?;
         Ok(())
     }
@@ -3307,6 +3468,191 @@ fn row_to_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
     })
 }
 
+struct PoolSlotRow {
+    path: String,
+    task_key: String,
+}
+
+fn load_pool_slots(conn: &Connection) -> Result<Vec<PoolSlotRow>> {
+    let mut stmt = conn.prepare("SELECT path, task_key FROM pool_slots")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(PoolSlotRow {
+                path: r.get(0)?,
+                task_key: r.get(1)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn owned_candidate(
+    rows: &[PoolSlotRow],
+    task_key: &str,
+    candidates: &[(u32, &Path)],
+) -> Option<u32> {
+    for (slot, path) in candidates {
+        if rows
+            .iter()
+            .any(|r| r.task_key == task_key && crate::config::paths_eq(Path::new(&r.path), path))
+        {
+            return Some(*slot);
+        }
+    }
+    None
+}
+
+/// True when this task must keep the slot: running, in this process's
+/// inflight set, a live open run, or queued to continue on this exact path.
+fn pool_slot_held(
+    conn: &Connection,
+    task_key: &str,
+    path: &Path,
+    inflight: &[String],
+) -> Result<bool> {
+    let row = conn
+        .query_row(
+            "SELECT status, worktree FROM tasks WHERE key = ?1",
+            params![task_key],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+    let Some((status, worktree)) = row else {
+        return Ok(false);
+    };
+    if status == "running" || inflight.iter().any(|k| k == task_key) {
+        return Ok(true);
+    }
+    if task_open_run_live(conn, task_key)? {
+        return Ok(true);
+    }
+    if status == "queued" {
+        if let Some(wt) = worktree.as_deref().filter(|w| !w.is_empty()) {
+            if crate::config::paths_eq(Path::new(wt), path) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn task_open_run_live(conn: &Connection, task_key: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT owner_pid, owner_started, pid FROM runs WHERE task_key = ?1 AND ended IS NULL",
+    )?;
+    let rows = stmt
+        .query_map(params![task_key], |r| {
+            Ok((
+                r.get::<_, Option<i64>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for (owner_pid, owner_started, pid) in rows {
+        if crate::owner::owner_alive(
+            owner_pid.unwrap_or(0),
+            owner_started.as_deref().unwrap_or(""),
+        ) {
+            return Ok(true);
+        }
+        if pid_alive(pid.unwrap_or(0)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Tasks that are running, in `inflight`, or have a live open run, with a worktree.
+fn live_worktrees(conn: &Connection, inflight: &[String]) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT key, status, worktree FROM tasks WHERE worktree IS NOT NULL AND worktree != ''",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+    let mut out = Vec::new();
+    for (key, status, wt) in rows {
+        let live = if status == "running" || inflight.iter().any(|k| k == &key) {
+            true
+        } else {
+            task_open_run_live(conn, &key)?
+        };
+        if live {
+            out.push((key, wt));
+        }
+    }
+    Ok(out)
+}
+
+fn claim_pool_slot(conn: &Connection, task_key: &str, slot: u32, path: &Path) -> Result<()> {
+    let rows = load_pool_slots(conn)?;
+    conn.execute(
+        "DELETE FROM pool_slots WHERE task_key = ?1",
+        params![task_key],
+    )?;
+    for r in rows {
+        if crate::config::paths_eq(Path::new(&r.path), path) {
+            conn.execute("DELETE FROM pool_slots WHERE path = ?1", params![r.path])?;
+        }
+    }
+    conn.execute(
+        "INSERT INTO pool_slots (path, slot, task_key, acquired) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            path.to_string_lossy().to_string(),
+            slot,
+            task_key,
+            now_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+/// Drop stale owners and record a row for a live task that is already on a
+/// candidate path but has none (upgrade, or a crash before this table existed).
+fn reconcile_pool_slots(
+    conn: &Connection,
+    candidates: &[(u32, &Path)],
+    inflight: &[String],
+    caller: &str,
+) -> Result<()> {
+    let rows = load_pool_slots(conn)?;
+    for r in &rows {
+        if !pool_slot_held(conn, &r.task_key, Path::new(&r.path), inflight)? {
+            conn.execute("DELETE FROM pool_slots WHERE path = ?1", params![r.path])?;
+        }
+    }
+    let live = live_worktrees(conn, inflight)?;
+    let rows = load_pool_slots(conn)?;
+    for (slot, path) in candidates {
+        if rows
+            .iter()
+            .any(|r| crate::config::paths_eq(Path::new(&r.path), path))
+        {
+            continue;
+        }
+        let owner = live
+            .iter()
+            .find(|(key, wt)| key != caller && crate::config::paths_eq(Path::new(wt), path))
+            .or_else(|| {
+                live.iter()
+                    .find(|(key, wt)| key == caller && crate::config::paths_eq(Path::new(wt), path))
+            });
+        if let Some((key, _)) = owner {
+            claim_pool_slot(conn, key, *slot, path)?;
+        }
+    }
+    Ok(())
+}
+
 fn count_live_provider_runs_locked(conn: &Connection, provider: &str) -> Result<u32> {
     let mut stmt = conn.prepare(
         "SELECT owner_pid, owner_started FROM runs WHERE ended IS NULL AND provider = ?1",
@@ -4883,5 +5229,109 @@ mod tests {
             .unwrap();
         }
         assert_v0_1_31_upgraded(&owner_first);
+    }
+
+    fn claude_slots(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = dir.join("wt");
+        (
+            root.join("repo/.atr/wt/claude-0"),
+            root.join("repo/.atr/wt/claude-1"),
+        )
+    }
+
+    #[test]
+    fn pool_slots_concurrent_dispatch_gets_distinct_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("s.db");
+        let db = Db::open(&db_path).unwrap();
+        for key in ["mini-299-fa2180dd-ios", "mini-282-05f5f64e-ios"] {
+            db.upsert_task(key, "/repo", None).unwrap();
+            db.set_status(key, "running").unwrap();
+        }
+        drop(db);
+        let (s0, s1) = claude_slots(dir.path());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for key in ["mini-299-fa2180dd-ios", "mini-282-05f5f64e-ios"] {
+            let db_path = db_path.clone();
+            let barrier = barrier.clone();
+            let s0 = s0.clone();
+            let s1 = s1.clone();
+            let key = key.to_string();
+            handles.push(std::thread::spawn(move || {
+                let db = Db::open(&db_path).unwrap();
+                barrier.wait();
+                let candidates = [(0u32, s0.as_path()), (1u32, s1.as_path())];
+                db.allocate_pool_slot(&key, &candidates, None, &[])
+                    .unwrap()
+                    .expect("a free slot")
+            }));
+        }
+        let mut slots: Vec<u32> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        slots.sort_unstable();
+        assert_eq!(slots, vec![0, 1], "two live tasks must not share claude-0");
+    }
+
+    #[test]
+    fn pool_slot_lingering_finished_task_does_not_steal_a_live_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        let (s0, s1) = claude_slots(dir.path());
+        let candidates = [(0u32, s0.as_path()), (1u32, s1.as_path())];
+
+        db.upsert_task("mini-29839d8b-ios-c", "/repo", None)
+            .unwrap();
+        db.set_worktree("mini-29839d8b-ios-c", &s0.display().to_string())
+            .unwrap();
+        db.set_status("mini-29839d8b-ios-c", "waiting").unwrap();
+        assert!(db
+            .hold_pool_slot("mini-29839d8b-ios-c", 0, &s0, &[])
+            .unwrap());
+
+        db.upsert_task("mini-299-fa2180dd-ios", "/repo", None)
+            .unwrap();
+        db.set_status("mini-299-fa2180dd-ios", "running").unwrap();
+        assert_eq!(
+            db.allocate_pool_slot("mini-299-fa2180dd-ios", &candidates, Some(&s0), &[])
+                .unwrap(),
+            Some(0),
+            "a waiting task must not keep the slot"
+        );
+        db.set_worktree("mini-299-fa2180dd-ios", &s0.display().to_string())
+            .unwrap();
+        assert_eq!(
+            db.worktree_blocked_by(&s0, "mini-282-05f5f64e-ios", &[])
+                .unwrap()
+                .as_deref(),
+            Some("mini-299-fa2180dd-ios")
+        );
+
+        // Retry / -c style reuse: B's stored path is still claude-0.
+        db.upsert_task("mini-282-05f5f64e-ios", "/repo", None)
+            .unwrap();
+        db.set_worktree("mini-282-05f5f64e-ios", &s0.display().to_string())
+            .unwrap();
+        db.set_status("mini-282-05f5f64e-ios", "running").unwrap();
+        assert_eq!(
+            db.allocate_pool_slot("mini-282-05f5f64e-ios", &candidates, Some(&s0), &[])
+                .unwrap(),
+            Some(1)
+        );
+
+        db.upsert_task("mini-300", "/repo", None).unwrap();
+        db.set_status("mini-300", "running").unwrap();
+        assert_eq!(
+            db.allocate_pool_slot("mini-300", &candidates, None, &[])
+                .unwrap(),
+            None,
+            "a full pool waits; it must not fall back to slot 0"
+        );
+
+        assert_eq!(
+            db.allocate_pool_slot("mini-299-fa2180dd-ios", &candidates, Some(&s0), &[])
+                .unwrap(),
+            Some(0),
+            "the same task keeps its slot across retry"
+        );
     }
 }

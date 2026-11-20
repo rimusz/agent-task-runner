@@ -169,11 +169,15 @@ messages. Running and queued tasks are refused.
 By default (`[cache] worktree_pool = true`) each repo+provider reuses a fixed
 slot `{worktree_root}/{repo}/.atr/wt/{provider}-{n}` (`n` is
 `0..max_parallel-1`). The CLIs embed cwd and git info in their system prompt,
-so a stable path keeps the first-run prefix cacheable. Between different tasks
-the slot is reset (`checkout -B`, `reset --hard`, `clean -fd`). Same-task
-continuations (follow-ups, stall retry, session fork, resume) skip the reset
-even if HEAD is detached. Resetting a busy slot (cwd still live) logs a
-warning. `atr gc` never deletes pool slots.
+so a stable path keeps the first-run prefix cacheable. Each slot has one
+owner task id in `pool_slots`, claimed in a single write transaction. A live
+owner is never checked out by anyone else; the new task takes another slot
+or waits. Ownership is dropped when the owner is finished, failed, cancelled,
+or otherwise idle (`waiting`). A queued continuation (retry, follow-up,
+restart resume) keeps its slot. Between different tasks the slot is reset
+(`checkout -B`, `reset --hard`, `clean -fd`). Same-task continuations
+(follow-ups, stall retry, session fork, resume) skip the reset even if HEAD
+is detached. `atr gc` never deletes pool slots.
 
 `[cache] worktree_pool = false` falls back to one worktree per task key at
 `{worktree_root}/{repo}/{key}`. `.atr/` is in each worktree's

@@ -211,6 +211,10 @@ pub fn slot_from_pool_path(path: &Path, provider: &str) -> Option<u32> {
 }
 
 /// Stable folder per repo+provider+slot. Reset to `main` on a new task.
+///
+/// `occupied_by_other` is the hard stop: do not create, checkout, reset, or
+/// clean a worktree another live task owns. Callers learn that from
+/// `Db::worktree_blocked_by`. This does not consult `/proc` (macOS has none).
 pub fn acquire_pool_worktree(
     repo: &Path,
     root: &Path,
@@ -220,8 +224,15 @@ pub fn acquire_pool_worktree(
     branch_prefix: &str,
     main: &str,
     reset: bool,
+    occupied_by_other: bool,
 ) -> Result<PathBuf> {
     let dest = pool_slot_path(root, repo, provider, slot);
+    if occupied_by_other {
+        bail!(
+            "refusing to check out {} for {key}: another live task owns this worktree",
+            dest.display()
+        );
+    }
     let branch = format!("{branch_prefix}/{key}");
     if dest_is_git(&dest) {
         if !reset {
@@ -702,16 +713,20 @@ mod tests {
         let repo = dir.path().join("repo");
         init_sample_repo(&repo).unwrap();
         let root = dir.path().join("work");
-        let a = acquire_pool_worktree(&repo, &root, "claude", 0, "task-a", "atr", "main", true)
-            .unwrap();
+        let a = acquire_pool_worktree(
+            &repo, &root, "claude", 0, "task-a", "atr", "main", true, false,
+        )
+        .unwrap();
         assert!(a.ends_with(".atr/wt/claude-0"), "{}", a.display());
         assert!(is_pool_worktree(&a));
         assert_eq!(slot_from_pool_path(&a, "claude"), Some(0));
         std::fs::write(a.join("leftover.txt"), "old\n").unwrap();
         std::fs::create_dir_all(a.join(".atr")).unwrap();
         std::fs::write(a.join(crate::checklist::REL_PATH), "- [x] task-a step\n").unwrap();
-        let b = acquire_pool_worktree(&repo, &root, "claude", 0, "task-b", "atr", "main", true)
-            .unwrap();
+        let b = acquire_pool_worktree(
+            &repo, &root, "claude", 0, "task-b", "atr", "main", true, false,
+        )
+        .unwrap();
         assert_eq!(a, b);
         assert!(
             !b.join("leftover.txt").exists(),
@@ -722,11 +737,15 @@ mod tests {
             "a new task must not inherit the last task's checklist"
         );
         assert_eq!(current_branch(&b).as_deref(), Some("atr/task-b"));
-        let same = acquire_pool_worktree(&repo, &root, "claude", 0, "task-b", "atr", "main", false)
-            .unwrap();
+        let same = acquire_pool_worktree(
+            &repo, &root, "claude", 0, "task-b", "atr", "main", false, false,
+        )
+        .unwrap();
         assert_eq!(same, b);
-        let grok =
-            acquire_pool_worktree(&repo, &root, "grok", 0, "task-b", "atr", "main", true).unwrap();
+        let grok = acquire_pool_worktree(
+            &repo, &root, "grok", 0, "task-b", "atr", "main", true, false,
+        )
+        .unwrap();
         assert!(grok.ends_with(".atr/wt/grok-0"), "{}", grok.display());
         assert_eq!(current_branch(&grok).as_deref(), Some("atr/task-b"));
         assert_ne!(
@@ -777,8 +796,10 @@ mod tests {
         let repo = dir.path().join("repo");
         init_sample_repo(&repo).unwrap();
         let root = dir.path().join("work");
-        let wt =
-            acquire_pool_worktree(&repo, &root, "grok", 0, "task-a", "atr", "main", true).unwrap();
+        let wt = acquire_pool_worktree(
+            &repo, &root, "grok", 0, "task-a", "atr", "main", true, false,
+        )
+        .unwrap();
         std::fs::write(wt.join("agent.txt"), "in progress\n").unwrap();
         let st = quiet_git()
             .args(["checkout", "--detach"])
@@ -793,8 +814,10 @@ mod tests {
         );
         let keep = keep_pool_worktree(&wt, "task-a", "atr", wt.to_str());
         assert!(keep, "stall retry / same session must reuse the slot");
-        let again =
-            acquire_pool_worktree(&repo, &root, "grok", 0, "task-a", "atr", "main", !keep).unwrap();
+        let again = acquire_pool_worktree(
+            &repo, &root, "grok", 0, "task-a", "atr", "main", !keep, false,
+        )
+        .unwrap();
         assert_eq!(again, wt);
         assert!(
             current_branch(&wt).is_none(),
@@ -818,8 +841,10 @@ mod tests {
         let repo = dir.path().join("repo");
         init_sample_repo(&repo).unwrap();
         let root = dir.path().join("work");
-        let wt =
-            acquire_pool_worktree(&repo, &root, "grok", 0, "task-a", "atr", "main", true).unwrap();
+        let wt = acquire_pool_worktree(
+            &repo, &root, "grok", 0, "task-a", "atr", "main", true, false,
+        )
+        .unwrap();
         std::fs::write(wt.join("leftover.txt"), "old task\n").unwrap();
         let st = quiet_git()
             .args(["checkout", "--detach"])
@@ -831,13 +856,61 @@ mod tests {
             !keep_pool_worktree(&wt, "task-b", "atr", None),
             "a new task must prepare the slot"
         );
-        let next =
-            acquire_pool_worktree(&repo, &root, "grok", 0, "task-b", "atr", "main", true).unwrap();
+        let next = acquire_pool_worktree(
+            &repo, &root, "grok", 0, "task-b", "atr", "main", true, false,
+        )
+        .unwrap();
         assert_eq!(next, wt);
         assert_eq!(current_branch(&wt).as_deref(), Some("atr/task-b"));
         assert!(
             !wt.join("leftover.txt").exists(),
             "a new attempt still resets leftovers"
+        );
+    }
+
+    #[test]
+    fn occupied_pool_refuses_checkout_and_leaves_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_sample_repo(&repo).unwrap();
+        let root = dir.path().join("work");
+        let wt = acquire_pool_worktree(
+            &repo, &root, "claude", 0, "task-a", "atr", "main", true, false,
+        )
+        .unwrap();
+        std::fs::write(wt.join("agent.txt"), "from task a\n").unwrap();
+        let commit = quiet_git()
+            .args(["add", "agent.txt"])
+            .current_dir(&wt)
+            .status()
+            .unwrap();
+        assert!(commit.success());
+        let commit = quiet_git()
+            .args(["commit", "-m", "task a"])
+            .current_dir(&wt)
+            .status()
+            .unwrap();
+        assert!(commit.success(), "commit on the live task's branch");
+        let sha = head_sha(&wt);
+        let branch = current_branch(&wt);
+        let err = acquire_pool_worktree(
+            &repo, &root, "claude", 0, "task-b", "atr", "main", true, true,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("another live task owns this worktree"),
+            "{err:#}"
+        );
+        assert_eq!(
+            head_sha(&wt),
+            sha,
+            "HEAD must stay on the live task's commit"
+        );
+        assert_eq!(current_branch(&wt), branch);
+        assert_eq!(
+            std::fs::read_to_string(wt.join("agent.txt")).unwrap(),
+            "from task a\n"
         );
     }
 

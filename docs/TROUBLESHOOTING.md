@@ -111,10 +111,18 @@ out `[retry]` backoff. `atr status --json` shows `retry_reason` /
 
 **Task result says `interrupted by atr restart; resuming`.** Serve restarted
 while the turn was in flight. The task is queued again on the same
-worktree/session; the next turn starts with a recovery note. A second
+worktree/session; the next turn starts with a recovery note. The pool slot
+stays reserved for that task until it runs. A second
 restart, a missing worktree, or a failure during workspace prepare still
 marks the task `failed` (`orphaned run (process gone)`). Turn this off
 with `atr config set restart.resume false`.
+
+**Two tasks checked out the same `.atr/wt/<provider>-<n>` folder.** Slots are
+owned by task id. A live task keeps its slot; the next task gets
+`<provider>-<n+1>` or stays queued until a slot is free. atr will not
+`checkout` a worktree another live task owns. Restarting serve re-reserves
+the slot for a task it resumes. A finished task left pointing at the folder
+does not hold it.
 
 **Task is `held`.** It declared `after:` and a dependency failed, was
 cancelled, or is gone. Status / notify show `hold_reason`. Fix or retry the
