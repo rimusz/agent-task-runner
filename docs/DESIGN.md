@@ -233,10 +233,19 @@ Grok/Cursor cache server-side; OpenCode/Ollama via a stable prefix +
    session is started with `--session-id <uuid>` and that id is recorded
    immediately.
 2. **Byte-stable prefix** (enforced by `atr doctor --cache` and a per-run
-   hash), written into each CLI's system-prompt *slot* when one exists
-   (`{worktree}/.atr/system.md`, never argv/`ps`):
-   - Claude: `--append-system-prompt-file`
-   - Grok: `--rules` (override with `system_prompt_flag`)
+   hash), written to `{worktree}/.atr/system.md` and handed to each CLI's
+   system-prompt slot when one exists:
+   - Claude: `--append-system-prompt-file` (the path)
+   - Grok: `--rules` with the file's text. Grok Build 1.0.89 `--help` is
+     `--rules <RULES>` ("Extra rules to append to the system prompt").
+     `--append-system-prompt` is an alias of that flag. There is no
+     rules-file flag (`--rules-file` is an error; `--prompt-file` is the
+     task prompt). atr reads `system.md` and passes those bytes as one
+     argv element. `Command` does not run a shell, so `$`, backticks and
+     newlines stay literal. Text longer than one OS argument (Linux
+     `MAX_ARG_STRLEN`, 32 pages) is refused before spawn. A
+     `system_prompt_flag` other than `--rules` or `--append-system-prompt`
+     is still the path.
    - Codex: `-c model_instructions_file="…"` (replaces Codex's built-in base
      prompt; an operator `model_instructions_file` override wins)
    - OpenCode: first `--file` (OpenCode 2.x has no `--system`)
@@ -409,8 +418,9 @@ before installing, so two copies of `atr serve` do not run.
 ## 12. Tests and CI
 
 Tests use fake CLI scripts that emit the real JSON shapes. CI: rustfmt,
-clippy, test, cargo-deny, and gitleaks. Prompts go through a file or stdin,
-never argv/`ps`.
+clippy, test, cargo-deny, and gitleaks. The task prompt goes through a file
+or stdin. Grok's standing rules are the exception: `--rules` is the text of
+`system.md`, one argv element.
 
 ## 13. Alternatives considered
 

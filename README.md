@@ -197,7 +197,7 @@ Settings: [docs/CONFIG.md](docs/CONFIG.md#telegram). Provider choice: [docs/CONF
 
 Claude Code, Grok Build, Cursor, Codex and OpenCode. OpenCode also opens the door to DeepSeek, Kimi, Qwen, local Ollama, self-hosted vLLM and more. See [docs/USAGE.md](docs/USAGE.md#providers-and-opencode).
 
-Each CLI gets atr's instructions in its own system-prompt slot. For Codex that is `-c model_instructions_file`, which replaces Codex's built-in base prompt with atr's (details in [docs/CONFIG.md](docs/CONFIG.md#cache); see also [Prompt caching](#prompt-caching-and-token-savings)).
+Each CLI gets atr's instructions in its own system-prompt slot. For Codex that is `-c model_instructions_file`, which replaces Codex's built-in base prompt with atr's (details in [docs/CONFIG.md](docs/CONFIG.md#cache); see also [Prompt caching](#prompt-caching-and-token-savings)). For Grok Build, `--rules` is the rules text: atr reads `<worktree>/.atr/system.md` and passes those bytes as the argument (Grok 1.0.89 has no rules-file flag).
 
 ### Local models (OpenCode 2.x + Ollama)
 
@@ -251,3 +251,7 @@ Setup, config and safety details: [docs/USAGE.md](docs/USAGE.md#providers-and-op
 atr is not affiliated with or endorsed by Anthropic, xAI, Anysphere, OpenAI or the OpenCode authors. Claude, Grok, Cursor, Codex, ChatGPT and OpenCode are trademarks of their owners. Use atr with **your own** CLI accounts and follow each provider's terms. Do not resell access or share accounts.
 
 Licensed under MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`). Dependency licenses: `THIRD_PARTY_LICENSES`.
+
+shadow-edit
+
+shadow-edit

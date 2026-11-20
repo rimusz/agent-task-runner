@@ -91,6 +91,18 @@ them. To use your own file instead, set it as a provider override
 atr v0.1.35 and earlier sent `instructions_file`, which codex-cli ignores, so
 Codex ran on its own base prompt without atr's instructions.
 
+**Grok rules.** For `kind = "grok"` providers atr passes that same stable
+prefix as the `--rules` value. Grok Build 1.0.89 `--help` defines
+`--rules <RULES>` as "Extra rules to append to the system prompt".
+`--append-system-prompt` is an alias. There is no rules-file flag
+(`--rules-file` is an error; `--prompt-file` is the task prompt). atr reads
+`<worktree>/.atr/system.md` and passes those bytes as one argument. The spawn
+does not go through a shell, so quotes and `$` in the file stay literal.
+Text longer than one OS argument (on Linux, 32 pages minus one byte) is
+refused before spawn. Passing the path made Grok treat the path string as
+the rules, so the system prompt never arrived. A `system_prompt_flag` other
+than `--rules` or `--append-system-prompt` is still passed the path.
+
 OpenCode providers only: `allow_shell` (default `false`). When false, atr
 denies the model's `shell`/`execute` tools (plus `subagent`, `question`,
 `webfetch`, `websearch`, `external_directory`, and `skill`, so a worker never

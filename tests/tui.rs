@@ -1568,7 +1568,8 @@ async fn effort_and_context_are_atr_local_and_wire_argv() {
         "hi",
         None,
         true,
-    );
+    )
+    .unwrap();
     assert!(
         spec.args.windows(2).any(|w| w == ["--effort", "high"]),
         "grok next spawn: {:?}",
@@ -1602,7 +1603,8 @@ async fn effort_and_context_are_atr_local_and_wire_argv() {
         "hi",
         None,
         true,
-    );
+    )
+    .unwrap();
     assert!(
         spec.args.windows(2).any(|w| w == ["--effort", "max"]),
         "{:?}",

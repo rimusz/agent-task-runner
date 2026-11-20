@@ -1,4 +1,5 @@
 use crate::config::Provider;
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -78,7 +79,7 @@ pub fn build_command(
     prompt: &str,
     session: Option<&str>,
     new_session: bool,
-) -> CommandSpec {
+) -> Result<CommandSpec> {
     build_command_opts(
         p,
         worktree,
@@ -102,7 +103,7 @@ pub fn build_command_opts(
     new_session: bool,
     fork_from: Option<&str>,
     system_prompt: Option<&Path>,
-) -> CommandSpec {
+) -> Result<CommandSpec> {
     if p.kind == "codex" {
         return build_codex(p, worktree, prompt_path, prompt, session, system_prompt);
     }
@@ -153,7 +154,7 @@ pub fn build_command_opts(
         args.push(worktree.display().to_string());
     }
     args.extend(p.extra_args.iter().cloned());
-    attach_system_prompt(p, &mut args, system_prompt);
+    attach_system_prompt(p, &mut args, system_prompt)?;
     if p.kind == "grok" && !args.iter().any(|a| a == "--max-turns") {
         let n = crate::config::Config::worker_max_turns(p);
         args.push("--max-turns".into());
@@ -166,13 +167,13 @@ pub fn build_command_opts(
 
     let stdin_text = attach_prompt(p, &mut args, prompt_path, prompt);
 
-    CommandSpec {
+    Ok(CommandSpec {
         program: p.cli.clone(),
         args,
         cwd: worktree.to_path_buf(),
         stdin_text,
         env: Vec::new(),
-    }
+    })
 }
 
 /// Best-effort confinement for `--dir` workspaces. Codex already sandboxes
@@ -215,7 +216,7 @@ fn build_codex(
     prompt: &str,
     session: Option<&str>,
     system_prompt: Option<&Path>,
-) -> CommandSpec {
+) -> Result<CommandSpec> {
     let mut args = Vec::new();
     if let Some(sid) = session {
         args.push("exec".into());
@@ -267,13 +268,13 @@ fn build_codex(
         }
     }
     let _ = prompt_path;
-    CommandSpec {
+    Ok(CommandSpec {
         program: p.cli.clone(),
         args,
         cwd: worktree.to_path_buf(),
         stdin_text: Some(prompt.to_string()),
         env: Vec::new(),
-    }
+    })
 }
 
 fn build_opencode(
@@ -283,7 +284,7 @@ fn build_opencode(
     session: Option<&str>,
     new_session: bool,
     system_prompt: Option<&Path>,
-) -> CommandSpec {
+) -> Result<CommandSpec> {
     // No `--dir`: OpenCode 2.x rejects it ("Unrecognized flag: --dir") and
     // exits 1 after printing help. The worktree is already the spawn cwd
     // (`CommandSpec.cwd`), which every OpenCode release uses as the project.
@@ -318,7 +319,7 @@ fn build_opencode(
     // The stable prefix is attached first (default flag `--file`; OpenCode
     // 2.x has no `--system`), so its bytes lead the request and stay cacheable.
     let has_system = system_prompt.is_some() && !p.system_prompt_flag.trim().is_empty();
-    attach_system_prompt(p, &mut args, system_prompt);
+    attach_system_prompt(p, &mut args, system_prompt)?;
     // Prompt is a file attach, never argv/`ps`.
     args.push("--file".into());
     args.push(prompt_path.display().to_string());
@@ -336,13 +337,13 @@ fn build_opencode(
             std::env::var("OPENCODE_CONFIG_CONTENT").ok().as_deref(),
         ),
     )];
-    CommandSpec {
+    Ok(CommandSpec {
         program: p.cli.clone(),
         args,
         cwd: worktree.to_path_buf(),
         stdin_text: None,
         env,
-    }
+    })
 }
 
 /// Tools atr denies on every OpenCode worker run. OpenCode 2.x names its
@@ -453,19 +454,94 @@ pub fn parse_opencode_major(text: &str) -> Option<u32> {
     })
 }
 
-fn attach_system_prompt(p: &Provider, args: &mut Vec<String>, path: Option<&Path>) {
+/// Grok Build 1.0.89 `--help`: `--rules <RULES>` is "Extra rules to append to
+/// the system prompt". `--append-system-prompt` is a clap alias of `--rules`.
+/// `--rules-file` is rejected. `--prompt-file` is the task prompt, not rules.
+fn grok_rules_flag_is_text(flag: &str) -> bool {
+    matches!(flag, "--rules" | "--append-system-prompt")
+}
+
+/// Largest `--rules` value this OS will accept as one argv element.
+///
+/// Linux `execve` rejects a single string longer than `MAX_ARG_STRLEN`
+/// (32 pages, not counting the trailing NUL). Other Unixes bound the whole
+/// argv plus environment by `ARG_MAX`; 64 KiB is left for the rest of the
+/// command. The value is passed with `Command::arg`, which does not run a
+/// shell, so the limit is the kernel's, not quoting.
+fn grok_rules_arg_limit() -> usize {
+    #[cfg(unix)]
+    {
+        let page = sysconf_usize(libc::_SC_PAGESIZE).unwrap_or(4096);
+        let arg_max = sysconf_usize(libc::_SC_ARG_MAX).unwrap_or(256 * 1024);
+        #[cfg(target_os = "linux")]
+        let per_arg = 32 * page - 1;
+        #[cfg(not(target_os = "linux"))]
+        let per_arg = arg_max.saturating_sub(1);
+        let total_budget = arg_max.saturating_sub(64 * 1024);
+        per_arg.min(total_budget).max(4096)
+    }
+    #[cfg(not(unix))]
+    {
+        128 * 1024 - 1
+    }
+}
+
+#[cfg(unix)]
+fn sysconf_usize(name: libc::c_int) -> Option<usize> {
+    // SAFETY: `sysconf` reads a process-wide limit. `name` is a `_SC_*`
+    // constant; a negative return means the call failed.
+    let v = unsafe { libc::sysconf(name) };
+    if v > 0 {
+        Some(v as usize)
+    } else {
+        None
+    }
+}
+
+fn read_grok_rules(path: &Path) -> Result<String> {
+    let text = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "read grok rules file {} (--rules takes the text, not this path)",
+            path.display()
+        )
+    })?;
+    if text.as_bytes().contains(&0) {
+        bail!(
+            "grok rules file {} contains a NUL byte, which cannot be one --rules argument",
+            path.display()
+        );
+    }
+    let limit = grok_rules_arg_limit();
+    if text.len() > limit {
+        bail!(
+            "grok rules file {} is {} bytes; this OS allows at most {limit} bytes in one --rules argument. Shorten the system prompt",
+            path.display(),
+            text.len()
+        );
+    }
+    Ok(text)
+}
+
+fn attach_system_prompt(p: &Provider, args: &mut Vec<String>, path: Option<&Path>) -> Result<()> {
     let Some(path) = path else {
-        return;
+        return Ok(());
     };
     if p.kind == "codex" {
-        return;
+        return Ok(());
     }
     let flag = p.system_prompt_flag.trim();
     if flag.is_empty() {
-        return;
+        return Ok(());
     }
     args.push(flag.to_string());
+    if p.kind == "grok" && grok_rules_flag_is_text(flag) {
+        // One argv element. `Command::arg` does not invoke a shell, so `$`,
+        // backticks, quotes and newlines stay literal.
+        args.push(read_grok_rules(path)?);
+        return Ok(());
+    }
     args.push(path.display().to_string());
+    Ok(())
 }
 
 fn attach_prompt(
@@ -1189,6 +1265,41 @@ pub(crate) mod tests {
     use super::*;
     use crate::config::Provider;
     use std::time::Duration;
+
+    fn build_command(
+        p: &Provider,
+        worktree: &Path,
+        prompt_path: &Path,
+        prompt: &str,
+        session: Option<&str>,
+        new_session: bool,
+    ) -> CommandSpec {
+        super::build_command(p, worktree, prompt_path, prompt, session, new_session)
+            .expect("build_command")
+    }
+
+    fn build_command_opts(
+        p: &Provider,
+        worktree: &Path,
+        prompt_path: &Path,
+        prompt: &str,
+        session: Option<&str>,
+        new_session: bool,
+        fork_from: Option<&str>,
+        system_prompt: Option<&Path>,
+    ) -> CommandSpec {
+        super::build_command_opts(
+            p,
+            worktree,
+            prompt_path,
+            prompt,
+            session,
+            new_session,
+            fork_from,
+            system_prompt,
+        )
+        .expect("build_command_opts")
+    }
 
     pub(crate) fn stub(kind: &str) -> Provider {
         Provider {
@@ -1941,6 +2052,10 @@ pub(crate) mod tests {
         );
         assert!(!c.args.iter().any(|a| a == "var"), "prefix stays off argv");
 
+        let dir = tempfile::tempdir().unwrap();
+        let grok_sys = dir.path().join("system.md");
+        let rules = "atr grok rules\n";
+        std::fs::write(&grok_sys, rules).unwrap();
         let mut grok = stub("grok");
         grok.prompt_mode = "file".into();
         grok.prompt_file_prefix = "--prompt-file=".into();
@@ -1952,13 +2067,18 @@ pub(crate) mod tests {
             None,
             true,
             None,
-            Some(sys),
+            Some(&grok_sys),
         );
         assert!(
             g.args
                 .windows(2)
-                .any(|w| w == ["--rules", "/wt/.atr/system.md"]),
+                .any(|w| w[0] == "--rules" && w[1] == rules),
             "{:?}",
+            g.args
+        );
+        assert!(
+            !g.args.iter().any(|a| a.contains("system.md")),
+            "grok --rules must be the file text, got {:?}",
             g.args
         );
 
@@ -2032,6 +2152,115 @@ pub(crate) mod tests {
             .args
             .iter()
             .any(|a| a.contains("append-system-prompt") || a == "--rules"));
+    }
+
+    #[test]
+    fn grok_rules_argv_is_file_text_not_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let sys = dir.path().join("system.md");
+        // Shell metacharacters must survive as one argv element. `Command::arg`
+        // does not interpolate them; this asserts the vector we hand it.
+        let rules = "Follow atr.\nDo not expand $HOME or `uname` or \"quotes\".\n$(echo no)\n";
+        std::fs::write(&sys, rules).unwrap();
+        let path = sys.display().to_string();
+        let mut grok = stub("grok");
+        grok.prompt_mode = "file".into();
+        grok.prompt_file_prefix = "--prompt-file=".into();
+        let g = super::build_command_opts(
+            &grok,
+            Path::new("/wt"),
+            Path::new("/wt/.atr/prompt.md"),
+            "var",
+            None,
+            true,
+            None,
+            Some(&sys),
+        )
+        .unwrap();
+        assert!(
+            g.args
+                .windows(2)
+                .any(|w| w[0] == "--rules" && w[1] == rules),
+            "argv must contain the rules text: {:?}",
+            g.args
+        );
+        assert!(
+            !g.args.iter().any(|a| a == &path),
+            "argv must not contain the rules path {path}: {:?}",
+            g.args
+        );
+
+        grok.system_prompt_flag = "--append-system-prompt".into();
+        let alias = super::build_command_opts(
+            &grok,
+            Path::new("/wt"),
+            Path::new("/wt/.atr/prompt.md"),
+            "var",
+            None,
+            true,
+            None,
+            Some(&sys),
+        )
+        .unwrap();
+        assert!(
+            alias
+                .args
+                .windows(2)
+                .any(|w| w[0] == "--append-system-prompt" && w[1] == rules),
+            "{:?}",
+            alias.args
+        );
+
+        // A non-text override stays a path (no invented file flag).
+        grok.system_prompt_flag = "--rules-file".into();
+        let custom = super::build_command_opts(
+            &grok,
+            Path::new("/wt"),
+            Path::new("/wt/.atr/prompt.md"),
+            "var",
+            None,
+            true,
+            None,
+            Some(&sys),
+        )
+        .unwrap();
+        assert!(
+            custom
+                .args
+                .windows(2)
+                .any(|w| w[0] == "--rules-file" && w[1] == path),
+            "{:?}",
+            custom.args
+        );
+
+        let missing = dir.path().join("missing.md");
+        grok.system_prompt_flag = "--rules".into();
+        let err = super::build_command_opts(
+            &grok,
+            Path::new("/wt"),
+            Path::new("/wt/.atr/prompt.md"),
+            "var",
+            None,
+            true,
+            None,
+            Some(&missing),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("read grok rules file"), "{err:#}");
+
+        std::fs::write(&sys, "x".repeat(grok_rules_arg_limit() + 1)).unwrap();
+        let err = super::build_command_opts(
+            &grok,
+            Path::new("/wt"),
+            Path::new("/wt/.atr/prompt.md"),
+            "var",
+            None,
+            true,
+            None,
+            Some(&sys),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("bytes"), "{err:#}");
     }
 
     #[test]

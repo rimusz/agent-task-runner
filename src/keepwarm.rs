@@ -192,7 +192,8 @@ pub fn build_ping(
         false,
         None,
         None,
-    );
+    )
+    .expect("keepwarm ping passes no system-prompt file");
     if dir_workspace {
         crate::providers::apply_dir_confinement(provider, &mut spec, worktree);
     }
@@ -605,7 +606,8 @@ mod tests {
             false,
             None,
             None,
-        );
+        )
+        .unwrap();
         let ping = build_ping(&p, wt, prompt, "s1", false);
         // Same launch contract as the real resume (prefix must match) ...
         assert_eq!(&ping.args[..resume.args.len()], &resume.args[..]);

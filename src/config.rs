@@ -1465,6 +1465,7 @@ pub fn default_cache_window(kind: &str) -> Duration {
 pub fn default_system_prompt_flag(kind: &str) -> &'static str {
     match kind {
         "claude" => "--append-system-prompt-file",
+        // Text, not a path. Grok Build 1.0.89 `--help`: `--rules <RULES>`.
         "grok" => "--rules",
         // OpenCode 2.x has no `--system` flag; attach the prefix as the
         // first `--file` (before the task prompt) instead.
