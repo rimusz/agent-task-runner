@@ -362,7 +362,7 @@ pub async fn run_cli(
         new_session,
         fork_from,
         system_prompt,
-    );
+    )?;
     if dir_workspace {
         crate::providers::apply_dir_confinement(provider, &mut spec, worktree);
     }

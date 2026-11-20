@@ -397,7 +397,8 @@ mod tests {
             "hi",
             None,
             true,
-        );
+        )
+        .unwrap();
         assert!(
             spec.args.windows(2).any(|w| w == ["--effort", "high"]),
             "grok spawn must pass --effort: {:?}",
@@ -422,7 +423,8 @@ mod tests {
             "hi",
             None,
             true,
-        );
+        )
+        .unwrap();
         assert!(
             spec.args.windows(2).any(|w| w == ["--effort", "max"]),
             "{:?}",
@@ -448,7 +450,8 @@ mod tests {
             "hi",
             None,
             true,
-        );
+        )
+        .unwrap();
         assert!(
             spec.args
                 .windows(2)
@@ -479,7 +482,8 @@ mod tests {
             "hi",
             None,
             true,
-        );
+        )
+        .unwrap();
         assert!(
             spec.args
                 .windows(2)

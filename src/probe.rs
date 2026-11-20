@@ -167,7 +167,7 @@ pub async fn run_turn(
         out.spawn_error = Some(format!("write prompt: {e}"));
         return out;
     }
-    let spec = build_command_opts(
+    let spec = match build_command_opts(
         p,
         dir,
         &prompt_path,
@@ -176,7 +176,13 @@ pub async fn run_turn(
         new_session,
         None,
         None,
-    );
+    ) {
+        Ok(spec) => spec,
+        Err(e) => {
+            out.spawn_error = Some(e.to_string());
+            return out;
+        }
+    };
     let mut cmd = crate::runner::agent_command(&spec);
     cmd.env("ATR_PROVIDER", &p.name).env("ATR_PROBE", "1");
     #[cfg(unix)]

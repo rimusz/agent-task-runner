@@ -135,6 +135,8 @@ Vendor coding CLIs (Kimi Code, Qwen Code, ZCode, MiMo Code, …) are interactive
 
 Codex gets atr's instructions as `-c model_instructions_file=<worktree>/.atr/system.md`, which replaces Codex's built-in base prompt (codex-cli 0.166 checked; the old `instructions_file` key is ignored by codex). An operator `--override 'model_instructions_file="…"'` wins. If Codex ignores atr's rules (commits or pushes itself, wrong answer format), check `codex --version` and the run's argv.
 
+Grok Build gets the same file as the `--rules` text. `grok 1.0.89 --help` says `--rules <RULES>` ("Extra rules to append to the system prompt"); `--rules-file` is not a flag. atr reads `<worktree>/.atr/system.md` and passes those bytes as one argument, with no shell. The task prompt stays `--prompt-file`. If Grok ignores atr's rules, check that the run's argv contains the rules text.
+
 ### Chinese providers (via OpenCode)
 
 | Name | Sign-in / key | Example model | Shortcut |

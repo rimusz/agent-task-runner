@@ -167,7 +167,7 @@ The goal is high prompt-cache hit rates on first runs and resumes.
 | Lever | Behaviour |
 |---|---|
 | Worktree pool | Reuses `.atr/wt/<provider>-<n>` per repo+provider so cwd/git in the CLI system prompt stay byte-stable. Each slot has one persisted owner (task id). A second live task gets the next free slot, or waits if every slot is owned. Checkout is refused when another live task still owns the tree. Idle finished tasks do not keep a slot. Reset (`checkout -B`, `reset --hard`, `clean -fd`) only when a **different** task lands on a slot it owns. Same-session stall retry, resume, session fork, follow-ups, and a restart resume reuse the tree as-is when that task still owns it (including detached HEAD and dirty files). `[cache] worktree_pool = false` restores one folder per task key. |
-| CLI system-prompt slot | Stable prefix (system prompt + `AGENTS.md` + provider contract) goes in a *file*, never argv/`ps`: Claude `--append-system-prompt-file`, Grok `--rules`, Codex `-c model_instructions_file` (replaces Codex's base prompt), OpenCode a first `--file` attach (2.x has no `--system`). Cursor has no slot; the prefix stays in the prompt file. |
+| CLI system-prompt slot | Stable prefix (system prompt + `AGENTS.md` + provider contract) is written to `{worktree}/.atr/system.md`. Claude gets `--append-system-prompt-file` (path). Codex gets `-c model_instructions_file` (path; replaces Codex's base prompt). OpenCode gets a first `--file` attach (2.x has no `--system`). Grok Build's `--rules` is the rules text (`grok 1.0.89 --help`: `--rules <RULES>`, "Extra rules to append to the system prompt"; no rules-file flag), so atr reads that file and passes the bytes as one `--rules` argument, with no shell. Cursor has no slot; the prefix stays in the prompt file. |
 | Resume delta | Follow-ups send only the new messages (and optional handoff). The stable prefix is not re-sent. |
 | Variable tail | Per-task text (task header, workspace note, `## Repo lessons (atr)` when `[lessons]` is on, handoff, messages) goes after `----- atr variable -----`, so it never changes the prefix hash. |
 | Provider affinity | Retries and follow-ups stay on the same provider and session. Work still inside `cache_window` (Claude ~5m, others 60m) is scheduled first; remaining queued tasks for that provider are batched next. |
@@ -180,7 +180,7 @@ The goal is high prompt-cache hit rates on first runs and resumes.
 |---|---|
 | `[cache] worktree_pool` / `headline_min_input` | `config.toml` |
 | `[[provider]] cache_window` | How long atr treats a session as warm (Claude default `5m`) |
-| `[[provider]] system_prompt_flag` | Override the file flag if your CLI build differs |
+| `[[provider]] system_prompt_flag` | Override the slot flag if your CLI build differs. For Grok, `--rules` and `--append-system-prompt` receive the file's text; any other value receives the path |
 | `[[provider]] keep_alive` | OpenCode/Ollama `keepAlive` (default `24h`) |
 | vLLM prefix caching | On the vLLM server: enable prefix caching and `--enable-prompt-tokens-details` so OpenCode/Codex can report cache reads |
 | Ollama `keep_alive` | atr writes `keepAlive` into `~/.config/opencode/opencode.json`; you can also set it in Ollama itself |
