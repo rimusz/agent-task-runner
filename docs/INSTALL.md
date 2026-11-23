@@ -31,10 +31,13 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshenv && exec $SHELL -l
 
 Sign in to the CLIs you want (on a Mac, do this at the desktop so Cursor can use the login keychain):
 
+Install Gemini CLI with `npm install -g @google/gemini-cli` or `brew install gemini-cli`.
+
 ```bash
 claude                 # Claude Code
 grok                   # Grok Build
 codex login            # Codex
+gemini                 # Gemini CLI (Login with Google), or set GEMINI_API_KEY
 opencode auth login    # OpenCode (Kimi, Qwen, GLM, MiniMax, DeepSeek, …)
 # Cursor: sign in to the Cursor app
 ```
