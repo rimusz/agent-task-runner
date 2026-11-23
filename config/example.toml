@@ -212,11 +212,30 @@ max_attempts = 4
 backoff = ["1m", "2m", "4m", "8m"]
 
 # After `atr serve` restarts, re-queue a genuine in-flight turn (process
-# gone, worktree still there) once, with a recovery note. A second
-# restart, a missing worktree, or a prepare/setup failure still fails.
-# `resume = false` keeps the old fail-on-restart behaviour.
+# gone, worktree still there) once, with a recovery note. That resume is
+# the one automatic re-queue; a second death is needs_attention via
+# [selfheal]. `resume = false` keeps the old fail-on-restart behaviour.
 [restart]
 resume = true
+
+# Reap dead running tasks once, settle sealed summary.md, prune stale
+# worktrees/slots/lock files, write ~/.local/state/atr/health.json.
+# ON by default. `atr selfheal status` shows recent actions.
+[selfheal]
+enabled = true
+reap = true
+settle = true
+cleanup = true
+check = true
+interval = "30s"
+check_interval = "5m"
+stuck_timeout = "10m"
+artifact_age = "14d"
+disk_min_mb = 512
+health_dir = "~/.local/state/atr"
+lock_files = ["~/.local/state/*.lock"]
+# prune_dirs = ["~/.local/share/atr/evidence"]
+summary_names = ["summary.md"]
 
 # Per-run wall-clock cap (`[[provider]] run_timeout`, default 90m). Hitting
 # it is `cap reached …`, not a stall / CLI hang, and not a usage limit.

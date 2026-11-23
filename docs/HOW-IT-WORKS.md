@@ -20,8 +20,13 @@ is still alive (including a `held` or retry-waiting row); a dead owner is
 still reaped. After a serve restart, `recover_restart_orphans` re-queues a
 task whose in-flight turn died only because serve exited (process gone,
 worktree still present, a run had started) and prepends a recovery note on
-the next resume; a second restart, a missing worktree, or a prepare/setup
-failure still fail as orphans. `[restart] resume = false` turns that off.
+the next resume. That restart counts as the one automatic re-queue:
+`[selfheal]` then marks a second death `needs_attention` instead of looping.
+A missing worktree or a dead PID with no prior resume is re-queued once
+(`outcome=reaped`). `[restart] resume = false` turns restart recovery off;
+self-heal still re-queues a dead serve-owned process once unless
+`selfheal.reap = false`. `atr selfheal status` and
+`~/.local/state/atr/health.json` show the last checks.
 New starts — after `[retry]` backoff, `after:` deps, and the
 `[host]` gate — go through `try_start_run` so `max_parallel` counts live
 owned open runs across processes in a `BEGIN IMMEDIATE` transaction

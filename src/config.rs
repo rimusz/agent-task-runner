@@ -110,6 +110,9 @@ pub struct RawConfig {
     /// Host CPU/memory gate before starting a new task.
     #[serde(default)]
     pub host: RawHost,
+    /// Automatic reaper, sealed-summary settle, cleanup, and health file.
+    #[serde(default)]
+    pub selfheal: RawSelfheal,
     /// When a run hits the wall-clock cap and same-session resumes are
     /// exhausted: `true` always overflow, `false` never overflow. Omit =
     /// overflow only if the task did not pin a provider.
@@ -780,6 +783,8 @@ pub struct Config {
     /// Re-queue in-flight turns cut off only because `atr serve` restarted.
     pub restart: RestartConfig,
     pub host: HostConfig,
+    /// Automatic reaper, sealed-summary settle, cleanup, and health file.
+    pub selfheal: SelfhealConfig,
     /// Omit = overflow on cap only when the task did not pin a provider.
     pub overflow_on_cap: Option<bool>,
     /// `[labels.<name>]` overrides. Lookup is case-insensitive on the name.
@@ -974,6 +979,107 @@ impl Default for RestartConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct RawSelfheal {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Re-queue a serve-owned running task whose CLI is gone, once.
+    #[serde(default = "default_true")]
+    pub reap: bool,
+    /// Settle `waiting` tasks that have a sealed `summary.md` to `done`.
+    #[serde(default = "default_true")]
+    pub settle: bool,
+    /// Drop stale worktrees/slots, dead lock files, and old prune_dirs.
+    #[serde(default = "default_true")]
+    pub cleanup: bool,
+    /// Periodic doctor + queue health file.
+    #[serde(default = "default_true")]
+    pub check: bool,
+    #[serde(default = "default_selfheal_interval")]
+    pub interval: String,
+    #[serde(default = "default_selfheal_check_interval")]
+    pub check_interval: String,
+    /// Quiet/dead-pid running task older than this is stuck.
+    #[serde(default = "default_selfheal_stuck")]
+    pub stuck_timeout: String,
+    /// Age after which terminal worktrees and prune_dirs are removed.
+    #[serde(default = "default_selfheal_artifact")]
+    pub artifact_age: String,
+    #[serde(default = "default_selfheal_disk")]
+    pub disk_min_mb: u64,
+    #[serde(default = "default_selfheal_health_dir")]
+    pub health_dir: String,
+    /// Lock files whose holding PID is dead are removed (`*.lock` in one dir).
+    #[serde(default = "default_selfheal_locks")]
+    pub lock_files: Vec<String>,
+    /// Extra evidence/log directories whose old subdirs are pruned.
+    #[serde(default)]
+    pub prune_dirs: Vec<String>,
+    /// Filenames looked for in a task worktree (and `.atr/`).
+    #[serde(default = "default_selfheal_summaries")]
+    pub summary_names: Vec<String>,
+}
+
+impl Default for RawSelfheal {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            reap: true,
+            settle: true,
+            cleanup: true,
+            check: true,
+            interval: default_selfheal_interval(),
+            check_interval: default_selfheal_check_interval(),
+            stuck_timeout: default_selfheal_stuck(),
+            artifact_age: default_selfheal_artifact(),
+            disk_min_mb: default_selfheal_disk(),
+            health_dir: default_selfheal_health_dir(),
+            lock_files: default_selfheal_locks(),
+            prune_dirs: Vec::new(),
+            summary_names: default_selfheal_summaries(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SelfhealConfig {
+    pub enabled: bool,
+    pub reap: bool,
+    pub settle: bool,
+    pub cleanup: bool,
+    pub check: bool,
+    pub interval: Duration,
+    pub check_interval: Duration,
+    pub stuck_timeout: Duration,
+    pub artifact_age: Duration,
+    pub disk_min_mb: u64,
+    pub health_dir: PathBuf,
+    pub lock_files: Vec<String>,
+    pub prune_dirs: Vec<String>,
+    pub summary_names: Vec<String>,
+}
+
+impl Default for SelfhealConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            reap: true,
+            settle: true,
+            cleanup: true,
+            check: true,
+            interval: Duration::from_secs(30),
+            check_interval: Duration::from_secs(5 * 60),
+            stuck_timeout: Duration::from_secs(10 * 60),
+            artifact_age: Duration::from_secs(14 * 86400),
+            disk_min_mb: default_selfheal_disk(),
+            health_dir: expand_path(&default_selfheal_health_dir()),
+            lock_files: default_selfheal_locks(),
+            prune_dirs: Vec::new(),
+            summary_names: default_selfheal_summaries(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct RawHost {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1073,7 +1179,7 @@ impl Provider {
     /// False for a provider whose shell atr denies (OpenCode without
     /// `allow_shell`): the model cannot run tests or commands itself.
     pub fn has_shell(&self) -> bool {
-        !(self.kind == "opencode" && !self.allow_shell)
+        self.kind != "opencode" || self.allow_shell
     }
 
     pub fn is_ollama(&self) -> bool {
@@ -1356,6 +1462,79 @@ fn default_host_load() -> f64 {
 
 fn default_host_mem() -> u64 {
     512
+}
+
+fn default_selfheal_interval() -> String {
+    "30s".into()
+}
+fn default_selfheal_check_interval() -> String {
+    "5m".into()
+}
+fn default_selfheal_stuck() -> String {
+    "10m".into()
+}
+fn default_selfheal_artifact() -> String {
+    "14d".into()
+}
+fn default_selfheal_disk() -> u64 {
+    512
+}
+fn default_selfheal_health_dir() -> String {
+    "~/.local/state/atr".into()
+}
+fn default_selfheal_locks() -> Vec<String> {
+    vec!["~/.local/state/*.lock".into()]
+}
+fn default_selfheal_summaries() -> Vec<String> {
+    vec!["summary.md".into()]
+}
+
+fn parse_selfheal(raw: RawSelfheal) -> Result<SelfhealConfig> {
+    let dur = |s: &str, fallback: &str, what: &str| -> Result<Duration> {
+        let t = s.trim();
+        parse_duration(if t.is_empty() { fallback } else { t })
+            .with_context(|| format!("[selfheal] {what}"))
+    };
+    let names: Vec<String> = raw
+        .summary_names
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Ok(SelfhealConfig {
+        enabled: raw.enabled,
+        reap: raw.reap,
+        settle: raw.settle,
+        cleanup: raw.cleanup,
+        check: raw.check,
+        interval: dur(&raw.interval, "30s", "interval")?,
+        check_interval: dur(&raw.check_interval, "5m", "check_interval")?,
+        stuck_timeout: dur(&raw.stuck_timeout, "10m", "stuck_timeout")?,
+        artifact_age: dur(&raw.artifact_age, "14d", "artifact_age")?,
+        disk_min_mb: raw.disk_min_mb,
+        health_dir: expand_path(if raw.health_dir.trim().is_empty() {
+            "~/.local/state/atr"
+        } else {
+            raw.health_dir.trim()
+        }),
+        lock_files: raw
+            .lock_files
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        prune_dirs: raw
+            .prune_dirs
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        summary_names: if names.is_empty() {
+            default_selfheal_summaries()
+        } else {
+            names
+        },
+    })
 }
 
 fn default_host_settle() -> String {
@@ -2279,6 +2458,7 @@ fn known_field_names() -> Vec<String> {
         introspect::fields::<RawNotify>(),
         introspect::fields::<RawRetry>(),
         introspect::fields::<RawRestart>(),
+        introspect::fields::<RawSelfheal>(),
         introspect::fields::<RawHost>(),
         introspect::fields::<RawLabelPolicy>(),
         introspect::fields::<RawHandoff>(),
@@ -2937,6 +3117,7 @@ impl Config {
                 resume: raw.restart.resume,
             },
             host: parse_host(raw.host)?,
+            selfheal: parse_selfheal(raw.selfheal)?,
             repos: {
                 let mut seen = std::collections::BTreeSet::new();
                 raw.repos
@@ -3836,6 +4017,18 @@ kind = "claude"
         assert!((cfg.host.max_load - 0.85).abs() < f64::EPSILON);
         assert_eq!(cfg.host.min_memory_mb, 512);
         assert_eq!(cfg.host.settle, Duration::from_secs(30));
+        assert!(cfg.selfheal.enabled);
+        assert!(cfg.selfheal.reap);
+        assert!(cfg.selfheal.settle);
+        assert!(cfg.selfheal.cleanup);
+        assert!(cfg.selfheal.check);
+        assert_eq!(cfg.selfheal.interval, Duration::from_secs(30));
+        assert_eq!(cfg.selfheal.check_interval, Duration::from_secs(5 * 60));
+        assert_eq!(cfg.selfheal.stuck_timeout, Duration::from_secs(10 * 60));
+        assert_eq!(cfg.selfheal.artifact_age, Duration::from_secs(14 * 86400));
+        assert_eq!(cfg.selfheal.disk_min_mb, 512);
+        assert_eq!(cfg.selfheal.lock_files, ["~/.local/state/*.lock"]);
+        assert_eq!(cfg.selfheal.summary_names, ["summary.md"]);
     }
 
     #[test]

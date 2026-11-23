@@ -209,6 +209,7 @@ atr tasks my-task
 atr usage --repo demo-1 --period 7d
 atr logs -f
 atr doctor
+atr selfheal status
 atr cancel my-task --force
 atr retry my-task
 atr pause
@@ -407,7 +408,14 @@ atr service restart
 atr reset --dry-run
 atr tasks rm my-task --dry-run
 atr gc --tasks --dry-run
+atr selfheal status
+atr selfheal status --json
 ```
+
+`atr selfheal status` shows whether the reaper / settle / cleanup / health
+loop is on, the last `{health_dir}/health.json` line, and recent actions
+(task key + reason). Serve writes that file on `[selfheal] check_interval`
+(default 5m). A new FAIL or recovery runs `[notify] command`.
 
 `atr skills install` writes the atr agent skill (`skills/atr/SKILL.md`) for each coding CLI installed on this machine: `~/.claude` (claude), `~/.cursor` (cursor-agent), `~/.codex` (codex), `~/.grok` (grok) and `~/.config/opencode` (opencode). CLIs that aren't installed are skipped and their folders aren't created. Config files are never touched. `atr init` does the same. `atr upgrade` and `atr rollback` refresh that skill so it matches the binary now installed. Run it again after installing a new CLI, or on each host that runs atr.
 

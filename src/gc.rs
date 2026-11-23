@@ -223,7 +223,7 @@ fn home_dir() -> PathBuf {
     expand_path("~")
 }
 
-fn prune_worktrees(
+pub(crate) fn prune_worktrees(
     cfg: &Config,
     db: &Db,
     dry_run: bool,
