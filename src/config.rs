@@ -2218,12 +2218,47 @@ pub fn kind_defaults(kind: &str) -> Option<KindDefaults> {
             sandbox: "workspace-write",
             config_overrides: &["model_provider=\"openai\""],
         }),
+        // Gemini CLI (`gemini`): headless is a non-TTY stdin pipe (atr always
+        // pipes stdin) or `--prompt` / `-p`. `--prompt` takes a string, so it
+        // must not sit in `args` as a boolean `-p` the way Claude/Cursor do
+        // or `--output-format` would become the prompt. Workers auto-approve
+        // with `--approval-mode yolo` (not deprecated `--yolo`).
+        // Docs: https://google-gemini.github.io/gemini-cli/docs/cli/headless.html
+        // https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/cli-reference.md
+        "gemini" => Some(KindDefaults {
+            cli_names: &["gemini"],
+            model_flag: "--model",
+            args: &[
+                "--output-format",
+                "stream-json",
+                "--skip-trust",
+                "--approval-mode",
+                "yolo",
+            ],
+            resume_flag: "--resume",
+            session_id_flag: "",
+            cwd_flag: "",
+            permission_mode: "",
+            permission_mode_flag: "--permission-mode",
+            prompt_mode: "stdin",
+            prompt_file_prefix: "@",
+            reported_usage: "none",
+            sandbox: "",
+            config_overrides: &[],
+        }),
         _ => None,
     }
 }
 
+pub fn known_kinds_hint() -> &'static str {
+    "claude, grok, cursor, codex, opencode, or gemini"
+}
+
 pub fn is_known_kind(kind: &str) -> bool {
-    matches!(kind, "claude" | "grok" | "cursor" | "codex" | "opencode")
+    matches!(
+        kind,
+        "claude" | "grok" | "cursor" | "codex" | "opencode" | "gemini"
+    )
 }
 
 fn fill_string(configured: String, kind_val: &str) -> String {
@@ -2664,9 +2699,10 @@ impl Config {
             }
             if !is_known_kind(&pr.kind) {
                 bail!(
-                    "preset {:?} has unknown kind {}; use claude, grok, cursor, codex, or opencode",
+                    "preset {:?} has unknown kind {}; use {}",
                     pr.name,
-                    pr.kind
+                    pr.kind,
+                    known_kinds_hint()
                 );
             }
             presets.push(Preset {
@@ -2684,9 +2720,10 @@ impl Config {
             }
             if !is_known_kind(&p.kind) {
                 bail!(
-                    "provider {:?} has unknown kind {}; use claude, grok, cursor, codex, or opencode",
+                    "provider {:?} has unknown kind {}; use {}",
                     p.name,
-                    p.kind
+                    p.kind,
+                    known_kinds_hint()
                 );
             }
             let kd = kind_defaults(&p.kind);
@@ -3630,7 +3667,7 @@ mod tests {
         let s = parse_config_toml(P).unwrap().scratch;
         assert_eq!(s.scope, ScratchScope::NoShell);
         assert!(s.applies_to(Some(&Provider::test_stub("opencode"))));
-        for kind in ["claude", "grok", "cursor", "codex"] {
+        for kind in ["claude", "grok", "cursor", "codex", "gemini"] {
             assert!(!s.applies_to(Some(&Provider::test_stub(kind))), "{kind}");
         }
         let mut oc = Provider::test_stub("opencode");
@@ -4050,6 +4087,32 @@ kind = "codex"
         assert_eq!(c.reported_usage, "claude_stream");
         assert_eq!(c.permission_mode, "bypassPermissions");
         assert!(c.args.iter().any(|a| a == "-p"));
+        let g = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[[provider]]
+name = "gemini"
+kind = "gemini"
+"#,
+        )
+        .unwrap();
+        let gem = g.provider("gemini").unwrap();
+        assert!(gem.permission_mode.is_empty());
+        assert_eq!(gem.resume_flag, "--resume");
+        assert_eq!(gem.prompt_mode, "stdin");
+        assert!(gem
+            .args
+            .windows(2)
+            .any(|w| w == ["--output-format", "stream-json"]));
+        assert!(gem.args.iter().any(|a| a == "--skip-trust"));
+        assert!(gem
+            .args
+            .windows(2)
+            .any(|w| w == ["--approval-mode", "yolo"]));
+        assert!(!gem
+            .args
+            .iter()
+            .any(|a| a == "-p" || a == "--yolo" || a == "-y"));
         let s = cfg.provider("spark").unwrap();
         assert_eq!(s.kind, "codex");
         assert!(s

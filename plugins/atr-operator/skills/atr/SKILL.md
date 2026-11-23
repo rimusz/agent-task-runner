@@ -7,7 +7,7 @@ description: Set up and operate atr (agent task runner) — init, providers, Ope
 
 `atr` is a long-running service that drives official agent CLIs on existing subscription plans — never per-use API billing.
 
-Kinds: `claude`, `grok`, `cursor`, `codex`, `opencode`. A `[[provider]]` block can be just `name` + `kind`. Nothing else is hardcoded — policy lives in `~/.config/atr/config.toml`.
+Kinds: `claude`, `grok`, `cursor`, `codex`, `gemini`, `opencode`. A `[[provider]]` block can be just `name` + `kind`. Nothing else is hardcoded — policy lives in `~/.config/atr/config.toml`.
 
 OpenCode covers Ollama and the Chinese providers (Kimi, Qwen, GLM, MiniMax, DeepSeek, MiMo) plus local spark. **Any model OpenCode supports works with atr by its `provider/model` id.** Presets are shortcuts only.
 
@@ -21,7 +21,7 @@ Secrets live in `~/.config/atr/shadow.env` (mode 0600), never in config.
 
 ## Terminal TUI
 
-A bare `atr` (or `atr tui`) is an interactive in-process chat TUI (transcript + composer + under-input status strip). It is the provider CLI with atr as the proxy (session reuse + prompt-cache): plain text is a provider turn; atr does not invent chat replies. Mouse is left to the terminal for copy/paste. `atr ask "prompt"` is the one-shot / CI entrypoint on the same engine (no alternate screen). Serve is not required and never auto-dispatches `cli-*` sessions. Sessions are tasks keyed `cli-<name>` (default `cli-default` — internal session id, not a model; title omits it), separate from Telegram. Slash: `/provider`, `/model`, `/effort`, `/context`, and `/repo` are atr-local pickers (overlay only — not transcript rows). `/model` lists real CLI ids, never `Available` / help prose; Claude seeds documented full ids only (`claude-…`, no `opus`/`sonnet` aliases or `[1m]` crumbs); Grok strip uses a real catalog id; Codex reads `~/.codex/models_cache.json` slugs (chat ids only, not `codex-auto-review`); sets that provider's session `--model` override; never sent as chat. `/repo` picks a config git root (`[[repo]]`; serve optional), `/repo .` the cwd git root, `/repo none` answer-only; bare `atr --repo .` / `atr tui --repo` / `--dir` set the launch workspace (config name or path is enough — full path not required). `/new` `/quit` `/status` `/help` `/cli` stay atr-local; `/cli` opens the vendor TUI. Other `/…` may be proxied. User turns are prefixed `>` with a local clock; replies have no `You` / `atr` chip. The strip and `/status` show the real workspace kind (`answer-only` / `dir …` / `git …`), never process cwd for answer-only. Tracing never paints on the TUI composer (see `[log] path`). First run: bare `atr` → init offer → service ask → TUI. Scripts: `atr init --yes` then `atr ask`. No TTY never auto-inits.
+A bare `atr` (or `atr tui`) is an interactive in-process chat TUI (transcript + composer + under-input status strip). It is the provider CLI with atr as the proxy (session reuse + prompt-cache): plain text is a provider turn; atr does not invent chat replies. Mouse is left to the terminal for copy/paste. `atr ask "prompt"` is the one-shot / CI entrypoint on the same engine (no alternate screen). Serve is not required and never auto-dispatches `cli-*` sessions. Sessions are tasks keyed `cli-<name>` (default `cli-default` — internal session id, not a model; title omits it), separate from Telegram. Slash: `/provider`, `/model`, `/effort`, `/context`, and `/repo` are atr-local pickers (overlay only — not transcript rows). `/model` lists real CLI ids, never `Available` / help prose; Claude seeds documented full ids only (`claude-…`, no `opus`/`sonnet` aliases or `[1m]` crumbs); Gemini seeds documented full ids only (`gemini-2.5-pro`, … — no `auto`/`pro`/`flash` aliases); Grok strip uses a real catalog id; Codex reads `~/.codex/models_cache.json` slugs (chat ids only, not `codex-auto-review`); sets that provider's session `--model` override; never sent as chat. `/repo` picks a config git root (`[[repo]]`; serve optional), `/repo .` the cwd git root, `/repo none` answer-only; bare `atr --repo .` / `atr tui --repo` / `--dir` set the launch workspace (config name or path is enough — full path not required). `/new` `/quit` `/status` `/help` `/cli` stay atr-local; `/cli` opens the vendor TUI. Other `/…` may be proxied. User turns are prefixed `>` with a local clock; replies have no `You` / `atr` chip. The strip and `/status` show the real workspace kind (`answer-only` / `dir …` / `git …`), never process cwd for answer-only. Tracing never paints on the TUI composer (see `[log] path`). First run: bare `atr` → init offer → service ask → TUI. Scripts: `atr init --yes` then `atr ask`. No TTY never auto-inits.
 
 ```bash
 atr ask "what is 2+2?"       # one-shot / CI
@@ -124,7 +124,7 @@ atr submit smoke --body "reply with the word ok and do not edit files" --repo ~/
 
 Vendor coding CLIs (Kimi Code, Qwen Code, ZCode, MiMo Code, …) are interactive only. atr has no kinds for them — use OpenCode.
 
-### Claude, Grok, Cursor, Codex (own CLIs)
+### Claude, Grok, Cursor, Codex, Gemini (own CLIs)
 
 | CLI | Add |
 |---|---|
@@ -132,10 +132,13 @@ Vendor coding CLIs (Kimi Code, Qwen Code, ZCode, MiMo Code, …) are interactive
 | Grok Build | `atr providers add grok --kind grok` |
 | Cursor CLI | `atr providers add cursor --kind cursor` |
 | Codex | `atr providers add codex --kind codex` |
+| Gemini CLI | `atr providers add gemini --kind gemini` |
 
 Codex gets atr's instructions as `-c model_instructions_file=<worktree>/.atr/system.md`, which replaces Codex's built-in base prompt (codex-cli 0.166 checked; the old `instructions_file` key is ignored by codex). An operator `--override 'model_instructions_file="…"'` wins. If Codex ignores atr's rules (commits or pushes itself, wrong answer format), check `codex --version` and the run's argv.
 
 Grok Build gets the same file as the `--rules` text. `grok 1.0.89 --help` says `--rules <RULES>` ("Extra rules to append to the system prompt"); `--rules-file` is not a flag. atr reads `<worktree>/.atr/system.md` and passes those bytes as one argument, with no shell. The task prompt stays `--prompt-file`. If Grok ignores atr's rules, check that the run's argv contains the rules text.
+
+Gemini CLI runs headless with `--output-format stream-json --skip-trust --approval-mode yolo` and the prompt on stdin (do not pass boolean `-p`; `--prompt` takes a string). Sign in with `gemini` (Login with Google) or set `GEMINI_API_KEY`. `/model` lists full ids (`gemini-2.5-pro`, …), not aliases (`auto`, `pro`, `flash`). There is no documented system-prompt file flag.
 
 ### Chinese providers (via OpenCode)
 
@@ -169,7 +172,7 @@ Rules for agents:
 - **Configure `[[verify.repo]]` commands first.** Verify is the model's only test loop (it gets `no_shell_extra_retries`, default 1, extra follow-ups).
 - **Use triage for labels and comments, and never auto-approve.** Show the suggestion (`atr triage show <id>`) and let the user approve.
 - **Read the PR notes.** "Dropped scratch files" and "Reverted unrequested edits" list what atr removed. A `NO-OP <key>` or `BLOCKED <key>` result means nothing was delivered; report it, don't retry in a loop.
-- **Guards that apply only to no-shell providers:** `[scratch]` cleanup (`scope = "no_shell"`), a main-checkout guard that withholds the result, and a fresh session on `atr retry`. Claude, Codex, Cursor and Grok keep their files and docs edits, get only a warning for a main-checkout change, and resume their session on retry (except a planning run, which starts fresh). A worker that follows a planner always starts a fresh session; the original task reaches it through the handoff block.
+- **Guards that apply only to no-shell providers:** `[scratch]` cleanup (`scope = "no_shell"`), a main-checkout guard that withholds the result, and a fresh session on `atr retry`. Claude, Codex, Cursor, Grok and Gemini keep their files and docs edits, get only a warning for a main-checkout change, and resume their session on retry (except a planning run, which starts fresh). A worker that follows a planner always starts a fresh session; the original task reaches it through the handoff block.
 - **Known limits:** run-to-run quality varies, triage label accuracy is weak, and docs revert only covers docs-style files.
 
 ### spark (local)
@@ -263,6 +266,7 @@ A proof run (MCP/HTTP `check_only`) tells the agent not to edit files. No file c
 | 401 on a run | Key missing in the **serve** environment. Desktop login does not help a LaunchAgent unless `auth.json` or `shadow.env` is sourced. |
 | Ollama / spark connection refused | Local server down. Doctor: URL missing from `opencode.json`. |
 | Cursor / Claude fail over SSH | Keychain locked. Run doctor and serve in the desktop session. |
+| Gemini `auth` warn / `GEMINI_API_KEY unset` | Run `gemini` (Login with Google) or set `GEMINI_API_KEY` in the serve environment / `shadow.env`. Doctor reports set/unset only, never the value. |
 | `atr submit` does nothing | `atr serve` (or the user service) not running. `/status`. |
 | Task `held` | An `after:` dependency failed or is gone. `atr retry <key>` clears the hold. |
 | Queued with retry time | Transient provider error (overloaded / 429 / 5xx / 408). Wait, or `atr retry <key>`. `[retry]` in CONFIG.md. |

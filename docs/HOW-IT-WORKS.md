@@ -53,6 +53,8 @@ strip stays in sync with the session provider/model (`/provider` and
 `/model` are the switchers; `/model` lists real CLI ids — never
 `Available` / help prose; Claude seeds documented full ids only
 (`claude-sonnet-5-5`, … — never `opus` / `sonnet` / `[1m]` crumbs);
+Gemini seeds documented full ids only (`gemini-2.5-pro`, … — never
+`auto` / `pro` / `flash` aliases);
 Grok strip/picker use a real catalog id, never `Available`;
 Codex reads `~/.codex/models_cache.json` slugs (chat ids only —
 not `codex-auto-review`);
@@ -83,19 +85,20 @@ vendor TUI.
 
 `atr init` and `atr providers detect` look on `PATH` and common install dirs
 (`~/.local/bin`, `~/.claude/local`, `~/.cursor/bin`, `~/.opencode/bin`,
-Homebrew, …) for `claude`, `grok`, `cursor-agent`, `codex`, `opencode`, and
-the Chinese vendor CLIs (Kimi Code, Qwen Code, ZCode, DeepSeek, MiniMax,
-MiMo Code). For each installed binary they print the version and a cheap
-signed-in probe (no paid API call). If you are not signed in they print the
-exact login command. If the macOS keychain is locked (typical over SSH) they
-print `unverified (keychain locked)`. Vendor CLIs are interactive only — atr
-has no kinds for them; add the model through OpenCode.
+`~/.gemini/bin`, Homebrew, …) for `claude`, `grok`, `cursor-agent`, `codex`,
+`gemini`, `opencode`, and the Chinese vendor CLIs (Kimi Code, Qwen Code,
+ZCode, DeepSeek, MiniMax, MiMo Code). For each installed binary they print
+the version and a cheap signed-in probe (no paid API call). If you are not
+signed in they print the exact login command. If the macOS keychain is
+locked (typical over SSH) they print `unverified (keychain locked)`. Vendor
+CLIs are interactive only — atr has no kinds for them; add the model through
+OpenCode.
 
 When OpenCode is installed, detect lists signed-in providers and
 `opencode models`. Init lets you pick which to add (presets or a
 `provider/model` id), including Ollama/spark if they are already in
 `opencode.json`. Default order is subscriptions first, then OpenCode.
-`atr init --yes` writes the four subscription blocks (enabled only when
+`atr init --yes` writes the subscription blocks (enabled only when
 detected and signed in) plus those OpenCode picks.
 
 | Provider | CLI | Kind |
@@ -104,13 +107,14 @@ detected and signed in) plus those OpenCode picks.
 | Grok Build | `grok` | `grok` |
 | Cursor CLI | `cursor-agent` | `cursor` |
 | Codex | `codex` | `codex` |
+| Gemini CLI | `gemini` | `gemini` |
 | OpenCode | `opencode` | `opencode` |
 
 OpenCode covers Ollama and the Chinese providers (Kimi/Moonshot, Qwen/DashScope,
 DeepSeek, Z.ai GLM, MiniMax, Xiaomi MiMo) plus local spark. **Any model
 OpenCode supports works with atr by its `provider/model` id.** Presets
-(`atr providers add kimi`) are shortcuts only. Claude, Codex, Cursor, and Grok
-stay on their own CLIs.
+(`atr providers add kimi`) are shortcuts only. Claude, Codex, Cursor, Grok,
+and Gemini stay on their own CLIs.
 
 After each add: `atr doctor`, then a tiny task (`atr serve` must be running):
 
@@ -120,7 +124,7 @@ atr submit smoke --body "reply with the word ok and do not edit files" --repo ~/
 atr tasks smoke
 ```
 
-### Claude, Grok, Cursor, Codex
+### Claude, Grok, Cursor, Codex, Gemini
 
 | CLI | Sign in | Add |
 |---|---|---|
@@ -128,6 +132,7 @@ atr tasks smoke
 | Grok Build | `grok` | `atr providers add grok --kind grok` |
 | Cursor CLI | Cursor app (keychain) | `atr providers add cursor --kind cursor` |
 | Codex | `codex login` | `atr providers add codex --kind codex` |
+| Gemini CLI | `gemini` (Login with Google) or `GEMINI_API_KEY` | `atr providers add gemini --kind gemini` |
 
 ### OpenCode (any provider/model)
 
@@ -174,7 +179,7 @@ The goal is high prompt-cache hit rates on first runs and resumes.
 | Lever | Behaviour |
 |---|---|
 | Worktree pool | Reuses `.atr/wt/<provider>-<n>` per repo+provider so cwd/git in the CLI system prompt stay byte-stable. Each slot has one persisted owner (task id). A second live task gets the next free slot, or waits if every slot is owned. Checkout is refused when another live task still owns the tree. Idle finished tasks do not keep a slot. Reset (`checkout -B`, `reset --hard`, `clean -fd`) only when a **different** task lands on a slot it owns. Same-session stall retry, resume, session fork, follow-ups, and a restart resume reuse the tree as-is when that task still owns it (including detached HEAD and dirty files). `[cache] worktree_pool = false` restores one folder per task key. |
-| CLI system-prompt slot | Stable prefix (system prompt + `AGENTS.md` + provider contract) is written to `{worktree}/.atr/system.md`. Claude gets `--append-system-prompt-file` (path). Codex gets `-c model_instructions_file` (path; replaces Codex's base prompt). OpenCode gets a first `--file` attach (2.x has no `--system`). Grok Build's `--rules` is the rules text (`grok 1.0.89 --help`: `--rules <RULES>`, "Extra rules to append to the system prompt"; no rules-file flag), so atr reads that file and passes the bytes as one `--rules` argument, with no shell. Cursor has no slot; the prefix stays in the prompt file. |
+| CLI system-prompt slot | Stable prefix (system prompt + `AGENTS.md` + provider contract) is written to `{worktree}/.atr/system.md`. Claude gets `--append-system-prompt-file` (path). Codex gets `-c model_instructions_file` (path; replaces Codex's base prompt). OpenCode gets a first `--file` attach (2.x has no `--system`). Grok Build's `--rules` is the rules text (`grok 1.0.89 --help`: `--rules <RULES>`, "Extra rules to append to the system prompt"; no rules-file flag), so atr reads that file and passes the bytes as one `--rules` argument, with no shell. Cursor and Gemini have no slot; the prefix stays in the prompt file. |
 | Resume delta | Follow-ups send only the new messages (and optional handoff). The stable prefix is not re-sent. |
 | Variable tail | Per-task text (task header, workspace note, `## Repo lessons (atr)` when `[lessons]` is on, handoff, messages) goes after `----- atr variable -----`, so it never changes the prefix hash. |
 | Provider affinity | Retries and follow-ups stay on the same provider and session. Work still inside `cache_window` (Claude ~5m, others 60m) is scheduled first; remaining queued tasks for that provider are batched next. |
@@ -322,7 +327,7 @@ db; `/assistant` shows it. When the hint is set, `pick_provider` skips
 Telegram-originated runs (and the host dir) get `[telegram.deny]` when
 the CLI command is built: grok `--deny`, claude
 `--disallowedTools Bash(<rule>:*)`, codex `-s workspace-write`.
-cursor-agent and spark/opencode have no matching flag. Optional
+cursor-agent, gemini and spark/opencode have no matching flag. Optional
 `telegram.deny.wrapper` PATH-prepends git/rm/launchctl/sudo shims
 (`deny-bin/` next to the state db, or the hardened worktree `.atr/bin`).
 These are best-effort. GitHub branch protection is the hard backstop.

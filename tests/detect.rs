@@ -16,6 +16,7 @@ fn install_fakes(bin: &std::path::Path) {
         "cursor-agent",
         "codex",
         "opencode",
+        "gemini",
         "kimi",
     ] {
         let dest = bin.join(name);
@@ -55,6 +56,7 @@ fn providers_detect_lists_version_auth_and_login() {
     assert!(text.contains("1.2.3"), "{text}");
     assert!(text.contains("signed in"), "{text}");
     assert!(text.contains("login: grok"), "{text}");
+    assert!(text.contains("login: gemini"), "{text}");
     assert!(
         text.contains("opencode auth login") || text.contains("moonshotai"),
         "{text}"

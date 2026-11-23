@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const SUBSCRIPTION_ORDER: &[&str] = &["claude", "grok", "cursor", "codex"];
+const SUBSCRIPTION_ORDER: &[&str] = &["claude", "grok", "cursor", "codex", "gemini"];
 
 const HOME_BIN_DIRS: &[&str] = &[
     ".local/bin",
@@ -16,6 +16,7 @@ const HOME_BIN_DIRS: &[&str] = &[
     ".cursor/bin",
     ".opencode/bin",
     ".codex/bin",
+    ".gemini/bin",
     ".npm-global/bin",
     ".kimi/bin",
     ".qwen/bin",
@@ -92,6 +93,19 @@ pub const SPECS: &[CliSpec] = &[
         version_args: &["--version"],
         auth_args: &["login", "status"],
         login: "codex login",
+        vendor_note: None,
+    },
+    CliSpec {
+        id: "gemini",
+        kind: Some("gemini"),
+        binaries: &["gemini"],
+        version_args: &["--version"],
+        // No `gemini auth status` in the official CLI reference. Probe oauth
+        // files and GEMINI_API_KEY (set/unset only). Never start interactive
+        // `gemini` (that is a REPL).
+        // https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html
+        auth_args: &[],
+        login: "gemini",
         vendor_note: None,
     },
     CliSpec {
@@ -191,11 +205,21 @@ impl DetectEnv {
 #[cfg(test)]
 thread_local! {
     static TEST_ENV: std::cell::RefCell<Option<DetectEnv>> = const { std::cell::RefCell::new(None) };
+    static TEST_GEMINI_KEY: std::cell::RefCell<Option<bool>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 pub fn set_test_env(env: Option<DetectEnv>) {
     TEST_ENV.with(|c| *c.borrow_mut() = env);
+}
+
+#[cfg(test)]
+pub fn set_test_gemini_key(set: Option<bool>) {
+    TEST_GEMINI_KEY.with(|c| *c.borrow_mut() = set);
+}
+
+pub fn gemini_api_key_set() -> bool {
+    env_flag_set("GEMINI_API_KEY")
 }
 
 pub fn current_env() -> DetectEnv {
@@ -271,6 +295,8 @@ fn find_spec(spec: &CliSpec, env: &DetectEnv) -> Option<FoundCli> {
             let version = probe_version(&path, spec.version_args);
             let auth = if spec.id == "grok" {
                 probe_grok_auth(&path, env)
+            } else if spec.id == "gemini" {
+                probe_gemini_auth(env)
             } else {
                 let mut auth = probe_auth(&path, spec.auth_args);
                 if auth == Auth::Unknown {
@@ -345,6 +371,31 @@ fn probe_version(cli: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new(cli).args(args).output().ok()?;
     let text = combined(&out);
     first_version_token(&text)
+}
+
+/// GEMINI_API_KEY set/unset only (never the value), or oauth files present.
+/// Never starts interactive `gemini`.
+fn env_flag_set(name: &str) -> bool {
+    #[cfg(test)]
+    {
+        if name == "GEMINI_API_KEY" {
+            if let Some(v) = TEST_GEMINI_KEY.with(|c| *c.borrow()) {
+                return v;
+            }
+        }
+    }
+    std::env::var_os(name).is_some_and(|v| !v.is_empty())
+}
+
+fn probe_gemini_auth(env: &DetectEnv) -> Auth {
+    if env_flag_set("GEMINI_API_KEY") {
+        return Auth::Yes;
+    }
+    match file_auth("gemini", env) {
+        Auth::Yes => Auth::Yes,
+        Auth::KeychainLocked => Auth::KeychainLocked,
+        Auth::No | Auth::Unknown => Auth::No,
+    }
 }
 
 /// Auth file first, then `_x.ai/billing` over `grok agent stdio`.
@@ -557,6 +608,7 @@ fn file_auth(id: &str, env: &DetectEnv) -> Auth {
         "cursor" => &[".cursor/cli-config.json", ".cursor/argv.json"],
         "codex" => &[".codex/auth.json"],
         "opencode" => &[".local/share/opencode/auth.json"],
+        "gemini" => &[".gemini/oauth_creds.json", ".gemini/google_accounts.json"],
         _ => &[],
     };
     for rel in paths {
@@ -809,6 +861,7 @@ pub fn cli_default_model_in(kind: &str, home: &Path) -> Option<String> {
         "grok" => toml_model_line(&home.join(".grok/config.toml"))
             .or_else(|| toml_model_line(&home.join(".config/grok/config.toml"))),
         "cursor" => json_model_field(&home.join(".cursor/cli-config.json")),
+        "gemini" => json_model_field(&home.join(".gemini/settings.json")),
         _ => None,
     }
 }
@@ -1054,7 +1107,7 @@ pub fn reorder_picks(picks: Vec<ProviderPick>, order: &str) -> Vec<ProviderPick>
 }
 
 /// `--yes`: subscriptions that are signed in, then signed-in/configured OpenCode.
-/// Always includes the four subscription kinds (disabled when not signed in)
+/// Always includes the subscription kinds (disabled when not signed in)
 /// so a fresh config still has the usual blocks.
 pub fn yes_picks(d: &Discovery) -> Vec<ProviderPick> {
     let mut picks = default_subscription_picks(d);
@@ -1111,6 +1164,66 @@ exit 0
         assert!(grok_meets_min("1.0.52"));
         assert!(grok_meets_min("grok 1.1.0"));
         assert!(!grok_meets_min("1.0.51"));
+    }
+
+    #[test]
+    fn gemini_probes_files_and_key_without_auth_subcommand() {
+        let spec = SPECS.iter().find(|s| s.id == "gemini").unwrap();
+        assert!(spec.auth_args.is_empty());
+        assert_eq!(spec.kind, Some("gemini"));
+        assert_eq!(spec.binaries, &["gemini"]);
+        assert_eq!(spec.login, "gemini");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join(".gemini")).unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_cli(&bin, "gemini", &fake_script(false));
+        let env = DetectEnv {
+            path: bin.as_os_str().to_owned(),
+            home: home.clone(),
+            search_system: false,
+        };
+        struct ClearGeminiKey;
+        impl Drop for ClearGeminiKey {
+            fn drop(&mut self) {
+                set_test_gemini_key(None);
+            }
+        }
+        let _clear_key = ClearGeminiKey;
+        set_test_gemini_key(Some(false));
+        let d = discover(&env);
+        let g = d
+            .found
+            .iter()
+            .find(|f| f.spec_id == "gemini")
+            .expect("gemini");
+        assert_eq!(g.version.as_deref(), Some("1.2.3"));
+        assert_eq!(g.auth, Auth::No);
+        let text = format_report(&d, None);
+        assert!(text.contains("gemini"), "{text}");
+        assert!(text.contains("not signed in"), "{text}");
+        assert!(text.contains("login: gemini"), "{text}");
+        assert!(!text.contains("sk-"), "{text}");
+
+        std::fs::write(home.join(".gemini/oauth_creds.json"), "{\"ok\":true}\n").unwrap();
+        let d = discover(&env);
+        let g = d.found.iter().find(|f| f.spec_id == "gemini").unwrap();
+        assert_eq!(g.auth, Auth::Yes);
+        let text = format_report(&d, None);
+        assert!(text.contains("signed in"), "{text}");
+        assert!(!text.contains("sk-"), "{text}");
+        assert!(!text.contains("access_token"), "{text}");
+
+        std::fs::remove_file(home.join(".gemini/oauth_creds.json")).unwrap();
+        set_test_gemini_key(Some(true));
+        let d = discover(&env);
+        let g = d.found.iter().find(|f| f.spec_id == "gemini").unwrap();
+        assert_eq!(g.auth, Auth::Yes);
+        let text = format_report(&d, None);
+        assert!(text.contains("signed in"), "{text}");
+        assert!(!text.to_ascii_lowercase().contains("api_key="), "{text}");
     }
 
     #[test]

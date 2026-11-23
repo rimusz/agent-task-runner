@@ -179,7 +179,8 @@ pub fn build_command_opts(
 /// Best-effort confinement for `--dir` workspaces. Codex already sandboxes
 /// with `-s`; Claude gets `--add-dir` so the folder is an explicit allowlist
 /// even if the CLI would otherwise walk up to a git root. Grok passes
-/// `--cwd`; OpenCode runs with the folder as its cwd. This is not a hard jail.
+/// `--cwd`; OpenCode runs with the folder as its cwd. Gemini gets
+/// `--include-directories`. This is not a hard jail.
 pub fn apply_dir_confinement(p: &Provider, spec: &mut CommandSpec, dir: &Path) {
     match p.kind.as_str() {
         "claude" if !spec.args.iter().any(|a| a == "--add-dir") => {
@@ -193,6 +194,10 @@ pub fn apply_dir_confinement(p: &Provider, spec: &mut CommandSpec, dir: &Path) {
             } else {
                 p.sandbox.clone()
             });
+        }
+        "gemini" if !spec.args.iter().any(|a| a == "--include-directories") => {
+            spec.args.push("--include-directories".into());
+            spec.args.push(dir.display().to_string());
         }
         _ => {}
     }
@@ -610,6 +615,16 @@ pub fn parse_value(kind: &str, value: &Value) -> Option<ParsedEvent> {
         return Some(ParsedEvent::Failed(msg));
     }
 
+    if let Some(err) = value.get("error") {
+        if err.is_object() && !looks_like_usage(value) && !type_is(value, "result") {
+            let msg = err
+                .get("message")
+                .map(value_to_string)
+                .unwrap_or_else(|| value_to_string(err));
+            return Some(ParsedEvent::Failed(msg));
+        }
+    }
+
     let ty = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if matches!(
         ty,
@@ -620,6 +635,10 @@ pub fn parse_value(kind: &str, value: &Value) -> Option<ParsedEvent> {
             | "end"
             | "SubagentCompleted"
             | "subagent_completed"
+            | "message"
+            | "tool_use"
+            | "tool_result"
+            | "init"
     ) {
         if looks_like_usage(value) {
             // fall through
@@ -638,10 +657,13 @@ pub fn parse_value(kind: &str, value: &Value) -> Option<ParsedEvent> {
             .unwrap_or(false)
             || type_is(value, "result")
                 && value.get("subtype").and_then(|v| v.as_str()) == Some("error")
+            || value.get("status").and_then(|v| v.as_str()) == Some("error")
+            || value.get("error").is_some_and(|e| e.is_object())
             || result_needs_attention(value);
         let result_text = value
             .get("result")
             .or_else(|| value.get("text"))
+            .or_else(|| value.get("response"))
             .map(value_to_string);
         return Some(ParsedEvent::Usage {
             usage,
@@ -673,6 +695,63 @@ fn looks_like_usage(value: &Value) -> bool {
         || type_is(value, "step_finish")
         || type_is(value, "usage")
         || value.pointer("/part/tokens").is_some()
+        || looks_like_gemini_stats(value)
+}
+
+fn looks_like_gemini_stats(value: &Value) -> bool {
+    let Some(stats) = value.get("stats") else {
+        return false;
+    };
+    stats.get("models").is_some()
+        || stats.get("input_tokens").is_some()
+        || stats.get("tokens").is_some()
+        || stats.get("total_tokens").is_some()
+}
+
+/// Gemini CLI `--output-format json` / `stream-json` `result` stats.
+/// JSON: `stats.models[name].tokens.{prompt,candidates,cached}`.
+/// stream-json: `stats.{input_tokens,output_tokens,cached}` plus optional models.
+/// `prompt` includes cached tokens; store uncached input like Codex.
+/// https://google-gemini.github.io/gemini-cli/docs/cli/headless.html
+fn extract_gemini_stats(value: &Value) -> Option<UsageNumbers> {
+    let stats = value.get("stats")?;
+    if let Some(models) = stats.get("models").and_then(|m| m.as_object()) {
+        if !models.is_empty() {
+            let mut input = 0u64;
+            let mut output = 0u64;
+            let mut cache_read = 0u64;
+            for m in models.values() {
+                let tokens = m.get("tokens").unwrap_or(m);
+                input += grab_u64(tokens, &["prompt", "input_tokens", "input"]);
+                output += grab_u64(tokens, &["candidates", "output_tokens", "output"]);
+                cache_read += grab_u64(tokens, &["cached", "cache_read", "cached_tokens"]);
+            }
+            return Some(UsageNumbers {
+                input: input.saturating_sub(cache_read),
+                output,
+                cache_read,
+                cache_write: 0,
+                cost_usd: None,
+            });
+        }
+    }
+    if stats.get("input_tokens").is_none()
+        && stats.get("output_tokens").is_none()
+        && stats.get("cached").is_none()
+        && stats.get("total_tokens").is_none()
+    {
+        return None;
+    }
+    let input = grab_u64(stats, &["input_tokens", "input"]);
+    let output = grab_u64(stats, &["output_tokens"]);
+    let cache_read = grab_u64(stats, &["cached"]);
+    Some(UsageNumbers {
+        input: input.saturating_sub(cache_read),
+        output,
+        cache_read,
+        cache_write: 0,
+        cost_usd: None,
+    })
 }
 
 /// xAI billing ticks per US dollar.
@@ -801,6 +880,9 @@ pub fn extract_usage(kind: &str, value: &Value) -> UsageNumbers {
         if let Some(u) = value.get("usage").and_then(parse_grok_usage_cli) {
             return u;
         }
+    }
+    if let Some(u) = extract_gemini_stats(value) {
+        return u;
     }
     let part_tokens = value.pointer("/part/tokens").cloned();
     let usage = value
@@ -959,6 +1041,9 @@ fn classify_structured_fields(code: Option<i64>, kind: &str, message: &str) -> O
         || msg.contains("hit your limit")
         || msg.contains("out of extra usage")
         || (msg.contains("quota") && (msg.contains("exceed") || msg.contains("limit")))
+        || msg.contains("turn limit")
+        || msg.contains("maximum session turns")
+        || msg.contains("session turns exceeded")
     {
         return Some(ErrorClass::Limit);
     }
@@ -1328,12 +1413,24 @@ pub(crate) mod tests {
             cwd_flag: String::new(),
             permission_mode: String::new(),
             permission_mode_flag: "--permission-mode".into(),
-            prompt_mode: "arg".into(),
+            prompt_mode: if kind == "gemini" {
+                "stdin".into()
+            } else {
+                "arg".into()
+            },
             prompt_file_prefix: "@".into(),
             profile: String::new(),
             sandbox: "workspace-write".into(),
             args: if kind == "codex" {
                 vec![]
+            } else if kind == "gemini" {
+                vec![
+                    "--output-format".into(),
+                    "stream-json".into(),
+                    "--skip-trust".into(),
+                    "--approval-mode".into(),
+                    "yolo".into(),
+                ]
             } else {
                 vec!["-p".into()]
             },
@@ -1505,6 +1602,151 @@ pub(crate) mod tests {
         }
         let ev: Value = serde_json::from_str(err).unwrap();
         assert_eq!(classify_error_value(&ev), Some(ErrorClass::Auth));
+    }
+
+    #[test]
+    fn gemini_stream_json_and_json_blob() {
+        let init = r#"{"type":"init","timestamp":"2026-01-01T00:00:00.000Z","session_id":"ses-g1","model":"gemini-2.5-pro"}"#;
+        match parse_line("gemini", init).unwrap() {
+            ParsedEvent::Session(id) => assert_eq!(id, "ses-g1"),
+            other => panic!("{other:?}"),
+        }
+        let msg =
+            r#"{"type":"message","timestamp":"t","role":"assistant","content":"hi","delta":true}"#;
+        assert_eq!(parse_line("gemini", msg), Some(ParsedEvent::Heartbeat));
+        let result = r#"{"type":"result","timestamp":"t","status":"success","session_id":"ses-g1","stats":{"total_tokens":25113,"input_tokens":24939,"output_tokens":20,"cached":21263,"input":24939,"duration_ms":100,"tool_calls":0,"models":{"gemini-2.5-pro":{"tokens":{"prompt":24939,"candidates":20,"total":25113,"cached":21263,"thoughts":154,"tool":0}}}}}"#;
+        match parse_line("gemini", result).unwrap() {
+            ParsedEvent::Usage {
+                usage,
+                result_text,
+                is_error,
+                ..
+            } => {
+                assert_eq!(usage.input, 24939 - 21263);
+                assert_eq!(usage.output, 20);
+                assert_eq!(usage.cache_read, 21263);
+                assert!(usage.cost_usd.is_none());
+                assert!(!is_error);
+                assert!(result_text.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        let blob = r#"{"response":"The capital of France is Paris.","stats":{"models":{"gemini-2.5-pro":{"tokens":{"prompt":100,"candidates":8,"total":108,"cached":40,"thoughts":0,"tool":0}}}}}"#;
+        let evs = parse_blob("gemini", blob);
+        let usage = evs
+            .iter()
+            .find_map(|e| match e {
+                ParsedEvent::Usage {
+                    usage,
+                    result_text,
+                    is_error,
+                    ..
+                } => {
+                    assert_eq!(
+                        result_text.as_deref(),
+                        Some("The capital of France is Paris.")
+                    );
+                    assert!(!*is_error);
+                    Some(usage.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(usage.input, 60);
+        assert_eq!(usage.output, 8);
+        assert_eq!(usage.cache_read, 40);
+
+        let fixture = include_str!("../tests/fixtures/usage/gemini.json");
+        let fixture_evs = parse_blob("gemini", fixture);
+        let fixture_usage = fixture_evs
+            .iter()
+            .find_map(|e| match e {
+                ParsedEvent::Usage { usage, .. } => Some(usage.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(fixture_usage.input, 24939 - 21263);
+        assert_eq!(fixture_usage.output, 20);
+        assert_eq!(fixture_usage.cache_read, 21263);
+
+        let auth = r#"{"response":"","error":{"type":"AuthError","message":"not authenticated","code":401}}"#;
+        match parse_blob("gemini", auth).into_iter().find(|e| {
+            matches!(
+                e,
+                ParsedEvent::Failed(_) | ParsedEvent::Usage { is_error: true, .. }
+            )
+        }) {
+            Some(ParsedEvent::Failed(m)) => assert!(m.contains("not authenticated"), "{m}"),
+            Some(ParsedEvent::Usage { is_error, raw, .. }) => {
+                assert!(is_error);
+                assert_eq!(classify_error_value(&raw), Some(ErrorClass::Auth));
+            }
+            other => panic!("{other:?}"),
+        }
+        let auth_ev: Value = serde_json::from_str(
+            r#"{"type":"error","error":{"type":"AuthError","message":"not authenticated","code":401}}"#,
+        )
+        .unwrap();
+        assert_eq!(classify_error_value(&auth_ev), Some(ErrorClass::Auth));
+        let turns: Value = serde_json::from_str(
+            r#"{"type":"error","severity":"error","message":"Maximum session turns exceeded"}"#,
+        )
+        .unwrap();
+        assert_eq!(classify_error_value(&turns), Some(ErrorClass::Limit));
+    }
+
+    #[test]
+    fn gemini_command_uses_stdin_not_argv_prompt() {
+        let p = stub("gemini");
+        let spec = build_command(
+            &p,
+            Path::new("/wt"),
+            Path::new("/wt/.atr/prompt.md"),
+            "SECRET-PROMPT",
+            Some("ses-g1"),
+            false,
+        );
+        assert_eq!(spec.program, PathBuf::from("gemini"));
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|w| w == ["--output-format", "stream-json"]),
+            "{:?}",
+            spec.args
+        );
+        assert!(
+            spec.args.iter().any(|a| a == "--skip-trust"),
+            "{:?}",
+            spec.args
+        );
+        assert!(
+            spec.args.windows(2).any(|w| w == ["--model", "m"]),
+            "{:?}",
+            spec.args
+        );
+        assert!(
+            spec.args.windows(2).any(|w| w == ["--resume", "ses-g1"]),
+            "{:?}",
+            spec.args
+        );
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|w| w == ["--approval-mode", "yolo"]),
+            "{:?}",
+            spec.args
+        );
+        assert!(
+            !spec
+                .args
+                .iter()
+                .any(|a| a == "-p" || a == "--yolo" || a == "-y"),
+            "gemini --prompt is a string flag; do not pass boolean -p/--yolo: {:?}",
+            spec.args
+        );
+        assert!(!spec.args.iter().any(|a| a.contains("SECRET-PROMPT")));
+        assert_eq!(spec.stdin_text.as_deref(), Some("SECRET-PROMPT"));
+        assert_eq!(spec.cwd, PathBuf::from("/wt"));
     }
 
     #[test]
@@ -2357,6 +2599,24 @@ pub(crate) mod tests {
         apply_dir_confinement(&codex, &mut spec, Path::new("/notes"));
         assert!(
             spec.args.windows(2).any(|w| w == ["-s", "workspace-write"]),
+            "{:?}",
+            spec.args
+        );
+
+        let gemini = stub("gemini");
+        let mut spec = build_command(
+            &gemini,
+            Path::new("/notes"),
+            Path::new("/state/prompts/t/prompt.md"),
+            "hi",
+            None,
+            true,
+        );
+        apply_dir_confinement(&gemini, &mut spec, Path::new("/notes"));
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|w| w == ["--include-directories", "/notes"]),
             "{:?}",
             spec.args
         );

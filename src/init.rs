@@ -247,7 +247,7 @@ pub fn format_no_provider_help(cfg: &crate::config::Config) -> String {
     let mut out = String::from("No enabled provider is ready.\n");
     if d.found.is_empty() {
         out.push_str(
-            "No agent CLI found on PATH. Install claude, grok, cursor-agent, codex, or opencode.\n",
+            "No agent CLI found on PATH. Install claude, grok, cursor-agent, codex, gemini, or opencode.\n",
         );
     } else {
         let seen: Vec<String> = d

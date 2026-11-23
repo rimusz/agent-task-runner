@@ -22,7 +22,7 @@ fn init_custom_config_dir_skips_skill_install_and_uses_local_prompt() {
     })
     .unwrap();
     assert!(text.contains("skill install skipped"), "{text}");
-    for d in [".claude", ".codex", ".grok", ".cursor"] {
+    for d in [".claude", ".codex", ".grok", ".cursor", ".gemini"] {
         assert!(
             !home.path().join(d).join("skills").exists(),
             "skill written into {d}: {text}"

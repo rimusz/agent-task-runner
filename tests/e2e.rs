@@ -13,6 +13,7 @@ async fn each_provider_parses_its_usage_shape() {
         ("cursor", "demo-13"),
         ("codex", "demo-14"),
         ("opencode", "demo-15"),
+        ("gemini", "demo-16"),
     ];
     for (only, key) in cases {
         let providers = [
@@ -21,6 +22,7 @@ async fn each_provider_parses_its_usage_shape() {
             ("cursor", only == "cursor", "success"),
             ("codex", only == "codex", "success"),
             ("opencode", only == "opencode", "success"),
+            ("gemini", only == "gemini", "success"),
         ];
         let h = Harness::with_providers(&providers, "127.0.0.1:0").await;
         assert_eq!(h.submit(key, "do the work"), SubmitOutcome::Accepted);
@@ -92,9 +94,19 @@ async fn each_provider_parses_its_usage_shape() {
                 assert_eq!(usage_rows[0].cost_kind.as_deref(), Some("plan"));
                 assert!(usage_rows[0].cost_usd.is_none());
             }
+            "gemini" => {
+                assert_eq!(
+                    usage_rows[0].input, 80,
+                    "gemini stores uncached input, not inclusive prompt"
+                );
+                assert_eq!(usage_rows[0].output, 50);
+                assert_eq!(usage_rows[0].cache_read, 20);
+                assert_eq!(usage_rows[0].cost_kind.as_deref(), Some("plan"));
+                assert!(usage_rows[0].cost_usd.is_none());
+            }
             other => panic!("unexpected provider {other}"),
         }
-        if only == "cursor" || only == "codex" || only == "opencode" {
+        if only == "cursor" || only == "codex" || only == "opencode" || only == "gemini" {
             let status = h.shared.status_json();
             let p = status["providers"]
                 .as_array()

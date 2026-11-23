@@ -333,7 +333,7 @@ mod tests {
         } else {
             "--model".into()
         };
-        p.args = if matches!(kind, "codex" | "opencode") {
+        p.args = if matches!(kind, "codex" | "opencode" | "gemini") {
             vec![]
         } else {
             vec!["-p".into()]
@@ -381,6 +381,9 @@ mod tests {
         assert!(parse_knob(Knob::Effort, "opencode", "high")
             .unwrap_err()
             .contains("not supported for opencode"));
+        assert!(parse_knob(Knob::Effort, "gemini", "high")
+            .unwrap_err()
+            .contains("not supported for gemini"));
         assert!(parse_knob(Knob::Context, "grok", "1m")
             .unwrap_err()
             .contains("not supported for grok"));

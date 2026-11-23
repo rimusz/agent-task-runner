@@ -525,7 +525,7 @@ enum LessonsCmd {
 #[derive(Subcommand, Debug)]
 enum SkillsCmd {
     /// Write skills/atr/SKILL.md for each installed CLI (claude, cursor-agent,
-    /// codex, grok, opencode). Missing CLIs are skipped. Configs are untouched.
+    /// codex, grok, gemini, opencode). Missing CLIs are skipped. Configs are untouched.
     Install,
 }
 

@@ -20,7 +20,14 @@ async fn no_serve(providers: &[(&str, bool, &str)]) -> (TempDir, Arc<Shared>, st
     let bin = dir.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agent.sh");
-    for name in ["claude", "grok", "cursor-agent", "codex", "opencode"] {
+    for name in [
+        "claude",
+        "grok",
+        "cursor-agent",
+        "codex",
+        "opencode",
+        "gemini",
+    ] {
         let dest = bin.join(name);
         fs::copy(&script, &dest).unwrap();
         #[cfg(unix)]
@@ -512,6 +519,61 @@ async fn model_slash_claude_lists_full_ids_not_only_aliases() {
     assert!(
         !list.contains("Available models") && !list.contains("Usage:"),
         "claude help prose must not be picker rows: {list}"
+    );
+}
+
+#[tokio::test]
+async fn model_slash_gemini_lists_full_ids_not_aliases() {
+    let (_dir, shared, _cfg) = no_serve(&[
+        ("claude", false, "success"),
+        ("grok", false, "success"),
+        ("cursor", false, "success"),
+        ("codex", false, "success"),
+        ("gemini", true, "success"),
+    ])
+    .await;
+    let switch = tui::preview_line(&shared, "cli-default", "/provider gemini").unwrap();
+    assert!(switch.starts_with("note"), "{switch}");
+    let reject = tui::preview_line(&shared, "cli-default", "/model auto").unwrap();
+    assert!(
+        reject.contains("no model matching") || !reject.contains("model auto (this session"),
+        "gemini alias must not become the session model: {reject}"
+    );
+    let list = tui::preview_line(&shared, "cli-default", "/model").unwrap();
+    assert!(list.starts_with("model-picker"), "{list}");
+    for want in [
+        "gemini-3-pro-preview",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+    ] {
+        assert!(list.contains(want), "missing full id {want} in {list}");
+    }
+    let numbered: Vec<&str> = list
+        .lines()
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            let _n = parts.next()?.parse::<usize>().ok()?;
+            parts.next()
+        })
+        .collect();
+    assert!(
+        numbered.iter().any(|id| id.starts_with("gemini-")),
+        "Gemini /model must list real ids, not aliases: {list}"
+    );
+    assert!(
+        numbered.iter().all(|id| id.starts_with("gemini-")),
+        "Gemini /model must list only full gemini- ids: {numbered:?}"
+    );
+    for alias in ["auto", "pro", "flash", "flash-lite"] {
+        assert!(
+            !numbered.iter().any(|id| id.eq_ignore_ascii_case(alias)),
+            "short alias {alias:?} must not be a picker row: {numbered:?}"
+        );
+    }
+    assert!(
+        !list.contains("Available") && !list.contains("Recommended"),
+        "prose headers must not be picker rows: {list}"
     );
 }
 
@@ -1527,6 +1589,7 @@ async fn effort_and_context_are_atr_local_and_wire_argv() {
         ("cursor", false, "success"),
         ("codex", false, "success"),
         ("opencode", false, "success"),
+        ("gemini", false, "success"),
     ])
     .await;
     assert_eq!(tui::classify_line("/effort"), "effort");
@@ -1620,6 +1683,10 @@ async fn effort_and_context_are_atr_local_and_wire_argv() {
     assert!(oc.starts_with("note"), "{oc}");
     let no = tui::preview_line(&shared, "cli-default", "/effort high").unwrap();
     assert!(no.contains("not supported for opencode"), "{no}");
+    let gem = tui::preview_line(&shared, "cli-default", "/provider gemini").unwrap();
+    assert!(gem.starts_with("note"), "{gem}");
+    let no_g = tui::preview_line(&shared, "cli-default", "/effort high").unwrap();
+    assert!(no_g.contains("not supported for gemini"), "{no_g}");
 }
 
 fn setup_bin_cfg() -> (TempDir, std::path::PathBuf) {

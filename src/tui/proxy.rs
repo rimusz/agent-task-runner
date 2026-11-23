@@ -110,6 +110,20 @@ pub(crate) const CLAUDE_ALIASES: &[&str] =
 pub(crate) const GROK_MODELS: &[&str] =
     &["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"];
 
+/// Gemini CLI `--model` ids from the official CLI reference (not aliases).
+/// There is no safe non-interactive `gemini models` catalog.
+/// https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/cli-reference.md
+pub(crate) const GEMINI_MODELS: &[&str] = &[
+    "gemini-3-pro-preview",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+];
+
+/// Gemini CLI model aliases. **Never** picker rows — atr lists only
+/// full [`GEMINI_MODELS`] ids (`gemini-…`).
+pub(crate) const GEMINI_ALIASES: &[&str] = &["auto", "pro", "flash", "flash-lite"];
+
 /// Last-resort Codex ids when `~/.codex/models_cache.json` (and the
 /// picker catalog) are missing. `codex models` is a TUI — never spawn it.
 pub(crate) const CODEX_ALIASES: &[&str] = &[
@@ -247,6 +261,11 @@ pub(crate) fn collect_models(
             push((*id).to_string(), "catalog");
         }
     }
+    if kind == "gemini" {
+        for id in GEMINI_MODELS {
+            push((*id).to_string(), "catalog");
+        }
+    }
     if kind == "codex" {
         let slugs = codex_catalog_slugs();
         if slugs.is_empty() {
@@ -274,6 +293,9 @@ pub(crate) fn collect_models(
     }
     if kind == "claude" {
         out.retain(|m| is_claude_full_id(&m.name));
+    }
+    if kind == "gemini" {
+        out.retain(|m| is_gemini_full_id(&m.name));
     }
     out
 }
@@ -316,6 +338,7 @@ fn kind_seed_models(kind: &str) -> &'static [&'static str] {
         "grok" => GROK_MODELS,
         "claude" => CLAUDE_MODELS,
         "codex" => CODEX_ALIASES,
+        "gemini" => GEMINI_MODELS,
         _ => &[],
     }
 }
@@ -428,6 +451,11 @@ pub(crate) fn accept_model_name(kind: &str, name: &str) -> bool {
     {
         return false;
     }
+    if kind == "gemini"
+        && (GEMINI_ALIASES.iter().any(|a| a.eq_ignore_ascii_case(name)) || !is_gemini_full_id(name))
+    {
+        return false;
+    }
     if is_placeholder_model(name) || is_junk_model_label(name) {
         return is_kind_alias(kind, name);
     }
@@ -440,6 +468,15 @@ fn is_claude_full_id(name: &str) -> bool {
     let n = name.trim();
     n.len() > "claude-".len()
         && n.to_ascii_lowercase().starts_with("claude-")
+        && !crate::detect::has_csi_leftover(n)
+}
+
+/// Documented Gemini `--model` ids only (`gemini-2.5-pro`, …).
+/// Bare aliases (`auto`, `pro`, `flash`, `flash-lite`) are not rows.
+fn is_gemini_full_id(name: &str) -> bool {
+    let n = name.trim();
+    n.len() > "gemini-".len()
+        && n.to_ascii_lowercase().starts_with("gemini-")
         && !crate::detect::has_csi_leftover(n)
 }
 
@@ -851,6 +888,7 @@ Available models:
         assert_eq!(models_argv("cursor"), Some(&["models"][..]));
         assert_eq!(models_argv("claude"), None);
         assert_eq!(models_argv("codex"), None);
+        assert_eq!(models_argv("gemini"), None);
     }
 
     fn assert_no_junk(ids: &[String]) {
@@ -954,6 +992,31 @@ Available models:
         assert!(CLAUDE_MODELS.contains(&"claude-opus-5-5"));
         assert!(CLAUDE_MODELS.contains(&"claude-haiku-5-5"));
         assert!(CLAUDE_MODELS.contains(&"claude-fable-5-1"));
+    }
+
+    #[test]
+    fn gemini_catalog_is_full_ids_not_aliases() {
+        let ids: Vec<&str> = include_str!("../../tests/fixtures/models/gemini_models.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        assert_eq!(ids, GEMINI_MODELS);
+        assert!(ids.len() > 1, "{ids:?}");
+        for id in GEMINI_MODELS {
+            assert!(
+                id.starts_with("gemini-") && id.contains('-'),
+                "expected a full Gemini id, got {id}"
+            );
+            assert!(accept_model_name("gemini", id), "{id}");
+            assert!(
+                !GEMINI_ALIASES.iter().any(|a| a.eq_ignore_ascii_case(id)),
+                "full id {id} must not be a short alias"
+            );
+        }
+        assert!(GEMINI_MODELS.contains(&"gemini-2.5-pro"));
+        assert!(GEMINI_MODELS.contains(&"gemini-3-pro-preview"));
+        assert_no_junk(&ids.iter().map(|s| (*s).to_string()).collect::<Vec<_>>());
     }
 
     #[test]
@@ -1103,6 +1166,13 @@ Available models:
         assert!(accept_model_name("claude", "claude-sonnet-5-5"));
         assert!(accept_model_name("claude", "claude-opus-5-5"));
         assert!(accept_model_name("opencode", "moonshotai/kimi-k2.6"));
+        assert!(!accept_model_name("gemini", "auto"));
+        assert!(!accept_model_name("gemini", "pro"));
+        assert!(!accept_model_name("gemini", "flash"));
+        assert!(!accept_model_name("gemini", "flash-lite"));
+        assert!(!accept_model_name("gemini", "Available"));
+        assert!(accept_model_name("gemini", "gemini-2.5-pro"));
+        assert!(accept_model_name("gemini", "gemini-3-pro-preview"));
     }
 
     #[test]
