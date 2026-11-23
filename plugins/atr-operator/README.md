@@ -1,6 +1,6 @@
 # atr-operator
 
-One [Agent Plugin](https://agent-plugins.org) that gives a coding CLI **atr MCP** and the **atr skill**. Cursor and other Agent Plugins clients load this folder. Claude Code, Codex, Grok Build, and OpenCode use the MCP snippets below.
+One [Agent Plugin](https://agent-plugins.org) that gives a coding CLI **atr MCP** and the **atr skill**. Cursor and other Agent Plugins clients load this folder. Claude Code, Codex, Grok Build, Gemini CLI, and OpenCode use the MCP snippets below.
 
 `mcp.json` declares two servers and holds only `${ATR_MCP_HOST}` and `${ATR_MCP_TOKEN}` placeholders, never a real token. Do not put the token in chat or in a committed file.
 
@@ -48,7 +48,7 @@ The repo-root `.cursor-plugin/marketplace.json` points at this nested plugin (`p
 
 This plugin's `skills/atr/SKILL.md` is a copy of the repo skill so the package is self-contained. Keep the two files in sync.
 
-`atr init` / `atr skills install` still writes that skill into each installed CLI's skill dir (`~/.claude`, `~/.cursor`, `~/.codex`, `~/.grok`, `~/.config/opencode`). Use that if you are not loading this Agent Plugin.
+`atr init` / `atr skills install` still writes that skill into each installed CLI's skill dir (`~/.claude`, `~/.cursor`, `~/.codex`, `~/.grok`, `~/.gemini`, `~/.config/opencode`). Use that if you are not loading this Agent Plugin.
 
 ## MCP snippets (same machine)
 

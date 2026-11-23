@@ -16,6 +16,7 @@ pub const SKILL_DIRS: &[&str] = &[
     ".codex/skills/atr",
     ".grok/skills/atr",
     ".config/opencode/skills/atr",
+    ".gemini/skills/atr",
 ];
 
 /// What `atr reset` will do, computed without touching anything.

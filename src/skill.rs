@@ -16,6 +16,7 @@ pub const SKILL_TARGETS: &[(&str, &[&str], &str)] = &[
         &["opencode"],
         ".config/opencode/skills/atr/SKILL.md",
     ),
+    ("gemini", &["gemini"], ".gemini/skills/atr/SKILL.md"),
 ];
 
 /// Relative skill paths under `$HOME` (or `ATR_SKILL_HOME`).
@@ -296,7 +297,7 @@ mod tests {
     fn install_writes_cli_skill_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let msg = install_into_home_with(dir.path(), |_| true).unwrap();
-        assert!(msg.contains("5 CLI"), "{msg}");
+        assert!(msg.contains("6 CLI"), "{msg}");
         for rel in skill_rel_paths() {
             let p = dir.path().join(rel);
             let text = std::fs::read_to_string(&p).unwrap();
@@ -312,7 +313,7 @@ mod tests {
         assert!(msg.contains("skipped"), "{msg}");
         assert!(dir.path().join(".claude/skills/atr/SKILL.md").is_file());
         assert!(dir.path().join(".grok/skills/atr/SKILL.md").is_file());
-        for d in [".cursor", ".codex", ".config/opencode"] {
+        for d in [".cursor", ".codex", ".config/opencode", ".gemini"] {
             assert!(!dir.path().join(d).exists(), "{d} must not be created");
         }
     }

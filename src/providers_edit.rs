@@ -464,7 +464,10 @@ fn resolve_add(
     let kind_explicit = kind.filter(|s| !s.is_empty());
     if let Some(kind) = kind_explicit {
         if !is_known_kind(kind) {
-            bail!("unknown kind {kind}; use claude, grok, cursor, codex, or opencode");
+            bail!(
+                "unknown kind {kind}; use {}",
+                crate::config::known_kinds_hint()
+            );
         }
         // `atr providers add spark --kind codex` keeps the old Codex path.
         if kind != "opencode" {

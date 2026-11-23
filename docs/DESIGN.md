@@ -6,9 +6,9 @@ GitHub auth: [GITHUB.md](GITHUB.md).
 
 atr is a local daemon that drives official coding-agent CLIs on existing
 subscription plans. It does not call vendor HTTP APIs itself and it does not
-bill per run. Providers today: Claude Code, Grok Build, Cursor CLI, Codex, and
-OpenCode (including named presets). Configuration is TOML. Nothing is hardcoded
-except built-in OpenCode presets.
+bill per run. Providers today: Claude Code, Grok Build, Cursor CLI, Codex,
+Gemini CLI, and OpenCode (including named presets). Configuration is TOML.
+Nothing is hardcoded except built-in OpenCode presets.
 
 ## Operator UX
 
@@ -189,7 +189,8 @@ GitHub intake is on.
 
 Provider order lives in config. It is **not hardcoded**. Edits apply on
 `SIGHUP`/reload or restart. Running tasks keep the provider they started on.
-Shipped example order: claude, grok, cursor, codex. Codex must select the
+Shipped example order: claude, grok, cursor, codex (gemini is a first-class
+kind, added when detected). Codex must select the
 ChatGPT-plan provider via a profile or `-c` overrides when the user's Codex
 config points at a local custom-model gateway.
 
@@ -200,6 +201,7 @@ config points at a local custom-model gateway.
 | Cursor CLI | `cursor-agent -p --force --output-format stream-json` | `--resume <chatId>` | Needs the desktop session (login keychain). |
 | Codex CLI | `codex exec --json -C <wt> -s workspace-write -m <model>` | `codex exec resume <uuid>` | ChatGPT sign-in. Example override: `-c model_provider="openai"`. |
 | OpenCode | file prompt + `opencode` | session id | Preset keys stay in `shadow.env`. |
+| Gemini CLI | `gemini --output-format stream-json --skip-trust --approval-mode yolo` (prompt on stdin) | `--resume <sid>` | `--prompt`/`-p` is a string flag, not Claude's boolean print mode. `--yolo` is deprecated. |
 
 Selection: walk the list. Skip a provider that is disabled, in cooldown, or
 full (`max_parallel`). The first match takes the task. Extra parallel tasks
@@ -434,7 +436,7 @@ keychain token is outside Anthropic's terms. Cursor has no login route in pi.
 Headless mode is one-shot; Claude needs an API key; there is no Cursor
 subscription route.
 
-**Verdict:** only the official CLIs (claude, grok, cursor-agent, codex, plus
-OpenCode for extra models) stay inside the plans, so atr drives them
-directly. Ideas worth borrowing: a small tool set and a stable system prompt
-(cache warmth); per-session JSONL persistence.
+**Verdict:** only the official CLIs (claude, grok, cursor-agent, codex,
+gemini, plus OpenCode for extra models) stay inside the plans, so atr drives
+them directly. Ideas worth borrowing: a small tool set and a stable system
+prompt (cache warmth); per-session JSONL persistence.

@@ -420,6 +420,9 @@ pub async fn run_with_listen(
         if p.kind == "grok" && v.ok_path {
             grok_min_version_check(&mut checks, p, &v);
         }
+        if p.kind == "gemini" {
+            gemini_auth_check(&mut checks, p, config_path);
+        }
     }
 
     let legacy: Vec<&str> = cfg
@@ -594,6 +597,61 @@ fn grok_min_version_check(
             Status::Fail,
             format!("{found} < {min_s}"),
             Some("upgrade grok (planner JSON / plugin / usage)".into()),
+        );
+    }
+}
+
+/// GEMINI_API_KEY as set/unset only (never the value). OAuth files: present/absent,
+/// contents are not read. https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html
+fn gemini_auth_check(checks: &mut Vec<Check>, p: &crate::config::Provider, config_path: &Path) {
+    let shadow = crate::telegram_setup::shadow_env_path(config_path);
+    let from_env = crate::detect::gemini_api_key_set();
+    let from_shadow =
+        crate::telegram_setup::read_shadow_env_var(&shadow, "GEMINI_API_KEY").is_some();
+    let key_set = from_env || from_shadow;
+    let key_detail = if from_env {
+        "GEMINI_API_KEY set"
+    } else if from_shadow {
+        "GEMINI_API_KEY in shadow.env"
+    } else {
+        "GEMINI_API_KEY unset"
+    };
+    push(
+        checks,
+        &format!("key {}", p.name),
+        if key_set { Status::Ok } else { Status::Warn },
+        key_detail.into(),
+        (!key_set).then(|| "set GEMINI_API_KEY or run gemini (Login with Google)".into()),
+    );
+    let home = crate::detect::current_env().home;
+    let oauth = home.join(".gemini/oauth_creds.json");
+    let accounts = home.join(".gemini/google_accounts.json");
+    let files_present = [&oauth, &accounts]
+        .iter()
+        .any(|p| p.is_file() && p.metadata().map(|m| m.len() > 2).unwrap_or(false));
+    if files_present {
+        push(
+            checks,
+            &format!("auth {}", p.name),
+            Status::Ok,
+            "oauth creds present".into(),
+            None,
+        );
+    } else if key_set {
+        push(
+            checks,
+            &format!("auth {}", p.name),
+            Status::Ok,
+            "API key auth".into(),
+            None,
+        );
+    } else {
+        push(
+            checks,
+            &format!("auth {}", p.name),
+            Status::Warn,
+            "not signed in".into(),
+            Some(crate::presets::auth_login_hint("gemini").into()),
         );
     }
 }
@@ -1622,6 +1680,90 @@ cli = "/bin/true"
             report.format()
         );
         crate::opencode_cfg::set_test_path(None);
+    }
+
+    #[tokio::test]
+    async fn gemini_key_is_set_or_unset_never_the_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".gemini")).unwrap();
+        let path = dir.path().join("config.toml");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(dir.path().join("system-prompt.md"), "p\n").unwrap();
+        let text = format!(
+            r#"
+listen = "127.0.0.1:0"
+repo_path = "{repo}"
+system_prompt_file = "{prompt}"
+[[provider]]
+name = "gemini"
+kind = "gemini"
+cli = "/bin/true"
+"#,
+            repo = repo.display(),
+            prompt = dir.path().join("system-prompt.md").display(),
+        );
+        std::fs::write(&path, &text).unwrap();
+        let cfg = crate::config::parse_config_toml(&text).unwrap();
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                crate::detect::set_test_env(None);
+                crate::detect::set_test_gemini_key(None);
+            }
+        }
+        let _clear = Clear;
+        crate::detect::set_test_env(Some(crate::detect::DetectEnv {
+            path: "/nonexistent".into(),
+            home: home.clone(),
+            search_system: false,
+        }));
+        crate::detect::set_test_gemini_key(Some(false));
+        let report = run(&cfg, &path, false).await;
+        let key = report
+            .checks
+            .iter()
+            .find(|c| c.name == "key gemini")
+            .unwrap_or_else(|| panic!("missing key gemini\n{}", report.format()));
+        assert_eq!(key.status, Status::Warn, "{:?}", key);
+        assert_eq!(key.detail, "GEMINI_API_KEY unset");
+        assert!(
+            !report.format().contains("sk-secret"),
+            "{}",
+            report.format()
+        );
+        std::fs::write(
+            dir.path().join("shadow.env"),
+            "GEMINI_API_KEY=sk-secret-value\n",
+        )
+        .unwrap();
+        let report = run(&cfg, &path, false).await;
+        let key = report
+            .checks
+            .iter()
+            .find(|c| c.name == "key gemini")
+            .unwrap();
+        assert_eq!(key.status, Status::Ok, "{:?}", key);
+        assert_eq!(key.detail, "GEMINI_API_KEY in shadow.env");
+        let text = report.format();
+        assert!(!text.contains("sk-secret-value"), "{text}");
+        assert!(!text.contains("sk-secret"), "{text}");
+        std::fs::write(dir.path().join("shadow.env"), "").unwrap();
+        std::fs::write(home.join(".gemini/oauth_creds.json"), "{\"ok\":true}\n").unwrap();
+        let report = run(&cfg, &path, false).await;
+        let auth = report
+            .checks
+            .iter()
+            .find(|c| c.name == "auth gemini")
+            .unwrap();
+        assert_eq!(auth.status, Status::Ok, "{:?}", auth);
+        assert_eq!(auth.detail, "oauth creds present");
+        assert!(
+            !report.format().contains("sk-secret"),
+            "{}",
+            report.format()
+        );
     }
 
     #[tokio::test]

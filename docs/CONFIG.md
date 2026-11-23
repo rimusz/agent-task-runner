@@ -103,6 +103,14 @@ refused before spawn. Passing the path made Grok treat the path string as
 the rules, so the system prompt never arrived. A `system_prompt_flag` other
 than `--rules` or `--append-system-prompt` is still passed the path.
 
+**Gemini CLI.** For `kind = "gemini"` providers atr runs
+`gemini --output-format stream-json --skip-trust --approval-mode yolo` with
+the prompt on stdin (non-TTY headless). `--prompt`/`-p` takes a string, so
+it is not used as Claude's boolean print mode. Empty `model` leaves Gemini's
+`auto`. Auth is Login with Google (`~/.gemini/oauth_creds.json`) or
+`GEMINI_API_KEY` (doctor reports set/unset only, never the value). There is
+no documented system-prompt file flag; the prefix stays in the prompt.
+
 OpenCode providers only: `allow_shell` (default `false`). When false, atr
 denies the model's `shell`/`execute` tools (plus `subagent`, `question`,
 `webfetch`, `websearch`, `external_directory`, and `skill`, so a worker never
@@ -795,7 +803,7 @@ default). There is no per-task model override; to run a task on another model,
 add a second `[[provider]]` with that model and send the task to it.
 
 ```toml
-driver = "claude"            # or "grok", "cursor", "codex", or any [[provider]] name
+driver = "claude"            # or "grok", "cursor", "codex", "gemini", or any [[provider]] name
 
 [[provider]]                 # order = worker preference
 name = "claude"

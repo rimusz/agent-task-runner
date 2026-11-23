@@ -9,10 +9,11 @@ case "$KIND" in
   cursor-agent) VER="${ATR_FAKE_CURSOR_VERSION:-2026.10.01-e373342}" ;;
   codex) VER="${ATR_FAKE_CODEX_VERSION:-0.162.1}" ;;
   opencode) VER="${ATR_FAKE_OPENCODE_VERSION:-1.0.132}" ;;
+  gemini) VER="${ATR_FAKE_GEMINI_VERSION:-0.22.0}" ;;
   *) VER="0.0.0" ;;
 esac
 
-if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" || "${1:-}" == "-v" ]]; then
   echo "$KIND $VER"
   exit 0
 fi
@@ -232,6 +233,13 @@ EOF
       echo "{\"type\":\"step_start\",\"sessionID\":\"${sid}\",\"part\":{\"type\":\"step-start\"}}"
       cat <<EOF
 {"type":"step_finish","sessionID":"${sid}","part":{"type":"step-finish","reason":"stop","tokens":{"input":50,"output":10,"reasoning":0,"cache":{"read":100,"write":5}}}}
+EOF
+      ;;
+    gemini)
+      echo "{\"type\":\"init\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"session_id\":\"${sid}\",\"model\":\"gemini-2.5-pro\"}"
+      echo '{"type":"message","timestamp":"t","role":"assistant","content":"done","delta":true}'
+      cat <<EOF
+{"type":"result","timestamp":"t","status":"success","session_id":"${sid}","stats":{"total_tokens":150,"input_tokens":100,"output_tokens":50,"cached":20,"input":100,"duration_ms":10,"tool_calls":0,"models":{"gemini-2.5-pro":{"tokens":{"prompt":100,"candidates":50,"total":150,"cached":20,"thoughts":0,"tool":0}}}}}
 EOF
       ;;
     *)

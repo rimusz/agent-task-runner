@@ -1,5 +1,5 @@
 #!/bin/sh
-# Cheap stand-in for claude / grok / cursor-agent / codex / opencode / vendor CLIs.
+# Cheap stand-in for claude / grok / cursor-agent / codex / gemini / opencode / vendor CLIs.
 # ATR_FAKE_SIGNED=1 or ATR_FAKE_SIGNED_<basename>=1 means signed in.
 name=$(basename "$0")
 key=$(echo "$name" | tr '-' '_')

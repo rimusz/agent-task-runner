@@ -274,7 +274,7 @@ session_files = false
 # `atr providers add kimi` writes the key to shadow.env (never config),
 # fills ~/.config/opencode/opencode.json (base URL + {env:VAR}), and a
 # minimal block: name / kind=opencode / preset / optional model.
-# Claude, Codex, Cursor, Grok stay on their own CLIs.
+# Claude, Codex, Cursor, Grok, and Gemini stay on their own CLIs.
 # Custom names can still use a [[preset]] (kind + model only; no keys).
 
 [[provider]]
@@ -306,6 +306,13 @@ kind = "codex"
 enabled = true
 # Optional model (CLI default if omitted). Override ChatGPT-plan routing if needed:
 # config_overrides = ["model_provider=\"openai\""]
+
+# [[provider]]
+# name = "gemini"
+# kind = "gemini"
+# enabled = true
+# # Gemini CLI (`gemini`): --output-format stream-json, --approval-mode yolo,
+# # --skip-trust, prompt on stdin (non-TTY headless). Model empty = CLI `auto`.
 
 # OpenCode spark (atr providers add spark):
 # name = "spark"

@@ -1,0 +1,8 @@
+# Gemini CLI --model ids (cli-reference.md model selection).
+# No non-interactive `gemini models` catalog; `/model` seeds these full ids
+# and omits aliases (auto, pro, flash, flash-lite).
+# https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/cli-reference.md
+gemini-3-pro-preview
+gemini-2.5-pro
+gemini-2.5-flash
+gemini-2.5-flash-lite

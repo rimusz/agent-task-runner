@@ -31,10 +31,13 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshenv && exec $SHELL -l
 
 Sign in to the CLIs you want (on a Mac, do this at the desktop so Cursor can use the login keychain):
 
+Install Gemini CLI with `npm install -g @google/gemini-cli` or `brew install gemini-cli`.
+
 ```bash
 claude                 # Claude Code
 grok                   # Grok Build
 codex login            # Codex
+gemini                 # Gemini CLI (Login with Google), or set GEMINI_API_KEY
 opencode auth login    # OpenCode (Kimi, Qwen, GLM, MiniMax, DeepSeek, …)
 # Cursor: sign in to the Cursor app
 ```
@@ -62,7 +65,7 @@ atr doctor
 - any Linux distro (the Linux build is a static musl binary),
 - a cloud VM or headless server. Run `sudo loginctl enable-linger "$USER"` so the service keeps running after you log out.
 
-The coding CLIs atr drives (Claude, Codex, Cursor, Grok, OpenCode and others) must be installed and signed in on that same host.
+The coding CLIs atr drives (Claude, Codex, Cursor, Grok, Gemini, OpenCode and others) must be installed and signed in on that same host.
 
 ## Full agent deploy prompt
 
@@ -79,7 +82,7 @@ Deploy atr (https://github.com/rimusz/agent-task-runner) on this machine. Follow
    Confirm with: atr --version
 
 3. Check the coding CLIs: atr providers detect
-   It lists Claude Code, Grok Build, Cursor, Codex, OpenCode and others with version and signed-in status. Do NOT sign in for me. For each one that is installed but signed out, tell me the exact login command it prints and wait until I say I have done it. On macOS, "unverified (keychain locked)" over SSH is fine; Cursor must be signed in at the desktop.
+   It lists Claude Code, Grok Build, Cursor, Codex, Gemini CLI, OpenCode and others with version and signed-in status. Do NOT sign in for me. For each one that is installed but signed out, tell me the exact login command it prints and wait until I say I have done it. On macOS, "unverified (keychain locked)" over SSH is fine; Cursor must be signed in at the desktop. Gemini login is `gemini` (Login with Google) or `GEMINI_API_KEY` set (doctor reports set/unset only).
 
 4. Check GitHub access with gh auth status (it must show a logged-in account; never print the token). If not logged in, ask me to run gh auth login myself. Then run gh auth setup-git so git clone/push use the same token. A token is required for watching labels and posting comments; an SSH key is optional and only covers git.
 

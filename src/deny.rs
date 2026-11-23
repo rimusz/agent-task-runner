@@ -349,10 +349,11 @@ mod tests {
     }
 
     #[test]
-    fn cursor_and_opencode_have_no_flag() {
+    fn cursor_opencode_and_gemini_have_no_flag() {
         let mut s = spec();
         apply_to_spec("cursor", &mut s, &["sudo".into()]);
         apply_to_spec("opencode", &mut s, &["sudo".into()]);
+        apply_to_spec("gemini", &mut s, &["sudo".into()]);
         assert!(!s
             .args
             .iter()

@@ -2,9 +2,9 @@
 //!
 //! API keys never go in config. Built-ins that need a key store it in
 //! `shadow.env`; base URL + `{env:VAR}` go in `~/.config/opencode/opencode.json`.
-//! Claude, Codex, Cursor, and Grok stay on their own CLIs.
+//! Claude, Codex, Cursor, Grok, and Gemini stay on their own CLIs.
 
-use crate::config::{is_known_kind, Config, Preset};
+use crate::config::{is_known_kind, known_kinds_hint, Config, Preset};
 
 /// Built-in `atr providers add <name>` mapping (OpenCode + Chinese / local).
 #[derive(Debug, Clone, Copy)]
@@ -126,6 +126,7 @@ pub fn auth_login_hint(kind: &str) -> &'static str {
         "grok" => "grok",
         "cursor" => "sign in to the Cursor app",
         "codex" => "codex login",
+        "gemini" => "gemini",
         _ => "log in with that CLI; atr does not store API keys",
     }
 }
@@ -168,7 +169,7 @@ pub fn apply(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| preset.kind.clone());
     if !is_known_kind(&kind) {
-        anyhow::bail!("unknown kind {kind}; use claude, grok, cursor, codex, or opencode");
+        anyhow::bail!("unknown kind {kind}; use {}", known_kinds_hint());
     }
     let model = model
         .map(str::to_string)
@@ -228,6 +229,7 @@ mod tests {
         assert_eq!(auth_login_hint("codex"), "codex login");
         assert_eq!(auth_login_hint("claude"), "claude");
         assert_eq!(auth_login_hint("cursor"), "sign in to the Cursor app");
+        assert_eq!(auth_login_hint("gemini"), "gemini");
     }
 
     #[test]

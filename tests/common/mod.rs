@@ -38,7 +38,14 @@ impl Harness {
         let bin = dir.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agent.sh");
-        for name in ["claude", "grok", "cursor-agent", "codex", "opencode"] {
+        for name in [
+            "claude",
+            "grok",
+            "cursor-agent",
+            "codex",
+            "opencode",
+            "gemini",
+        ] {
             let dest = bin.join(name);
             fs::copy(&script, &dest).unwrap();
             #[cfg(unix)]
@@ -401,6 +408,19 @@ resume_flag = "--session"
 model_flag = "--model"
 prompt_mode = "stdin"
 cwd_flag = "--dir"
+config_overrides = []
+reported_usage = "none"
+"#,
+        ),
+        "gemini" => (
+            "gemini",
+            "gemini",
+            "0.22.0",
+            r#"args = ["--output-format", "stream-json", "--skip-trust", "--approval-mode", "yolo"]
+resume_flag = "--resume"
+model_flag = "--model"
+prompt_mode = "stdin"
+cwd_flag = ""
 config_overrides = []
 reported_usage = "none"
 "#,
