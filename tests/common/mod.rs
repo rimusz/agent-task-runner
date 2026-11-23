@@ -22,12 +22,14 @@ pub struct Harness {
     #[allow(dead_code)]
     pub dir: TempDir,
     pub shared: Arc<Shared>,
+    #[allow(dead_code)]
     pub addr: SocketAddr,
     pub fake_dir: PathBuf,
     pub repo: PathBuf,
     _watchdog: Watchdog,
 }
 
+#[allow(dead_code)]
 impl Harness {
     pub async fn with_providers(providers: &[(&str, bool, &str)], listen: &str) -> Self {
         let dir = TempDir::new().unwrap();
@@ -297,6 +299,15 @@ token_file = "{token}"
 max_bytes = 8192
 include_diff = true
 
+[selfheal]
+enabled = true
+interval = "1s"
+check = false
+disk_min_mb = 0
+lock_files = []
+prune_dirs = []
+health_dir = "{health}"
+
 [host]
 enabled = false
 
@@ -315,6 +326,7 @@ key_prefix = ""
         prompt = prompt.display(),
         gh = bin.join("gh").display(),
         token = db.with_file_name("http.token").display(),
+        health = wt.parent().unwrap_or(wt).join("health").display(),
     );
     for (name, enabled, _) in providers {
         out.push_str(&provider_block(name, *enabled, bin));

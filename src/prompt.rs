@@ -230,11 +230,21 @@ to see what already happened, then continue the unfinished task.";
 /// The full recovery note is prepended via [`RESTART_PREAMBLE`].
 pub const RESTART_CONTINUE: &str = "Continue the unfinished task from the current workspace state.";
 
+/// First message of the turn after self-heal re-queued a dead agent process.
+pub const REAP_PREAMBLE: &str = "Your previous turn ended because the agent process died. \
+Before repeating any outside action (git push, PR/issue comments, API calls, \
+deploys, messages), check the worktree state, git log/history and the remote \
+to see what already happened, then continue the unfinished task.";
+
+/// Short queued body so a self-heal re-queue has pending work to dispatch.
+pub const REAP_CONTINUE: &str = "Continue the unfinished task from the current workspace state.";
+
 /// Preamble inserted as the first body of a resumed turn, if any.
 pub fn turn_preamble(prior_outcome: Option<&str>) -> Option<&'static str> {
     match prior_outcome {
         Some("interrupted") => Some(INTERRUPT_PREAMBLE),
         Some("restarted") => Some(RESTART_PREAMBLE),
+        Some("reaped") => Some(REAP_PREAMBLE),
         _ => None,
     }
 }

@@ -324,6 +324,11 @@ PY
     printf 'brand-new-untracked\n' > ATR_NEW.md
     sleep 1000
     ;;
+  die)
+    echo "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"${sid}\"}"
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"dying mid-run"}]}}'
+    exit 1
+    ;;
   permission_denied)
     echo '{"type":"assistant","message":{"content":[{"type":"text","text":"I cannot edit files without permission."}]}}'
     cat <<EOF

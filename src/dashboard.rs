@@ -295,6 +295,7 @@ pub fn snapshot_period(
         "driver": cfg.driver_name(),
         "stats_today": stats_today,
         "health": health(&cfg, &shared.config_path, now),
+        "selfheal": crate::selfheal::status_json(shared),
         "github_auth": crate::gh_token::status_json(&cfg, &shared.config_path, Timestamp::now()),
         "telegram_health": crate::telegram_health::status_json(&cfg, &shared.config_path, Timestamp::now()),
         "repos": repos,

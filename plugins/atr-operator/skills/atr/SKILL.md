@@ -72,7 +72,7 @@ Operators with a shell use the CLI; it shares the same code paths. `atr pause`/`
 | `/repos` | `atr repos list` | none |
 | `/usage [period] [repo]` | `atr usage [--period P] [--repo R]` | none |
 | `/shadow` | `atr shadow report` | none |
-| `/doctor` | `atr doctor` | none |
+| `/doctor` | `atr doctor` (plus queue checks: stuck runs, retries exhausted, provider cooldown, disk) | none |
 | `/tokens` | `atr github token list` | none |
 | `/ui` | `atr ui --print` | `GET /` |
 
@@ -210,9 +210,12 @@ Full guide: `docs/REMOTE-ACCESS.md` in the atr repo.
 
 ```bash
 atr doctor [--json] [--cache]
+atr selfheal status [--json]
 ```
 
-One `ok` / `warn` / `FAIL` line per check, then `N problems`. Checks CLIs (path + version), GitHub token (`github token api`: valid, repo access, days to expiry), Telegram token + `allowed_chat_ids`, OpenCode preset keys/URLs, repo, listen. Start every diagnosis here, then `atr status` (has a `github auth:` line when GitHub is configured) and `atr logs -f`. Full guide: `docs/TROUBLESHOOTING.md` in the atr repo.
+One `ok` / `warn` / `FAIL` line per check, then `N problems`. Checks CLIs (path + version), GitHub token (`github token api`: valid, repo access, days to expiry), Telegram token + `allowed_chat_ids`, OpenCode preset keys/URLs, repo, listen, plus queue checks when the state DB opens (stuck runs, retries exhausted, all providers in cooldown, disk below `[selfheal] disk_min_mb`). Start every diagnosis here, then `atr status` (has a `github auth:` line when GitHub is configured and a `selfheal:` line when `health.json` exists) and `atr logs -f`. Health files: `~/.local/state/atr/health.json` and `health.txt`. Full guide: `docs/TROUBLESHOOTING.md` in the atr repo.
+
+`[selfheal]` (ON by default) re-queues a dead serve-owned run once, then `needs_attention`; settles `waiting` + sealed `summary.md` to `done`; prunes stale worktrees/slots, a dead-and-aged `m1-runner.lock` (`lock_files`, older than `stuck_timeout`), and old `prune_dirs`; writes `health.json` / `health.txt` and appends FAIL/recovery lines to `health.log` (rotated ~1 MiB); calls `[notify] command` on a new FAIL or recovery (`ATR_ALERT_KIND=selfheal_failed` / `selfheal_recovered`, de-duplicated). Live progressing runs, live lock PIDs, and TUI `cli-*` keys are never killed. Killing a live agent while serve is up is `outcome=failed` (supervisor), not a reap — the reaper covers orphans after serve died. A serve restart's one resume counts as that re-queue so the reaper cannot loop. See CONFIG.md `[selfheal]`.
 
 - GitHub: atr uses one env token (`ATR_GH_TOKEN`, then `ATR_SHADOW_GH_TOKEN`, then `GH_TOKEN`) from `~/.config/atr/shadow.env`, never `gh auth login`. Fine-grained PATs are single-owner, so repos from several owners use per-owner tokens: `[github.tokens] owner = "ENV_NAME"`, managed with `atr github token set <owner>` (hidden prompt or stdin; writes shadow.env 0600 + config, validates, reloads serve), `atr github token list` (status/days, never values), `atr github token remove <owner>`. Alerts, status, dashboard and doctor (`github token api <owner>`) are per token. When GitHub is not configured (intake and shadow off), the dashboard omits GitHub entirely — no badge, banner, or degraded overall health; `atr status` omits the `github auth:` line. A real GitHub failure (configured but erroring) still shows. A failing `gh auth status` over SSH on macOS is the locked keychain, not an expired login. 401 → Telegram + `[notify] command` alert (every 6h until recovered); expiry <14 days → daily warning.
 - atr no longer pins CLI versions; doctor shows `ok cli <name> <path> <version>`. An old `expected_version` key is ignored (doctor notes it); delete it.
@@ -265,7 +268,9 @@ A proof run (MCP/HTTP `check_only`) tells the agent not to edit files. No file c
 | Queued with retry time | Transient provider error (overloaded / 429 / 5xx / 408). Wait, or `atr retry <key>`. `[retry]` in CONFIG.md. |
 | Stalled while tests/builds still ran | Heartbeat treats descendant CPU/IO and worktree file writes as live. Same-session stall retry keeps the worktree (no reset). Raise `[[provider]] heartbeat_timeout` if needed. |
 | Telegram `stalled … (CLI hang / heartbeat)` but the CLI was still working | Older builds mislabeled a `run_timeout` cap (default 90m) as a stall. Cap alerts are now `cap reached …` (reason `wall_clock_cap`, not `limit`). A pinned provider does not overflow unless `overflow_on_cap`. Set `[labels.proof] run_timeout = "3h"` / `stall_resumes = 4`, or `atr add --run-timeout 3h --stall-resumes 4 --labels proof`. Real hangs still use the stall text. |
-| Result `interrupted by atr restart; resuming` | Serve restarted mid-turn; the task is queued again once. A second restart or missing worktree fails as orphaned. `[restart]` in CONFIG.md. |
+| Result `interrupted by atr restart; resuming` | Serve restarted mid-turn; the task is queued again once. A second death is `needs_attention` (`[selfheal]`). `[restart]` / `[selfheal]` in CONFIG.md. |
+| Task `running` with no CLI | Self-heal re-queues once, then `needs_attention`. `atr selfheal status`. Live PIDs are not killed. |
+| `waiting` with sealed `summary.md` | Self-heal settles it to `done`. |
 | Status `host: … waiting` | CPU load or free RAM past `[host]`. Wait or `atr config set host.enabled false`. |
 | Usage `not reported` | Expected for OpenCode, Cursor, Codex. |
 | Codex on macOS: "timed out negotiating with the code-mode host", every command times out, NO-OP | Not atr. The Homebrew cask's `codex-code-mode-host` still has `com.apple.quarantine` and hangs at launch (Gatekeeper), so Codex's 30 s handshake fails. Check `xattr -p com.apple.quarantine "$(dirname "$(readlink -f "$(command -v codex)")")/codex-code-mode-host"`; with the owner's OK, clear it on that file (`xattr -d com.apple.quarantine …`) and run the check again after every codex upgrade. |
@@ -278,4 +283,5 @@ A proof run (MCP/HTTP `check_only`) tells the agent not to edit files. No file c
 | Config | `~/.config/atr/config.toml` |
 | Secrets | `~/.config/atr/shadow.env` (0600) |
 | State | `~/.local/share/atr/state.db` |
+| Health | `~/.local/state/atr/health.json` (+ `health.txt`, `health.log`) |
 | Skill | `~/.claude/skills/atr/SKILL.md` (and Cursor/Codex/Grok/OpenCode equivalents) |

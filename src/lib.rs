@@ -51,6 +51,7 @@ pub mod rfc3339;
 pub mod runner;
 pub mod scheduler;
 pub mod scratch;
+pub mod selfheal;
 pub mod service;
 pub mod shadow;
 pub mod skill;

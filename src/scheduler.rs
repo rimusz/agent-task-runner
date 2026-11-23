@@ -3038,6 +3038,10 @@ pub fn reclaim_dead_open_run(shared: &Shared, key: &str) -> Result<bool> {
     if alive {
         return Ok(false);
     }
+    let cfg = shared.config.read().unwrap().clone();
+    if cfg.selfheal.enabled && cfg.selfheal.reap && serve_dispatches(key) {
+        return crate::selfheal::reap_dead_run(shared, key, &r);
+    }
     tracing::warn!(
         run = r.id,
         task = %key,
@@ -3070,9 +3074,13 @@ pub fn requeue_if_pending(shared: &Shared, key: &str) -> Result<bool> {
     if shared.db.pending_messages(key)?.is_empty() {
         return Ok(false);
     }
-    // Human-needed `held` (after: failed) must survive serve restart / TUI
-    // reclaim. `queue_unless_running` would otherwise flip it to queued.
-    if shared.db.get_task(key)?.is_some_and(|t| t.status == "held") {
+    // Human-needed `held` / `needs_attention` must survive serve restart
+    // and self-heal. `queue_unless_running` would otherwise flip them queued.
+    if shared
+        .db
+        .get_task(key)?
+        .is_some_and(|t| t.status == "held" || t.status == "needs_attention")
+    {
         return Ok(false);
     }
     shared.db.queue_unless_running(key)
@@ -3118,6 +3126,17 @@ pub fn reconcile(shared: &Shared) -> Result<usize> {
             None => false,
         };
         if alive {
+            continue;
+        }
+        let cfg = shared.config.read().unwrap().clone();
+        if cfg.selfheal.enabled
+            && cfg.selfheal.reap
+            && serve_dispatches(&t.key)
+            && shared.db.open_run_for_task(&t.key)?.is_none()
+            && crate::selfheal::reap_running_without_run(shared, &t)?
+        {
+            n += 1;
+            touched.push(t.key);
             continue;
         }
         tracing::warn!(task = %t.key, "reconciling orphaned running task");
@@ -3829,7 +3848,7 @@ cli = "{cli}"
     }
 
     #[test]
-    fn reap_orphans_at_start_kills_left_over_cli_and_reconcile_fails_task() {
+    fn reap_orphans_at_start_kills_left_over_cli_and_selfheal_requeues() {
         // Regression (#5 item 5): serve was SIGKILLed while a CLI ran in its
         // own process group; the task stayed `running` forever.
         let dir = tempfile::tempdir().unwrap();
@@ -3848,8 +3867,12 @@ cli = "{cli}"
         assert!(wait_exit(&mut child, 5000), "orphaned CLI must be killed");
         assert!(reconcile(&shared).unwrap() >= 1);
         let t = shared.db.get_task("task-left").unwrap().unwrap();
-        assert_eq!(t.status, "failed");
-        assert!(t.result_text.contains("orphaned"), "{}", t.result_text);
+        assert_eq!(t.status, "queued");
+        assert!(
+            t.result_text.contains("re-queued once") || t.result_text.contains("orphaned"),
+            "{}",
+            t.result_text
+        );
         assert!(shared.db.open_runs().unwrap().is_empty());
     }
 
@@ -4087,6 +4110,11 @@ cli = "{cli}"
         assert!(reclaim_dead_open_run(&shared, "cli-gone").unwrap());
         let t = shared.db.get_task("cli-gone").unwrap().unwrap();
         assert_eq!(t.status, "failed");
+        assert!(
+            t.result_text.contains("orphaned") || t.result_text.contains("process gone"),
+            "{}",
+            t.result_text
+        );
     }
 
     #[test]
@@ -4127,8 +4155,21 @@ cli = "{cli}"
         shared.db.set_task_owner("task-gone", None).unwrap();
         assert!(reconcile(&shared).unwrap() >= 1);
         let t = shared.db.get_task("task-gone").unwrap().unwrap();
-        assert_eq!(t.status, "failed");
-        assert!(t.result_text.contains("process gone"), "{}", t.result_text);
+        assert_eq!(t.status, "queued");
+        assert!(
+            t.result_text.contains("re-queued once") || t.result_text.contains("process gone"),
+            "{}",
+            t.result_text
+        );
+        let runs = shared.db.list_runs(Some("task-gone")).unwrap();
+        assert_eq!(
+            runs.iter()
+                .find(|r| r.id == run)
+                .unwrap()
+                .outcome
+                .as_deref(),
+            Some("reaped")
+        );
     }
 
     #[test]
@@ -4141,9 +4182,11 @@ cli = "{cli}"
         let n = reconcile(&shared).unwrap();
         assert!(n >= 1, "expected to reap orphaned running task");
         let t = shared.db.get_task("task-orphan").unwrap().unwrap();
-        assert_eq!(t.status, "failed");
+        assert_eq!(t.status, "queued");
         assert!(
-            t.result_text.contains("orphaned") || t.result_text.contains("setup"),
+            t.result_text.contains("re-queued once")
+                || t.result_text.contains("orphaned")
+                || t.result_text.contains("setup"),
             "{}",
             t.result_text
         );
@@ -4357,9 +4400,11 @@ cli = "{cli}"
         assert_eq!(recover_restart_orphans(&shared).unwrap(), 0);
         assert!(reconcile(&shared).unwrap() >= 1);
         let t = shared.db.get_task("task-again").unwrap().unwrap();
-        assert_eq!(t.status, "failed");
+        assert_eq!(t.status, "needs_attention");
         assert!(
-            t.result_text.contains("orphaned") || t.result_text.contains("process gone"),
+            t.result_text.contains("after one automatic re-queue")
+                || t.result_text.contains("orphaned")
+                || t.result_text.contains("process gone"),
             "{}",
             t.result_text
         );
@@ -4383,7 +4428,12 @@ cli = "{cli}"
         assert_eq!(recover_restart_orphans(&missing).unwrap(), 0);
         assert!(reconcile(&missing).unwrap() >= 1);
         let t = missing.db.get_task("task-gone-wt").unwrap().unwrap();
-        assert_eq!(t.status, "failed");
+        assert_eq!(t.status, "needs_attention");
+        assert!(
+            t.result_text.contains("worktree missing") || t.result_text.contains("orphaned"),
+            "{}",
+            t.result_text
+        );
 
         let prep_dir = dir.path().join("prep");
         std::fs::create_dir_all(&prep_dir).unwrap();
@@ -4399,9 +4449,11 @@ cli = "{cli}"
         assert_eq!(recover_restart_orphans(&prep).unwrap(), 0);
         assert!(reconcile(&prep).unwrap() >= 1);
         let t = prep.db.get_task("task-prep").unwrap().unwrap();
-        assert_eq!(t.status, "failed");
+        assert_eq!(t.status, "queued");
         assert!(
-            t.result_text.contains("orphaned") || t.result_text.contains("setup"),
+            t.result_text.contains("re-queued once")
+                || t.result_text.contains("orphaned")
+                || t.result_text.contains("setup"),
             "{}",
             t.result_text
         );
@@ -4418,7 +4470,8 @@ cli = "{cli}"
         assert!(reconcile(&shared).unwrap() >= 1);
         assert_eq!(
             shared.db.get_task("task-off").unwrap().unwrap().status,
-            "failed"
+            "queued",
+            "selfheal still re-queues once when [restart] resume is off"
         );
 
         let held_dir = dir.path().join("held");
@@ -4434,6 +4487,23 @@ cli = "{cli}"
         let t = held.db.get_task("held-1").unwrap().unwrap();
         assert_eq!(t.status, "held");
         assert_eq!(t.hold_reason, "after b failed");
+    }
+
+    #[test]
+    fn selfheal_reap_off_still_fails_dead_open_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_for_reconcile(dir.path());
+        shared.config.write().unwrap().selfheal.reap = false;
+        let wt = dir.path().join("wt");
+        orphaned_running_with_worktree(&shared, "task-off-heal", &wt);
+        assert!(reconcile(&shared).unwrap() >= 1);
+        let t = shared.db.get_task("task-off-heal").unwrap().unwrap();
+        assert_eq!(t.status, "failed");
+        assert!(
+            t.result_text.contains("orphaned") || t.result_text.contains("process gone"),
+            "{}",
+            t.result_text
+        );
     }
 
     #[test]
