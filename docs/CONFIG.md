@@ -591,7 +591,10 @@ Serve runs this on `interval` so the hand-run operator bot can stay frozen.
   resumed (`outcome=restarted`), marks `needs_attention`. Live PIDs,
   in-flight runs, TUI `cli-*` keys, and `held` tasks are never touched. A
   missing worktree skips the one re-queue and goes straight to
-  `needs_attention`.
+  `needs_attention`. Killing a live agent while serve is still up is closed
+  by the supervisor as `outcome=failed` and is **not** reaped — the reaper
+  covers orphans after serve itself died. The in-serve health check does not
+  self-request HTTP `/health` (CLI `atr doctor` still does).
 - **settle.** `waiting` with a sealed `summary.md` (non-empty and `chmod a-w`,
   or a line `<!-- atr-sealed -->` / `sealed: true`, also under `.atr/`)
   becomes `done`.

@@ -595,7 +595,14 @@ pub fn load_health_file(cfg: &SelfhealConfig) -> Option<Value> {
 /// Notify `[notify] command` on a new FAIL or recovery, de-duplicated.
 pub async fn check_and_write(shared: &Shared) -> Result<Value> {
     let cfg = shared.config.read().unwrap().clone();
-    let mut report = doctor::run(&cfg, &shared.config_path, false).await;
+    let mut report = doctor::run_with_listen(
+        &cfg,
+        &shared.config_path,
+        false,
+        None,
+        doctor::ListenCheck::Held,
+    )
+    .await;
     push_queue_checks(&mut report.checks, &cfg, shared);
     report.problems = report
         .checks

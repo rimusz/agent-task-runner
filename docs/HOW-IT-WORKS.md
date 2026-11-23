@@ -23,8 +23,10 @@ worktree still present, a run had started) and prepends a recovery note on
 the next resume. That restart counts as the one automatic re-queue:
 `[selfheal]` then marks a second death `needs_attention` instead of looping.
 A missing worktree or a dead PID with no prior resume is re-queued once
-(`outcome=reaped`). `[restart] resume = false` turns restart recovery off;
-self-heal still re-queues a dead serve-owned process once unless
+(`outcome=reaped`). Killing a live agent while serve is still running is
+closed by the supervisor as `outcome=failed` and is not reaped; the reaper
+covers orphans after a serve death. `[restart] resume = false` turns restart
+recovery off; self-heal still re-queues a dead serve-owned process once unless
 `selfheal.reap = false`. `atr selfheal status` and
 `~/.local/state/atr/health.json` show the last checks.
 New starts — after `[retry]` backoff, `after:` deps, and the

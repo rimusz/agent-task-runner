@@ -37,6 +37,8 @@ pub struct Shared {
     pub intake_paused: AtomicBool,
     /// Last time a task was started while `[host]` gating is on (settle gap).
     pub last_host_start: Mutex<Option<std::time::Instant>>,
+    /// Set after this process binds `cfg.listen` (`serve` / `serve_background`).
+    pub http_bound: AtomicBool,
 }
 
 /// Result of [`Shared::interrupt_live`].
@@ -160,6 +162,7 @@ impl Shared {
             kick: Notify::new(),
             intake_paused: AtomicBool::new(paused),
             last_host_start: Mutex::new(None),
+            http_bound: AtomicBool::new(false),
         }))
     }
 
@@ -913,6 +916,7 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
 
     let listener = TcpListener::bind(&cfg.listen).await?;
     let addr = listener.local_addr()?;
+    shared.http_bound.store(true, Ordering::Relaxed);
     tracing::info!(%addr, "atr listening");
     if cfg.dashboard.enabled {
         let port = addr.port();
@@ -990,6 +994,7 @@ pub async fn serve_background(shared: Arc<Shared>) -> Result<SocketAddr> {
     .await;
     let listener = TcpListener::bind(&cfg.listen).await?;
     let addr = listener.local_addr()?;
+    shared.http_bound.store(true, Ordering::Relaxed);
     let http = shared.clone();
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, http::router(http)).await {

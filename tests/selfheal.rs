@@ -121,3 +121,44 @@ cli = "/bin/true"
     assert!(text.contains("selfheal enabled="), "{text}");
     assert!(text.contains("health.json"), "{text}");
 }
+
+#[tokio::test]
+async fn in_serve_health_check_does_not_fail_listen() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+    let h = Harness::with_providers(&[("claude", true, "success")], &addr.to_string()).await;
+    assert_eq!(h.addr.port(), addr.port());
+    h.shared.db.meta_set("selfheal_alert", "fail").unwrap();
+    let snap = atr::selfheal::check_and_write(&h.shared).await.unwrap();
+    let checks = snap["checks"].as_array().expect("checks");
+    let listen = checks
+        .iter()
+        .find(|c| c["name"].as_str() == Some("listen"))
+        .expect("listen check");
+    assert_eq!(
+        listen["status"].as_str(),
+        Some("ok"),
+        "in-serve health must not FAIL listen: {listen}"
+    );
+    assert!(
+        !listen["detail"].as_str().unwrap_or("").contains("in use"),
+        "{listen}"
+    );
+    let fails: Vec<&str> = checks
+        .iter()
+        .filter(|c| c["status"].as_str() == Some("fail"))
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    assert!(
+        fails.is_empty(),
+        "listen must not keep health FAIL so recovery can fire: {fails:?} {snap}"
+    );
+    assert_ne!(snap["status"].as_str(), Some("fail"), "{snap}");
+    let health_log =
+        std::fs::read_to_string(h.dir.path().join("health").join("health.log")).unwrap();
+    assert!(
+        health_log.contains("selfheal_recovered"),
+        "recovery alert must fire once listen is not FAIL: {health_log}"
+    );
+}

@@ -239,7 +239,7 @@ Setup, config and safety details: [docs/USAGE.md](docs/USAGE.md#providers-and-op
 | [docs/USE-CASES.md](docs/USE-CASES.md) | Each use case with examples |
 | [docs/USAGE.md](docs/USAGE.md) | Adding work, watching repos, Telegram (and the CLI equivalent of every Telegram command), dashboard, providers, upkeep, troubleshooting |
 | [docs/GITHUB.md](docs/GITHUB.md) | GitHub token, SSH, what needs what |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | `atr doctor` checks, status, logs, service, GitHub token, Telegram, notify hook |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | `atr doctor` checks, status, logs, service, GitHub token, Telegram, notify hook. Self-heal reaps orphans after serve died; killing a live agent while serve is up is `failed`, not a reap |
 | [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md) | Dashboard and MCP from other devices over Tailscale |
 | [docs/CONFIG.md](docs/CONFIG.md) | Config file, paths, several repos, dashboard bind, [choosing the driver provider and model](docs/CONFIG.md#choosing-the-driver-provider-and-model) |
 | [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) | How providers, MCP and CI fit together |

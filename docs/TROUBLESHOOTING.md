@@ -123,7 +123,10 @@ process once unless `selfheal.reap = false`.
 serve-owned run whose agent PID is gone (or that never started past
 `stuck_timeout`, default 10m): first time it re-queues, second time
 `needs_attention`. A live PID with output/heartbeat is never killed. Check
-`atr selfheal status` and `~/.local/state/atr/health.json`.
+`atr selfheal status` and `~/.local/state/atr/health.json`. If you kill the
+agent process while serve is still up, the supervisor finishes the run as
+`failed`; that is not a self-heal reap (the reaper is for orphans after
+serve died).
 
 **Task is `waiting` with a finished `summary.md` and looks stuck.** A sealed
 summary (not writable, or marked `<!-- atr-sealed -->` / `sealed: true`)
