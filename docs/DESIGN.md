@@ -140,6 +140,7 @@ live run, unless the sender asks to interrupt (see §8).
 ## 2. State (SQLite, WAL)
 
 `tasks(key, repo, issue, status[queued|running|waiting|done|failed|held], provider, session_id, worktree, created, updated, workspace_kind, output_kind, output_spec, source_kind, result_text, result_diff, result_pr_url, deps, retry_attempt, retry_next_at, retry_reason, hold_reason, hold_notified)`
+Human output (`atr tasks`, `atr status`, Telegram `/tasks` / `/status`) maps stored `waiting` to `idle` for finished, resumable sessions. JSON, MCP, and the DB keep `waiting`.
 Opening an older DB `ALTER`s these columns in and backfills: empty `repo` →
 `workspace_kind=none`, else `git`; `output_kind=reply`; `source_kind=github`
 when `issue` is set, else `cli`. New retry/hold columns default to 0 / empty.
@@ -173,7 +174,7 @@ so a stable path keeps the first-run prefix cacheable. Each slot has one
 owner task id in `pool_slots`, claimed in a single write transaction. A live
 owner is never checked out by anyone else; the new task takes another slot
 or waits. Ownership is dropped when the owner is finished, failed, cancelled,
-or otherwise idle (`waiting`). A queued continuation (retry, follow-up,
+or otherwise idle (`waiting`, shown as `idle`). A queued continuation (retry, follow-up,
 restart resume) keeps its slot. Between different tasks the slot is reset
 (`checkout -B`, `reset --hard`, `clean -fd`). Same-task continuations
 (follow-ups, stall retry, session fork, resume) skip the reset even if HEAD

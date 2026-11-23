@@ -19,7 +19,7 @@ const COMMANDS: &str = "\
 atr Telegram
 
 Watch
-• status [done|failed|running|waiting|all] · tasks / task <id>
+• status [done|failed|running|waiting|idle|all] · tasks / task <id>
 • doctor · tokens — health, GitHub tokens
 • usage [period] — spend & cache
 • ui — dashboard link
@@ -1010,7 +1010,7 @@ fn answer_callback(cfg: &TelegramConfig, token: &str, id: &str) {
 pub const BOT_COMMANDS: &[(&str, &str)] = &[
     (
         "status",
-        "What's running; /status done|failed|running|waiting|all",
+        "What's running; /status done|failed|running|waiting|idle|all",
     ),
     ("tasks", "Recent and running tasks"),
     ("task", "One task: /task <id>"),
@@ -2822,7 +2822,11 @@ fn format_tasks(shared: &Shared, repo: Option<&str>) -> String {
         }
         n += 1;
         out.push('\n');
-        out.push_str(&format!("• {} — {}\n", t.key, t.status));
+        out.push_str(&format!(
+            "• {} — {}\n",
+            t.key,
+            status::display_status(&t.status)
+        ));
         let repo_name = cfg.task_repo_name(&t);
         let bits = join_dot(&[
             nonempty(&repo_name).unwrap_or(""),
@@ -2854,7 +2858,7 @@ fn format_task(shared: &Shared, key: &str) -> String {
         .list_runs(Some(key))
         .ok()
         .and_then(|r| r.into_iter().last());
-    let mut out = format!("{key} — {}\n", t.status);
+    let mut out = format!("{key} — {}\n", status::display_status(&t.status));
     let repo = cfg.task_repo_name(&t);
     let bits = join_dot(&[
         nonempty(&repo).unwrap_or(""),
@@ -2878,7 +2882,11 @@ fn format_task(shared: &Shared, key: &str) -> String {
         if !kids.is_empty() {
             out.push_str("\nChildren\n");
             for c in kids {
-                out.push_str(&format!("• {} — {}\n", c.key, c.status));
+                out.push_str(&format!(
+                    "• {} — {}\n",
+                    c.key,
+                    status::display_status(&c.status)
+                ));
             }
         }
     }
@@ -3093,7 +3101,7 @@ pub fn daily_summary_text(shared: &Shared) -> String {
     let tz = &cfg.display_timezone;
     let day = tz.today();
     let tasks = shared.db.list_tasks().unwrap_or_default();
-    let waiting = tasks.iter().filter(|t| t.status == "waiting").count();
+    let idle = tasks.iter().filter(|t| t.status == "waiting").count();
     let attn = tasks
         .iter()
         .filter(|t| t.status == "needs_attention")
@@ -3102,7 +3110,7 @@ pub fn daily_summary_text(shared: &Shared) -> String {
     let held = tasks.iter().filter(|t| t.status == "held").count();
     let mut out = format!("daily {day} ({})\n", tz.label);
     out.push_str(&format!(
-        "tasks waiting={waiting} needs_attention={attn} held={held} running={running}\n"
+        "tasks idle={idle} needs_attention={attn} held={held} running={running}\n"
     ));
     let usage = shared.db.usage_by_day_tz(1, tz).unwrap_or_default();
     let runs = shared.db.runs_on_day(tz, &day).unwrap_or_default();
@@ -3324,11 +3332,7 @@ cli = "/bin/true"
         let list =
             json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/tasks"}});
         let out = handle_update(&shared, &list).unwrap();
-        assert!(
-            out[0].text.contains("• acme-1 — waiting"),
-            "{}",
-            out[0].text
-        );
+        assert!(out[0].text.contains("• acme-1 — idle"), "{}", out[0].text);
         assert!(out[0].text.contains("claude"), "{}", out[0].text);
         assert!(out[0].text.contains("worker"), "{}", out[0].text);
         assert!(!out[0].text.contains('\t'), "{}", out[0].text);
@@ -3341,11 +3345,7 @@ cli = "/bin/true"
 
         let one = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/task acme-1"}});
         let out = handle_update(&shared, &one).unwrap();
-        assert!(
-            out[0].text.starts_with("acme-1 — waiting"),
-            "{}",
-            out[0].text
-        );
+        assert!(out[0].text.starts_with("acme-1 — idle"), "{}", out[0].text);
         assert!(out[0].text.contains("fix login"), "{}", out[0].text);
         assert!(out[0].text.contains("Children"), "{}", out[0].text);
         assert!(
@@ -3445,7 +3445,7 @@ cli = "/bin/true"
         let out = handle_update(&shared, &done).unwrap();
         assert_eq!(out.len(), 1);
         assert!(out[0].text.contains("Done ("), "{}", out[0].text);
-        assert!(out[0].text.contains("• idle-1 — done"), "{}", out[0].text);
+        assert!(out[0].text.contains("• idle-1 — idle"), "{}", out[0].text);
         assert!(!out[0].text.contains("Failing ("), "{}", out[0].text);
         assert!(!out[0].text.contains("Waiting ("), "{}", out[0].text);
 
@@ -3460,6 +3460,12 @@ cli = "/bin/true"
         assert!(out[0].text.contains("Waiting ("), "{}", out[0].text);
         assert!(out[0].text.contains("• hold-1 — held"), "{}", out[0].text);
         assert!(!out[0].text.contains("Done ("), "{}", out[0].text);
+
+        let idle = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/status idle"}});
+        let out = handle_update(&shared, &idle).unwrap();
+        assert!(out[0].text.contains("Done ("), "{}", out[0].text);
+        assert!(out[0].text.contains("• idle-1 — idle"), "{}", out[0].text);
+        assert!(!out[0].text.contains("Waiting ("), "{}", out[0].text);
 
         let running = json!({"message":{"chat":{"id":42,"type":"private"},"from":{"id":42},"text":"/status running"}});
         let out = handle_update(&shared, &running).unwrap();
@@ -3479,6 +3485,10 @@ cli = "/bin/true"
         assert!(done.full);
         assert_eq!(done.filter, status::GroupFilter::from_name("done").unwrap());
         assert!(done.repo.is_none());
+        let idle = parse_status_args(&["idle"]);
+        assert!(idle.full);
+        assert_eq!(idle.filter, status::GroupFilter::from_name("idle").unwrap());
+        assert_eq!(idle.filter, status::GroupFilter::from_name("done").unwrap());
         let repo = parse_status_args(&["nixer"]);
         assert!(!repo.full);
         assert_eq!(repo.repo.as_deref(), Some("nixer"));
@@ -3644,7 +3654,7 @@ cli = "/bin/true"
         assert!(text.contains("• bad-1 — failed"), "{text}");
         assert!(text.contains("• live-1 —"), "{text}");
         assert!(text.contains("• hold-1 — held"), "{text}");
-        assert!(text.contains("• idle-1 — done"), "{text}");
+        assert!(text.contains("• idle-1 — idle"), "{text}");
         let idle = text.find("• idle-1").unwrap();
         assert!(
             idle > done,
@@ -3779,10 +3789,10 @@ cli = "/bin/true"
         assert!(!is_driveable_command("/sh"));
         assert!(!COMMANDS.contains("/sh"));
         assert!(COMMANDS.contains("doctor") && COMMANDS.contains("tokens"));
-        assert!(COMMANDS.contains("status [done|failed|running|waiting|all]"));
+        assert!(COMMANDS.contains("status [done|failed|running|waiting|idle|all]"));
         let status_desc = BOT_COMMANDS.iter().find(|(c, _)| *c == "status").unwrap().1;
         assert!(
-            status_desc.contains("done|failed|running|waiting|all"),
+            status_desc.contains("done|failed|running|waiting|idle|all"),
             "{status_desc}"
         );
         assert_eq!(

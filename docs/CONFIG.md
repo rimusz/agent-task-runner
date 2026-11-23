@@ -595,9 +595,10 @@ Serve runs this on `interval` so the hand-run operator bot can stay frozen.
   by the supervisor as `outcome=failed` and is **not** reaped — the reaper
   covers orphans after serve itself died. The in-serve health check does not
   self-request HTTP `/health` (CLI `atr doctor` still does).
-- **settle.** `waiting` with a sealed `summary.md` (non-empty and `chmod a-w`,
-  or a line `<!-- atr-sealed -->` / `sealed: true`, also under `.atr/`)
-  becomes `done`.
+- **settle.** Stored `waiting` (shown as `idle`) with a sealed `summary.md`
+  (non-empty and `chmod a-w`, or a line `<!-- atr-sealed -->` /
+  `sealed: true`, also under `.atr/`) becomes `done`. JSON and the database
+  keep `waiting` until settle; `atr status` / `atr tasks` already show `idle`.
 - **cleanup.** Terminal worktrees past `artifact_age`, pool slots of finished
   tasks, explicit `lock_files` (default only `~/.local/state/m1-runner.lock`)
   whose holding PID is dead **and** whose mtime is older than `stuck_timeout`,

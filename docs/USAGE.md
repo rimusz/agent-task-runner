@@ -175,7 +175,7 @@ atr telegram test
 /ui
 ```
 
-`/status [done|failed|running|waiting|all] [repo]` uses the same failing → running → waiting → done grouping as `atr status` (phone layout: Title Case section names and bullets). Running and failing tasks are listed; a stored `waiting` row is under Done and labelled with the last outcome (`success`, `checked`, …) or `done`, not `waiting`. Caps are tighter than the CLI (10 / 8 / 5 / 3). If the default body would exceed the Telegram length cap, Done is dropped first, then Waiting is truncated; Failing and Running stay. `/status done` (and the other group names, plus `/status all`) lists that group in full and splits across messages at Telegram's 4096-character limit (a leftover that still overflows ends with `… truncated`). `/status` has no `--watch` / `--check` / `--json`. Times use `[ui] timezone` when set, else `display_timezone`, else the host local zone.
+`/status [done|failed|running|waiting|idle|all] [repo]` uses the same failing → running → waiting → done grouping as `atr status` (phone layout: Title Case section names and bullets). Running and failing tasks are listed; a stored `waiting` row is under Done and labelled with the last outcome (`success`, `checked`, …) or `idle`, not `waiting`. `/status idle` is an alias for the done group. Caps are tighter than the CLI (10 / 8 / 5 / 3). If the default body would exceed the Telegram length cap, Done is dropped first, then Waiting is truncated; Failing and Running stay. `/status done` (and the other group names, plus `/status all`) lists that group in full and splits across messages at Telegram's 4096-character limit (a leftover that still overflows ends with `… truncated`). `/status` has no `--watch` / `--check` / `--json`. Times use `[ui] timezone` when set, else `display_timezone`, else the host local zone.
 
 `/ui` replies with a dashboard link: `[dashboard] public_url` if set, else a detected Tailscale Serve `https://…ts.net/` URL, else the local `atr ui --print` address (marked local-only).
 
@@ -222,8 +222,8 @@ atr config set github.label for:atr
 
 - **failing** — stored `failed`, `needs_attention`, `cancelled`
 - **running** — stored `running`, or in-flight, or an open run whose owner is still alive
-- **waiting** — `queued` or `held` (hold reason, retry time, or `after` deps). atr's stored `waiting` is idle/finished and is listed under **done**, not here
-- **done** — stored `waiting` or `done`. Rows show the last outcome (`success`, `checked`, …) or `done`, not the stored `waiting` label
+- **waiting** — `queued` or `held` (hold reason, retry time, or `after` deps). atr's stored `waiting` is a finished, resumable session and is listed under **done**, not here
+- **done** — stored `waiting` or `done`. Rows show the last outcome (`success`, `checked`, …) or `idle` for a parked session, never the stored `waiting` label. `atr tasks` and `/tasks` also show parked sessions as `idle`. `--json` and the database keep `waiting`.
 
 Flags: `--failed` / `--running` / `--waiting` / `--done` show only those sections (several combine, still in that order). `--since 7d` drops older `updated` rows before caps (same duration parser as `atr gc`). `--limit N` caps each shown section (`0` prints counts and no rows). `--all` includes hidden `role=reflect` tasks and lifts the done/waiting caps (still honors `--limit`). `--watch [SECS]` reprints the human view (default 2) until stdin closes or Ctrl-C; it cannot be combined with `--json`. `--check` exits 0 when the shown failing count is 0, 1 when it is greater, 2 for bad flags or an unknown `--repo`. Default (no `--check`) is exit 0 whenever the snapshot prints. `--json` keeps the existing `tasks[]` (every non-reflect task, `updated DESC`, unless `--all`) and adds `groups`. Worktree and branch stay on `atr tasks` / `atr tasks KEY`.
 
@@ -233,7 +233,7 @@ Telegram command to CLI:
 
 | Telegram | CLI | HTTP (bearer token) |
 |---|---|---|
-| `/status [done\|failed\|running\|waiting\|all] [repo]` | `atr status [--done/--failed/--running/--waiting/--all] [--repo R]` | `GET /status` |
+| `/status [done\|failed\|running\|waiting\|idle\|all] [repo]` | `atr status [--done/--failed/--running/--waiting/--all] [--repo R]` | `GET /status` |
 | `/tasks [repo]` | `atr tasks [--repo R]` | `GET /dashboard.json` |
 | `/task <key>` | `atr tasks <key>` | `GET /tasks/<key>` |
 | `/add [repo or host] [--provider P] [--model M] [--agent A] [--check-only] <prompt>` | `atr add [--repo R] [--provider P] [--model M] [--check-only] <prompt>` | `POST /tasks` |
@@ -483,7 +483,7 @@ Commands (allowed private chats only; also registered in the `/` menu via setMyC
 
 | Command | What it does |
 |---|---|
-| `/status [done\|failed\|running\|waiting\|all] [repo]` | grouped queue; a group name lists that section in full |
+| `/status [done\|failed\|running\|waiting\|idle\|all] [repo]` | grouped queue; a group name lists that section in full (`idle` is the done group) |
 | `/tasks`, `/task <id>` | recent and running tasks; one task's detail |
 | `/cancel <id>` | cancel a task (asks Confirm) |
 | `/doctor` | `atr doctor`, warn/FAIL lines only |

@@ -177,7 +177,7 @@ enum Cmd {
         /// Only waiting tasks (queued + held).
         #[arg(long)]
         waiting: bool,
-        /// Only done tasks (stored waiting + done).
+        /// Only done tasks (idle parked sessions + done).
         #[arg(long)]
         done: bool,
         /// Drop tasks whose updated is older than now minus this duration (`7d`, `48h`).

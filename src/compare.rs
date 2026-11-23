@@ -714,7 +714,10 @@ pub fn show_text(cfg: &Config, db: &Db, key: &str) -> Result<String> {
         bail!("{key} is not a compare task");
     }
     let decision: Option<Decision> = serde_json::from_str(&parent.compare_decision).ok();
-    let mut s = format!("{key}  status={}\n", parent.status);
+    let mut s = format!(
+        "{key}  status={}\n",
+        crate::status::display_status(&parent.status)
+    );
     let reports: Vec<ArmReport> = match &decision {
         Some(d) if !d.arms.is_empty() => d.arms.clone(),
         _ => arms.iter().map(|a| arm_report(cfg, db, a)).collect(),
@@ -725,7 +728,7 @@ pub fn show_text(cfg: &Config, db: &Db, key: &str) -> Result<String> {
             a.key,
             if a.result == "won" { " 🏆" } else { "" },
             a.provider,
-            a.status,
+            crate::status::display_status(&a.status),
             if a.outcome.is_empty() { "-" } else { &a.outcome },
             a.verify,
             a.added,

@@ -29,12 +29,12 @@ const TOOLS: &[(&str, &str)] = &[
     ),
     (
         "steer_task",
-        "Send a follow-up message to a running or waiting task. interrupt=true stops the live turn and resumes the same session with the message (then the unfinished task).",
+        "Send a follow-up message to a running or idle (stored waiting) task. interrupt=true stops the live turn and resumes the same session with the message (then the unfinished task).",
     ),
     ("cancel_task", "Cancel a task. force=true kills a live run."),
     (
         "wait_task",
-        "Block until a task finishes (waiting/done/failed) or timeout_seconds elapses.",
+        "Block until a task finishes (idle/waiting, done, failed) or timeout_seconds elapses. JSON status stays waiting for parked sessions.",
     ),
     (
         "get_result",
@@ -714,7 +714,11 @@ fn list_tasks(shared: &Shared, args: &Value) -> Result<Value, String> {
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|t| repo.as_deref().is_none_or(|f| cfg.task_matches_repo(t, f)))
-        .filter(|t| status.as_deref().is_none_or(|s| t.status == s))
+        .filter(|t| {
+            status
+                .as_deref()
+                .is_none_or(|s| t.status == s || (s == "idle" && t.status == "waiting"))
+        })
         .filter(|t| role.as_deref().is_none_or(|r| t.role == r))
         .filter(|t| match parent.as_deref() {
             None => true,

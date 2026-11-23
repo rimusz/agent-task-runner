@@ -247,6 +247,8 @@ fn age_exceeds(ts: &str, d: Duration) -> bool {
     age >= d
 }
 
+/// Parked sessions are stored as `waiting` (shown as `idle`). Settle matches
+/// that stored status, not the display label.
 fn settle_waiting(shared: &Shared, cfg: &Config, report: &mut TickReport) -> Result<()> {
     for t in shared.db.list_tasks()? {
         if t.status != "waiting" {
@@ -1213,6 +1215,28 @@ cli = "/bin/true"
         assert_eq!(
             shared.db.get_task("task-open").unwrap().unwrap().status,
             "waiting"
+        );
+        assert_eq!(crate::status::display_status("waiting"), "idle");
+
+        // Display maps waiting → idle; settle still keys off the stored status.
+        let wt3 = dir.path().join("work").join("task-label");
+        fs::create_dir_all(&wt3).unwrap();
+        let sum3 = wt3.join("summary.md");
+        fs::write(&sum3, "done\n").unwrap();
+        let mut perm3 = fs::metadata(&sum3).unwrap().permissions();
+        perm3.set_mode(0o444);
+        fs::set_permissions(&sum3, perm3).unwrap();
+        shared.db.upsert_task("task-label", "/repo", None).unwrap();
+        shared.db.set_status("task-label", "idle").unwrap();
+        shared
+            .db
+            .set_worktree("task-label", &wt3.display().to_string())
+            .unwrap();
+        tick(&shared).unwrap();
+        assert_eq!(
+            shared.db.get_task("task-label").unwrap().unwrap().status,
+            "idle",
+            "settle must not treat the display label as a stored status"
         );
     }
 

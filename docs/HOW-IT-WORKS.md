@@ -351,8 +351,8 @@ thresholds of `0` turn the checks off.
 `task_timeout` (default `4h`) caps one attempt of a task, measured from the
 first run since the clock was last restarted (`tasks.clock_started`). The
 clock restarts on `atr retry` (Telegram `/retry`, `POST /tasks/<key>/retry`)
-and when a new message arrives for a finished task (`waiting`, `done`,
-`failed`, `needs_attention`, `cancelled`, `held`), so a long-lived Telegram chat or an
+and when a new message arrives for a finished task (`waiting` (shown as
+`idle`), `done`, `failed`, `needs_attention`, `cancelled`, `held`), so a long-lived Telegram chat or an
 old issue does not time out because it started days ago. Retry also unconsumes
 the last finished run's messages when none are pending — the scheduler only
 starts a task that has an unconsumed prompt. Internal requeues
@@ -372,7 +372,7 @@ log has rotated. With `[lessons]` on it also queues a reflection (signal
 ## Compare (parent and arms)
 
 A compare task runs one job on two providers and keeps the better result.
-It is a parent `K` (role `compare`, status `waiting`; the scheduler never
+It is a parent `K` (role `compare`, status `waiting`, shown as `idle`; the scheduler never
 runs it) plus two arms `K-a` and `K-b` (role `arm`, `parent_key = K`, the
 same message, `output_kind = text` so an arm never delivers anything).
 
@@ -474,7 +474,7 @@ workspace defaults to `none` when neither `dir` nor `repo` is set; optional
 number for `output: issue_comment`),
 `webhook`, `patch`, `check_only` (proof run: no file changes is `checked`,
 not no-op; file changes go to `needs_attention` and are not pushed),
-`idempotency_key`, `files`), `wait_task` (block until waiting/done/failed or
+`idempotency_key`, `files`), `wait_task` (block until idle/waiting, done, failed or
 `timeout_seconds`), `get_result` (text, diff, PR URL), `list_tasks`,
 `task_status` (timeline + last output), `steer_task` (`interrupt: true` stops the
 live turn and resumes its session with the message), `cancel_task`,

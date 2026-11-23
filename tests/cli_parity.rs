@@ -106,6 +106,34 @@ fn pause_resume_and_retry_without_service() {
 }
 
 #[test]
+fn parked_task_shows_idle_json_keeps_waiting() {
+    let (dir, cfg) = setup();
+    let db = atr::db::Db::open(&dir.path().join("state.db")).unwrap();
+    db.upsert_task("parked-1", dir.path().to_str().unwrap(), None)
+        .unwrap();
+    db.set_status("parked-1", "waiting").unwrap();
+    let (ok, out) = atr(&dir, &cfg, &["tasks"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("idle"), "{out}");
+    assert!(!out.contains("waiting"), "{out}");
+    let (ok, json) = atr(&dir, &cfg, &["status", "--json"]);
+    assert!(ok, "{json}");
+    assert!(
+        json.contains("\"status\": \"waiting\"") || json.contains("\"status\":\"waiting\""),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"groups\"") && json.contains("\"waiting\"") && json.contains("\"done\""),
+        "{json}"
+    );
+    let (ok, status) = atr(&dir, &cfg, &["status"]);
+    assert!(ok, "{status}");
+    assert!(status.contains("parked-1"), "{status}");
+    assert!(status.contains("idle"), "{status}");
+    assert!(!status.contains("waiting ("), "{status}");
+}
+
+#[test]
 fn lessons_round_trip_without_service() {
     let (dir, cfg) = setup();
     let root = dir.path().display().to_string();

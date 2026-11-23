@@ -103,6 +103,8 @@ atr add "fix the spelling mistakes in README.md" --dir .
 atr status
 ```
 
+Finished sessions that can take a follow-up show as `idle` in `atr status`, `atr tasks`, and Telegram. The database and `--json` still store that state as `waiting`.
+
 Or let it work on GitHub issues. Add the repo, then label an issue `for:atr`. atr does the work and opens a pull request:
 
 ```bash

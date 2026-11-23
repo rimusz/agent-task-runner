@@ -1123,16 +1123,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
             }
         })
         .unwrap_or_else(|| cfg.worktree_branch_prefix.clone());
-    let base_branch = entry
-        .as_ref()
-        .map(|e| {
-            if e.base.is_empty() {
-                cfg.repo_default_branch.clone()
-            } else {
-                e.base.clone()
-            }
-        })
-        .unwrap_or_else(|| cfg.repo_default_branch.clone());
+    let base_branch = crate::output::base_branch(&cfg, &task);
     let wt = match ws_kind {
         crate::task::WorkspaceKind::None => {
             worktree::ensure_none_workspace(&cfg.worktree_root, &key)?
