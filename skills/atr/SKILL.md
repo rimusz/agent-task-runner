@@ -57,7 +57,7 @@ Operators with a shell use the CLI; it shares the same code paths. `atr pause`/`
 
 | Telegram | CLI | HTTP (bearer token) |
 |---|---|---|
-| `/status [done\|failed\|running\|waiting\|all] [repo]` | `atr status [--done/--failed/--running/--waiting/--all] [--repo R]` | `GET /status` |
+| `/status [done\|failed\|running\|waiting\|idle\|all] [repo]` | `atr status [--done/--failed/--running/--waiting/--all] [--repo R]` | `GET /status` |
 | `/tasks [repo]` | `atr tasks [--repo R]` | `GET /dashboard.json` |
 | `/task <key>` | `atr tasks <key>` | `GET /tasks/<key>` |
 | `/add [repo or host] [--provider P] [--model M] [--agent A] [--check-only] <prompt>` | `atr add [--repo R] [--provider P] [--model M] [--check-only] <prompt>` | `POST /tasks` |

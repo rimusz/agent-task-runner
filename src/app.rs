@@ -1194,7 +1194,7 @@ pub fn print_tasks(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             t.key,
             cfg.task_repo_name(&t),
-            t.status,
+            status::display_status(&t.status),
             t.provider.as_deref().unwrap_or("-"),
             t.session_id.as_deref().unwrap_or("-"),
             t.worktree.as_deref().unwrap_or("-"),
@@ -1221,7 +1221,7 @@ pub fn task_verbose_text(shared: &Shared, key: &str) -> Result<String> {
         "key\t{}\nrepo\t{}\nstatus\t{}\nprovider\t{}\nsession\t{}\nworktree\t{}\nshadow\t{}\ncreated\t{}\nupdated\t{}\ntimezone\t{}\n",
         t.key,
         cfg.task_repo_name(&t),
-        t.status,
+        status::display_status(&t.status),
         t.provider.as_deref().unwrap_or("-"),
         t.session_id.as_deref().unwrap_or("-"),
         t.worktree.as_deref().unwrap_or("-"),
@@ -1312,7 +1312,7 @@ fn print_task_detail(shared: &Shared, key: &str, verbose: bool) -> Result<()> {
     println!(
         "{}\t{}\t{}\t{}\t{}\t{}\t{}",
         t.key,
-        t.status,
+        status::display_status(&t.status),
         t.provider.as_deref().unwrap_or("-"),
         t.session_id.as_deref().unwrap_or("-"),
         t.worktree.as_deref().unwrap_or("-"),
@@ -1962,7 +1962,7 @@ cli = "/bin/true"
         let idle = text.find("idle-1").unwrap();
         assert!(idle > done, "stored waiting belongs in done:\n{text}");
         let idle_line = text[done..].lines().find(|l| l.contains("idle-1")).unwrap();
-        assert!(idle_line.contains("done"), "{idle_line}");
+        assert!(idle_line.contains("idle"), "{idle_line}");
         assert!(!idle_line.contains("waiting"), "{idle_line}");
         assert!(!text.contains("tasks:"), "{text}");
 

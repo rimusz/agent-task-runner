@@ -2,6 +2,7 @@
 //!
 //! Task `status` is free TEXT, not an enum. atr's stored `waiting` means
 //! idle/finished after a successful turn and belongs in **done**, not waiting.
+//! Human output maps that stored value to `idle`; JSON and the DB keep `waiting`.
 
 use crate::db::Task;
 use jiff::Timestamp;
@@ -115,6 +116,13 @@ impl GroupFilter {
                 waiting: true,
                 done: false,
             }),
+            // Parked sessions live in the done group; `idle` is the display name.
+            "idle" => Some(Self {
+                failing: false,
+                running: false,
+                waiting: false,
+                done: true,
+            }),
             "done" => Some(Self {
                 failing: false,
                 running: false,
@@ -195,12 +203,22 @@ pub fn telegram_caps_full() -> Caps {
 /// Telegram bot message limit. Split or truncate before this.
 pub const TG_MSG_LIMIT: usize = 4096;
 
-/// Finished/idle label for the done group: last outcome, else `done`
-/// (stored `waiting` means idle after success, not "waiting to run").
+/// User-facing label for a stored task status.
+/// Parked, resumable sessions are stored as `waiting` and shown as `idle`.
+pub fn display_status(status: &str) -> &str {
+    match status {
+        "waiting" => "idle",
+        other => other,
+    }
+}
+
+/// Finished/idle label for the done group: last outcome, else `idle` for a
+/// stored `waiting` row (parked after success, not "waiting to run"), else
+/// the stored status.
 pub fn done_label(status: &str, last_outcome: Option<&str>) -> String {
     match last_outcome.map(str::trim).filter(|s| !s.is_empty()) {
         Some(o) => o.to_string(),
-        None if status == "waiting" => "done".into(),
+        None if status == "waiting" => "idle".into(),
         None => status.to_string(),
     }
 }
@@ -956,7 +974,7 @@ mod tests {
         assert!(text.contains("• live — opus, 3m, edit"), "{text}");
         assert!(text.contains("• hold — held, needs merge"), "{text}");
         assert!(
-            text.contains("• idle — done, 2026-01-01 00:00 UTC"),
+            text.contains("• idle — idle, 2026-01-01 00:00 UTC"),
             "{text}"
         );
         let done_at = text.find("• idle").unwrap();
@@ -989,11 +1007,21 @@ mod tests {
 
     #[test]
     fn done_label_uses_outcome_not_stored_waiting() {
-        assert_eq!(done_label("waiting", None), "done");
+        assert_eq!(display_status("waiting"), "idle");
+        assert_eq!(display_status("queued"), "queued");
+        assert_eq!(done_label("waiting", None), "idle");
         assert_eq!(done_label("waiting", Some("success")), "success");
         assert_eq!(done_label("waiting", Some("checked")), "checked");
         assert_eq!(done_label("done", None), "done");
         assert_eq!(done_label("done", Some("")), "done");
+        assert_eq!(
+            GroupFilter::from_name("idle").unwrap(),
+            GroupFilter::from_flags(false, false, false, true)
+        );
+        assert_eq!(
+            GroupFilter::from_name("waiting").unwrap(),
+            GroupFilter::from_flags(false, false, true, false)
+        );
     }
 
     #[test]
