@@ -578,7 +578,7 @@ stuck_timeout = "10m"
 artifact_age = "14d"
 disk_min_mb = 512
 health_dir = "~/.local/state/atr"
-lock_files = ["~/.local/state/*.lock"]
+lock_files = ["~/.local/state/m1-runner.lock"]
 # prune_dirs = ["~/.local/share/atr/evidence"]
 summary_names = ["summary.md"]
 ```
@@ -596,14 +596,16 @@ Serve runs this on `interval` so the hand-run operator bot can stay frozen.
   or a line `<!-- atr-sealed -->` / `sealed: true`, also under `.atr/`)
   becomes `done`.
 - **cleanup.** Terminal worktrees past `artifact_age`, pool slots of finished
-  tasks, lock files whose holding PID is dead (`m1-runner.lock` style), and
-  old subdirs of `prune_dirs`. Running tasks and atr's own pidfile are never
-  removed.
+  tasks, explicit `lock_files` (default only `~/.local/state/m1-runner.lock`)
+  whose holding PID is dead **and** whose mtime is older than `stuck_timeout`,
+  and old subdirs of `prune_dirs`. A live PID is never removed. Running tasks
+  and atr's own pidfile are never touched.
 - **check.** Doctor plus queue checks (stuck runs, retries exhausted, all
   providers in cooldown, disk below `disk_min_mb`) written atomically to
   `{health_dir}/health.json` and a one-line `{health_dir}/health.txt`. A new
-  FAIL (or recovery from FAIL) runs `[notify] command` with
-  `ATR_ALERT_KIND=selfheal_failed` / `selfheal_recovered` and
+  FAIL (or recovery from FAIL) appends a line to `{health_dir}/health.log`
+  (`timestamp kind message`, rotated at about 1 MiB) and runs `[notify] command`
+  with `ATR_ALERT_KIND=selfheal_failed` / `selfheal_recovered` and
   `ATR_ALERT_SOURCE=selfheal`, de-duplicated. There is no Telegram poller.
 
 `atr selfheal status` (also a `selfheal:` line on `atr status` and

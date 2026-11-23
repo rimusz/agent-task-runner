@@ -1008,7 +1008,8 @@ pub struct RawSelfheal {
     pub disk_min_mb: u64,
     #[serde(default = "default_selfheal_health_dir")]
     pub health_dir: String,
-    /// Lock files whose holding PID is dead are removed (`*.lock` in one dir).
+    /// Explicit lock files to drop when the holding PID is dead and the
+    /// file is older than `stuck_timeout` (default `m1-runner.lock`).
     #[serde(default = "default_selfheal_locks")]
     pub lock_files: Vec<String>,
     /// Extra evidence/log directories whose old subdirs are pruned.
@@ -1483,7 +1484,7 @@ fn default_selfheal_health_dir() -> String {
     "~/.local/state/atr".into()
 }
 fn default_selfheal_locks() -> Vec<String> {
-    vec!["~/.local/state/*.lock".into()]
+    vec!["~/.local/state/m1-runner.lock".into()]
 }
 fn default_selfheal_summaries() -> Vec<String> {
     vec!["summary.md".into()]
@@ -4027,7 +4028,7 @@ kind = "claude"
         assert_eq!(cfg.selfheal.stuck_timeout, Duration::from_secs(10 * 60));
         assert_eq!(cfg.selfheal.artifact_age, Duration::from_secs(14 * 86400));
         assert_eq!(cfg.selfheal.disk_min_mb, 512);
-        assert_eq!(cfg.selfheal.lock_files, ["~/.local/state/*.lock"]);
+        assert_eq!(cfg.selfheal.lock_files, ["~/.local/state/m1-runner.lock"]);
         assert_eq!(cfg.selfheal.summary_names, ["summary.md"]);
     }
 

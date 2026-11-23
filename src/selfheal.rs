@@ -15,10 +15,13 @@ use anyhow::Result;
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+const HEALTH_LOG_MAX: u64 = 1024 * 1024;
 
 /// Visible on the task after the first automatic re-queue.
 pub const REAP_RESULT: &str = "selfheal: agent process gone; re-queued once";
@@ -386,6 +389,9 @@ fn cleanup_locks(shared: &Shared, cfg: &Config, report: &mut TickReport) -> Resu
         if alive || live_pids.contains(&pid) {
             continue;
         }
+        if !lock_older_than(&path, cfg.selfheal.stuck_timeout) {
+            continue;
+        }
         match fs::remove_file(&path) {
             Ok(()) => {
                 let disp = path.display().to_string();
@@ -527,6 +533,16 @@ fn belongs_to_running_task(shared: &Shared, path: &Path) -> bool {
         }
     }
     false
+}
+
+fn lock_older_than(path: &Path, timeout: Duration) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    mtime.elapsed().map(|age| age >= timeout).unwrap_or(false)
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -868,6 +884,40 @@ fn health_txt_line(snap: &Value) -> String {
     }
 }
 
+fn append_health_log(cfg: &SelfhealConfig, kind: &str, message: &str) {
+    append_health_log_limited(cfg, kind, message, HEALTH_LOG_MAX);
+}
+
+fn append_health_log_limited(cfg: &SelfhealConfig, kind: &str, message: &str, max: u64) {
+    let path = cfg.health_dir.join("health.log");
+    if let Err(e) = fs::create_dir_all(&cfg.health_dir) {
+        tracing::warn!("selfheal health.log dir: {e}");
+        return;
+    }
+    let line = format!(
+        "{} {} {}\n",
+        rfc3339::millis(Timestamp::now()),
+        kind,
+        message
+    );
+    let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if size > 0 && size.saturating_add(line.len() as u64) > max {
+        let bak = cfg.health_dir.join("health.log.1");
+        let _ = fs::remove_file(&bak);
+        if let Err(e) = fs::rename(&path, &bak) {
+            tracing::warn!("selfheal health.log rotate: {e}");
+        }
+    }
+    match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(line.as_bytes()) {
+                tracing::warn!("selfheal health.log write: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("selfheal health.log open: {e}"),
+    }
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     if let Some(dir) = path.parent() {
@@ -900,6 +950,7 @@ fn maybe_alert(shared: &Shared, cfg: &Config, snap: &Value) {
     let line = health_txt_line(snap);
     let msg = line.trim();
     tracing::info!(kind, reason = msg, "selfheal notify");
+    append_health_log(&cfg.selfheal, kind, msg);
     if cfg.notify.command.is_empty() {
         return;
     }
@@ -995,7 +1046,7 @@ stuck_timeout = "1s"
 artifact_age = "1d"
 disk_min_mb = 0
 health_dir = "{health}"
-lock_files = ["{locks}/*.lock"]
+lock_files = ["{locks}/m1-runner.lock"]
 prune_dirs = ["{evidence}"]
 [[provider]]
 name = "claude"
@@ -1169,23 +1220,42 @@ cli = "/bin/true"
     }
 
     #[test]
-    fn dead_lock_is_removed_live_pid_kept() {
+    fn lock_holding_a_live_pid_is_kept() {
         let (dir, shared) = harness();
-        let locks = dir.path().join("locks");
-        let dead = locks.join("m1-runner.lock");
-        fs::write(&dead, "1999999991\n").unwrap();
+        shared.config.write().unwrap().selfheal.stuck_timeout = Duration::from_millis(1);
+        let lock = dir.path().join("locks").join("m1-runner.lock");
         let child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .unwrap();
-        let live = locks.join("live.lock");
-        fs::write(&live, format!("{}\n", child.id())).unwrap();
+        fs::write(&lock, format!("{}\n", child.id())).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
         tick(&shared).unwrap();
-        assert!(!dead.exists(), "dead lock must go");
-        assert!(live.exists(), "live lock must stay");
+        assert!(lock.exists(), "live PID lock must stay");
         let mut child = child;
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn dead_lock_older_than_stuck_timeout_is_removed() {
+        let (dir, shared) = harness();
+        shared.config.write().unwrap().selfheal.stuck_timeout = Duration::from_millis(1);
+        let lock = dir.path().join("locks").join("m1-runner.lock");
+        fs::write(&lock, "1999999991\n").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        tick(&shared).unwrap();
+        assert!(!lock.exists(), "dead aged lock must go");
+    }
+
+    #[test]
+    fn dead_but_fresh_lock_is_kept() {
+        let (dir, shared) = harness();
+        shared.config.write().unwrap().selfheal.stuck_timeout = Duration::from_secs(10 * 60);
+        let lock = dir.path().join("locks").join("m1-runner.lock");
+        fs::write(&lock, "1999999991\n").unwrap();
+        tick(&shared).unwrap();
+        assert!(lock.exists(), "fresh dead lock must wait stuck_timeout");
     }
 
     #[test]
@@ -1226,6 +1296,37 @@ cli = "/bin/true"
         let rec = log.lines().filter(|l| *l == "selfheal_recovered").count();
         assert_eq!(fails, 1, "{log}");
         assert_eq!(rec, 1, "{log}");
+        let health_log = fs::read_to_string(dir.path().join("health").join("health.log")).unwrap();
+        assert_eq!(
+            health_log
+                .lines()
+                .filter(|l| l.contains("selfheal_failed"))
+                .count(),
+            1,
+            "{health_log}"
+        );
+        assert_eq!(
+            health_log
+                .lines()
+                .filter(|l| l.contains("selfheal_recovered"))
+                .count(),
+            1,
+            "{health_log}"
+        );
+    }
+
+    #[test]
+    fn health_log_rotates_near_the_size_cap() {
+        let (_dir, shared) = harness();
+        let cfg = shared.config.read().unwrap().selfheal.clone();
+        let path = cfg.health_dir.join("health.log");
+        fs::create_dir_all(&cfg.health_dir).unwrap();
+        fs::write(&path, "x".repeat(80)).unwrap();
+        append_health_log_limited(&cfg, "selfheal_failed", "FAIL disk", 100);
+        assert!(cfg.health_dir.join("health.log.1").exists());
+        let fresh = fs::read_to_string(&path).unwrap();
+        assert!(fresh.contains("selfheal_failed"), "{fresh}");
+        assert!(fresh.len() < 80, "{}", fresh.len());
     }
 
     #[test]

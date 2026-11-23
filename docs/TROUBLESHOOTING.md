@@ -129,10 +129,12 @@ serve-owned run whose agent PID is gone (or that never started past
 summary (not writable, or marked `<!-- atr-sealed -->` / `sealed: true`)
 is settled to `done`. Unsealed files are left waiting.
 
-**Stale `*.lock` files or old evidence dirs.** Self-heal removes lock files
-under `[selfheal] lock_files` (default `~/.local/state/*.lock`) when the
-holding PID is dead, and prunes `prune_dirs` older than `artifact_age`.
-It never touches a running task's worktree or atr's own pidfile.
+**Stale `m1-runner.lock` or old evidence dirs.** Self-heal removes only the
+paths in `[selfheal] lock_files` (default `~/.local/state/m1-runner.lock`)
+when the holding PID is dead **and** the file is older than `stuck_timeout`.
+A live PID is kept. `prune_dirs` older than `artifact_age` are dropped.
+It never touches a running task's worktree or atr's own pidfile. Health
+transitions are appended to `~/.local/state/atr/health.log`.
 
 **Two tasks checked out the same `.atr/wt/<provider>-<n>` folder.** Slots are
 owned by task id. A live task keeps its slot; the next task gets
@@ -314,7 +316,8 @@ Env: `ATR_ALERT_KIND` (`github_auth_failed`, `github_auth_recovered`,
 `ATR_ALERT_SOURCE` (`github` / `selfheal` / …), `ATR_ALERT_HOST` (self-heal),
 `ATR_ALERT_DAYS_LEFT` (expiry only). GitHub token vars are removed from the
 hook's environment. Self-heal fires once on a new FAIL and once on recovery,
-not on every health tick. Test the script by hand:
+not on every health tick; the same line is appended to
+`~/.local/state/atr/health.log`. Test the script by hand:
 
 ```bash
 ATR_ALERT_KIND=github_auth_failed ATR_ALERT_MESSAGE="test" ~/bin/atr-alert.sh; echo $?
