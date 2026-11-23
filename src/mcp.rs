@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -907,7 +908,9 @@ fn usage_summary(shared: &Shared, args: &Value) -> Result<Value, String> {
 async fn doctor(shared: &Shared, args: &Value) -> Result<Value, String> {
     let cfg = shared.config.read().unwrap().clone();
     let cache = args.get("cache").and_then(|v| v.as_bool()).unwrap_or(false);
-    let report = crate::doctor::run(&cfg, &shared.config_path, cache).await;
+    let listen = crate::doctor::ListenCheck::held_if(shared.http_bound.load(Ordering::Relaxed));
+    let report =
+        crate::doctor::run_with_listen(&cfg, &shared.config_path, cache, None, listen).await;
     let parsed: Value = serde_json::from_str(&report.to_json()).unwrap_or(json!({}));
     Ok(parsed)
 }

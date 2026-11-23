@@ -113,10 +113,32 @@ out `[retry]` backoff. `atr status --json` shows `retry_reason` /
 **Task result says `interrupted by atr restart; resuming`.** Serve restarted
 while the turn was in flight. The task is queued again on the same
 worktree/session; the next turn starts with a recovery note. The pool slot
-stays reserved for that task until it runs. A second
-restart, a missing worktree, or a failure during workspace prepare still
-marks the task `failed` (`orphaned run (process gone)`). Turn this off
-with `atr config set restart.resume false`.
+stays reserved for that task until it runs. That restart resume **is** the
+one automatic re-queue: a second death (or a missing worktree) is
+`needs_attention` via `[selfheal]` (`selfheal: agent process gone after one
+automatic re-queue`). Turn restart recovery off with
+`atr config set restart.resume false`; self-heal still re-queues a dead
+process once unless `selfheal.reap = false`.
+
+**Task stays `running` but nothing is happening.** `[selfheal]` reaps a
+serve-owned run whose agent PID is gone (or that never started past
+`stuck_timeout`, default 10m): first time it re-queues, second time
+`needs_attention`. A live PID with output/heartbeat is never killed. Check
+`atr selfheal status` and `~/.local/state/atr/health.json`. If you kill the
+agent process while serve is still up, the supervisor finishes the run as
+`failed`; that is not a self-heal reap (the reaper is for orphans after
+serve died).
+
+**Task is `waiting` with a finished `summary.md` and looks stuck.** A sealed
+summary (not writable, or marked `<!-- atr-sealed -->` / `sealed: true`)
+is settled to `done`. Unsealed files are left waiting.
+
+**Stale `m1-runner.lock` or old evidence dirs.** Self-heal removes only the
+paths in `[selfheal] lock_files` (default `~/.local/state/m1-runner.lock`)
+when the holding PID is dead **and** the file is older than `stuck_timeout`.
+A live PID is kept. `prune_dirs` older than `artifact_age` are dropped.
+It never touches a running task's worktree or atr's own pidfile. Health
+transitions are appended to `~/.local/state/atr/health.log`.
 
 **Two tasks checked out the same `.atr/wt/<provider>-<n>` folder.** Slots are
 owned by task id. A live task keeps its slot; the next task gets
@@ -293,9 +315,13 @@ timeout = "10s"                   # killed after this
 ```
 
 Env: `ATR_ALERT_KIND` (`github_auth_failed`, `github_auth_recovered`,
-`github_token_expiring`, `telegram_unreachable`, `telegram_recovered`), `ATR_ALERT_MESSAGE`, `ATR_ALERT_SOURCE=github`,
+`github_token_expiring`, `telegram_unreachable`, `telegram_recovered`,
+`selfheal_failed`, `selfheal_recovered`), `ATR_ALERT_MESSAGE`,
+`ATR_ALERT_SOURCE` (`github` / `selfheal` / …), `ATR_ALERT_HOST` (self-heal),
 `ATR_ALERT_DAYS_LEFT` (expiry only). GitHub token vars are removed from the
-hook's environment. Test the script by hand:
+hook's environment. Self-heal fires once on a new FAIL and once on recovery,
+not on every health tick; the same line is appended to
+`~/.local/state/atr/health.log`. Test the script by hand:
 
 ```bash
 ATR_ALERT_KIND=github_auth_failed ATR_ALERT_MESSAGE="test" ~/bin/atr-alert.sh; echo $?

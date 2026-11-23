@@ -1472,6 +1472,13 @@ impl Db {
         Ok(None)
     }
 
+    /// Pool slot rows (path, task_key) for cleanup.
+    pub fn list_pool_slots(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.lock();
+        let rows = load_pool_slots(&conn)?;
+        Ok(rows.into_iter().map(|r| (r.path, r.task_key)).collect())
+    }
+
     /// Drop every pool slot owned by `task_key`.
     pub fn release_pool_slots(&self, task_key: &str) -> Result<()> {
         let conn = self.lock();

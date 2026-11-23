@@ -277,6 +277,11 @@ enum Cmd {
         #[arg(long, default_value = "120s", requires = "probe")]
         probe_timeout: String,
     },
+    /// Self-heal reaper, sealed-summary settle, cleanup, and health file.
+    Selfheal {
+        #[command(subcommand)]
+        cmd: SelfhealCmd,
+    },
     /// Prune old worktrees, events, runs, and (opt-in) task rows or CLI session files.
     Gc {
         #[arg(long)]
@@ -561,6 +566,15 @@ enum ConfigCmd {
         /// Value; several words are joined with spaces.
         #[arg(required = true, num_args = 1.., allow_hyphen_values = true)]
         value: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SelfhealCmd {
+    /// Recent actions and the health file (`health.json` / `health.txt`).
+    Status {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1210,7 +1224,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 eprintln!("Starting atr doctor…");
             }
             let cfg = load_config(&path)?;
-            let report = atr::doctor::run_with_probe(&cfg, &path, cache, probe_opts.as_ref()).await;
+            let mut report =
+                atr::doctor::run_with_probe(&cfg, &path, cache, probe_opts.as_ref()).await;
+            if let Ok(shared) = Shared::open(path.clone()) {
+                let cfg = shared.config.read().unwrap().clone();
+                atr::selfheal::push_queue_checks(&mut report.checks, &cfg, &shared);
+                report.problems = report
+                    .checks
+                    .iter()
+                    .filter(|c| c.status != atr::doctor::Status::Ok)
+                    .count();
+            }
             if json {
                 println!("{}", report.to_json());
             } else {
@@ -1220,6 +1244,19 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 Ok(ExitCode::SUCCESS)
             } else {
                 Ok(ExitCode::from(1))
+            }
+        }
+        Cmd::Selfheal { cmd } => {
+            let shared = open_after_init(path, "atr selfheal").await?;
+            match cmd {
+                SelfhealCmd::Status { json } => {
+                    if json {
+                        println!("{}", atr::selfheal::status_json(&shared));
+                    } else {
+                        print!("{}", atr::selfheal::status_text(&shared));
+                    }
+                    Ok(ExitCode::SUCCESS)
+                }
             }
         }
         Cmd::Gc {
@@ -1923,6 +1960,17 @@ mod tests {
         let err = Cli::try_parse_from(["atr", "status", "--watch", "--json"]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("--watch") && msg.contains("--json"), "{msg}");
+    }
+
+    #[test]
+    fn selfheal_status_parses() {
+        let cli = Cli::try_parse_from(["atr", "selfheal", "status", "--json"]).expect("selfheal");
+        match cli.cmd {
+            Some(Cmd::Selfheal {
+                cmd: SelfhealCmd::Status { json },
+            }) => assert!(json),
+            other => panic!("expected Selfheal Status, got {other:?}"),
+        }
     }
 
     #[test]

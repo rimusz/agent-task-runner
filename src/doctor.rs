@@ -286,8 +286,28 @@ fn push(checks: &mut Vec<Check>, name: &str, status: Status, detail: String, hin
     });
 }
 
+/// How [`listen_check`] treats `cfg.listen`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListenCheck {
+    /// CLI `atr doctor`: HTTP `/health`, then try to bind.
+    Probe,
+    /// Caller already holds the serve socket. Do not self-request HTTP or bind.
+    Held,
+}
+
+impl ListenCheck {
+    /// In-process serve already bound `cfg.listen`.
+    pub fn held_if(bound: bool) -> Self {
+        if bound {
+            Self::Held
+        } else {
+            Self::Probe
+        }
+    }
+}
+
 pub async fn run(cfg: &Config, config_path: &Path, cache: bool) -> Report {
-    run_with_probe(cfg, config_path, cache, None).await
+    run_with_listen(cfg, config_path, cache, None, ListenCheck::Probe).await
 }
 
 /// `run`, plus the opt-in live provider round trip (`--probe`).
@@ -296,6 +316,17 @@ pub async fn run_with_probe(
     config_path: &Path,
     cache: bool,
     probe: Option<&crate::probe::ProbeOpts>,
+) -> Report {
+    run_with_listen(cfg, config_path, cache, probe, ListenCheck::Probe).await
+}
+
+/// Same as [`run_with_probe`], with an explicit listen check.
+pub async fn run_with_listen(
+    cfg: &Config,
+    config_path: &Path,
+    cache: bool,
+    probe: Option<&crate::probe::ProbeOpts>,
+    listen: ListenCheck,
 ) -> Report {
     let mut checks = Vec::new();
     push(
@@ -316,7 +347,7 @@ pub async fn run_with_probe(
     repo_path_check(&mut checks, cfg);
     intake_labels_check(&mut checks, cfg);
     shadow_overlap_check(&mut checks, cfg);
-    listen_check(&mut checks, cfg);
+    listen_check(&mut checks, cfg, listen);
     reported_usage_check(&mut checks, cfg);
     skip_at_check(&mut checks, cfg);
     telegram_check(&mut checks, cfg, config_path);
@@ -1126,7 +1157,7 @@ fn repo_path_check(checks: &mut Vec<Check>, cfg: &Config) {
     }
 }
 
-fn listen_check(checks: &mut Vec<Check>, cfg: &Config) {
+fn listen_check(checks: &mut Vec<Check>, cfg: &Config, mode: ListenCheck) {
     if cfg.listen.trim().is_empty() {
         push(
             checks,
@@ -1134,6 +1165,16 @@ fn listen_check(checks: &mut Vec<Check>, cfg: &Config) {
             Status::Fail,
             "empty".into(),
             Some("set listen = \"127.0.0.1:7420\"".into()),
+        );
+        return;
+    }
+    if mode == ListenCheck::Held {
+        push(
+            checks,
+            "listen",
+            Status::Ok,
+            format!("{} this process", cfg.listen),
+            None,
         );
         return;
     }
@@ -1863,5 +1904,26 @@ cli = "/bin/true"
         assert_eq!(checks[0].status, Status::Warn);
         assert!(overlap_checks(false, "o/a").is_empty());
         assert!(overlap_checks(true, "o/other").is_empty());
+    }
+
+    #[test]
+    fn listen_held_by_this_process_is_ok_while_probe_sees_in_use() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (_dir, mut cfg, _path) = mini_cfg("");
+        cfg.listen = addr.to_string();
+        let mut held = Vec::new();
+        listen_check(&mut held, &cfg, ListenCheck::Held);
+        assert_eq!(held[0].status, Status::Ok, "{:?}", held[0]);
+        assert!(
+            held[0].detail.contains("this process"),
+            "{}",
+            held[0].detail
+        );
+        let mut probe = Vec::new();
+        listen_check(&mut probe, &cfg, ListenCheck::Probe);
+        assert_eq!(probe[0].status, Status::Fail, "{:?}", probe[0]);
+        assert!(probe[0].detail.contains("in use"), "{}", probe[0].detail);
+        drop(listener);
     }
 }

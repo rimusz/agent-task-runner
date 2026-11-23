@@ -63,7 +63,7 @@ pub fn should_install_skills(config_path: &Path) -> bool {
 }
 
 pub(crate) fn should_install_skills_with(config_path: &Path, skill_home_set: bool) -> bool {
-    !(config_dir_is_custom(config_path) && !skill_home_set)
+    !config_dir_is_custom(config_path) || skill_home_set
 }
 
 /// Write the skill for each provider whose CLI is found by `installed`.

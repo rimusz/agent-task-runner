@@ -1081,7 +1081,8 @@ pub fn doctor_problems_text(report: &crate::doctor::Report) -> String {
 fn run_doctor_text(shared: &Shared) -> String {
     let cfg = shared.config.read().unwrap().clone();
     let path = shared.config_path.clone();
-    let fut = async move { crate::doctor::run(&cfg, &path, false).await };
+    let listen = crate::doctor::ListenCheck::held_if(shared.http_bound.load(Ordering::Relaxed));
+    let fut = async move { crate::doctor::run_with_listen(&cfg, &path, false, None, listen).await };
     let report = match tokio::runtime::Handle::try_current() {
         Ok(h) => std::thread::scope(|s| s.spawn(|| h.block_on(fut)).join()),
         Err(_) => match tokio::runtime::Builder::new_current_thread()
@@ -1998,7 +1999,8 @@ pub fn deliver_assistant_result(shared: &Shared, key: &str, run_id: i64, outcome
 pub async fn assistant_snapshot(shared: &Shared) -> String {
     let cfg = shared.config.read().unwrap().clone();
     let status = format_status(shared, &[]);
-    let doctor = crate::doctor::run(&cfg, &shared.config_path, true)
+    let listen = crate::doctor::ListenCheck::held_if(shared.http_bound.load(Ordering::Relaxed));
+    let doctor = crate::doctor::run_with_listen(&cfg, &shared.config_path, true, None, listen)
         .await
         .format();
     let config = redacted_config_view(&cfg, &shared.config_path);

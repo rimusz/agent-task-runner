@@ -37,6 +37,8 @@ pub struct Shared {
     pub intake_paused: AtomicBool,
     /// Last time a task was started while `[host]` gating is on (settle gap).
     pub last_host_start: Mutex<Option<std::time::Instant>>,
+    /// Set after this process binds `cfg.listen` (`serve` / `serve_background`).
+    pub http_bound: AtomicBool,
 }
 
 /// Result of [`Shared::interrupt_live`].
@@ -160,6 +162,7 @@ impl Shared {
             kick: Notify::new(),
             intake_paused: AtomicBool::new(paused),
             last_host_start: Mutex::new(None),
+            http_bound: AtomicBool::new(false),
         }))
     }
 
@@ -862,6 +865,7 @@ impl Shared {
             "restart": {
                 "resume": cfg.restart.resume,
             },
+            "selfheal": crate::selfheal::status_json(self),
             "driver": cfg.driver_name(),
             "planner": cfg.planner.mode.as_str(),
             "review": cfg.review.enabled,
@@ -912,6 +916,7 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
 
     let listener = TcpListener::bind(&cfg.listen).await?;
     let addr = listener.local_addr()?;
+    shared.http_bound.store(true, Ordering::Relaxed);
     tracing::info!(%addr, "atr listening");
     if cfg.dashboard.enabled {
         let port = addr.port();
@@ -949,6 +954,7 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
     let hup = shared.clone();
     let rec = shared.clone();
     let kw = shared.clone();
+    let heal = shared.clone();
 
     tokio::select! {
         r = axum::serve(listener, http::router(http)) => r?,
@@ -959,6 +965,7 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
         _ = crate::telegram::bot_loop(tg) => {}
         _ = crate::inbox::poll_loop(inbox) => {}
         _ = crate::gc::daily_loop(gc) => {}
+        _ = crate::selfheal::selfheal_loop(heal) => {}
         _ = sighup_loop(hup) => {}
         _ = crate::keepwarm::keepwarm_loop(kw) => {}
     }
@@ -987,6 +994,7 @@ pub async fn serve_background(shared: Arc<Shared>) -> Result<SocketAddr> {
     .await;
     let listener = TcpListener::bind(&cfg.listen).await?;
     let addr = listener.local_addr()?;
+    shared.http_bound.store(true, Ordering::Relaxed);
     let http = shared.clone();
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, http::router(http)).await {
@@ -1020,6 +1028,10 @@ pub async fn serve_background(shared: Arc<Shared>) -> Result<SocketAddr> {
     let hup = shared.clone();
     tokio::spawn(async move {
         sighup_loop(hup).await;
+    });
+    let heal = shared.clone();
+    tokio::spawn(async move {
+        crate::selfheal::selfheal_loop(heal).await;
     });
     Ok(addr)
 }
@@ -1114,8 +1126,8 @@ pub fn doctor_cache(config: &Config) -> (bool, String) {
             && ta.contains("acme-cache-a")
             && tb.contains("acme-cache-b")
             && !ha.contains("Checklist")
-            && ha.find("## Task header").is_some()
-            && ha.find("## Provider contract").is_some();
+            && ha.contains("## Task header")
+            && ha.contains("## Provider contract");
         if prefix_ok {
             out.push_str(&format!("cache\t{}\tok\tsha256={hash}\n", p.name));
         } else {
@@ -1522,6 +1534,9 @@ pub fn format_status_table_opts(shared: &Shared, cli: &StatusCli) -> String {
     {
         out.push_str(line);
         out.push('\n');
+    }
+    if let Some(line) = crate::selfheal::status_line(&cfg.selfheal) {
+        out.push_str(&format!("selfheal: {line}\n"));
     }
     if let Some(sh) = v.get("shadow") {
         if sh.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false) {

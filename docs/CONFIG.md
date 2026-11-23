@@ -47,7 +47,7 @@ reloaded with SIGHUP. `atr config migrate` converts shorthand
 `driver`, `[planner]`, `[review]`, `[plugin]`, `[github] enabled / repo / label`
 (default `for:atr`), `[dashboard] enabled / bind`, `[telegram]` and
 `[telegram.assistant]`, `[tui] providers`, `[ui] timezone`, `[[provider]]` order and `enabled`, `[mcp]`, `[cache]`,
-`[retry]`, `[restart]`, `[host]`,
+`[retry]`, `[restart]`, `[selfheal]`, `[host]`,
 `overflow_on_cap`, `[labels.<name>]` (per-label `run_timeout` /
 `stall_resumes` / `overflow_on_cap`),
 `[[source]]`, `max_prompt_bytes` (default `256k`; CLI/HTTP/MCP prompts and
@@ -556,12 +556,65 @@ restart and to check the worktree, git history, and remote before repeating
 any outside action. The task status/result shows `interrupted by atr restart;
 resuming`.
 
-Resume happens at most once per task per restart: a second serve restart
-while that recovery turn is still in flight, a missing worktree, or a
-failure during workspace prepare (no run started yet) still fail as before
-(`orphaned run (process gone)` / `orphaned running task …`). `held` tasks
-and live TUI / ask owners are left alone. `resume = false` keeps the old
-fail-on-restart behaviour.
+Resume happens at most once per task per restart: that counts as the one
+automatic re-queue. A second serve restart while that recovery turn is
+still in flight is `needs_attention` via `[selfheal]`. A missing worktree
+skips the re-queue. `held` tasks and live TUI / ask owners are left alone.
+`resume = false` keeps the old fail-on-restart behaviour; self-heal still
+re-queues a dead process once unless `selfheal.reap = false`.
+
+### Self-heal
+
+```toml
+[selfheal]
+enabled = true
+reap = true
+settle = true
+cleanup = true
+check = true
+interval = "30s"
+check_interval = "5m"
+stuck_timeout = "10m"
+artifact_age = "14d"
+disk_min_mb = 512
+health_dir = "~/.local/state/atr"
+lock_files = ["~/.local/state/m1-runner.lock"]
+# prune_dirs = ["~/.local/share/atr/evidence"]
+summary_names = ["summary.md"]
+```
+
+Serve runs this on `interval` so the hand-run operator bot can stay frozen.
+
+- **reap.** A serve-owned `running` task whose agent PID is gone (or that
+  never started past `stuck_timeout`) is re-queued **once** (`outcome=reaped`,
+  continue prompt). A second death, or a death after `[restart]` already
+  resumed (`outcome=restarted`), marks `needs_attention`. Live PIDs,
+  in-flight runs, TUI `cli-*` keys, and `held` tasks are never touched. A
+  missing worktree skips the one re-queue and goes straight to
+  `needs_attention`. Killing a live agent while serve is still up is closed
+  by the supervisor as `outcome=failed` and is **not** reaped — the reaper
+  covers orphans after serve itself died. The in-serve health check does not
+  self-request HTTP `/health` (CLI `atr doctor` still does).
+- **settle.** `waiting` with a sealed `summary.md` (non-empty and `chmod a-w`,
+  or a line `<!-- atr-sealed -->` / `sealed: true`, also under `.atr/`)
+  becomes `done`.
+- **cleanup.** Terminal worktrees past `artifact_age`, pool slots of finished
+  tasks, explicit `lock_files` (default only `~/.local/state/m1-runner.lock`)
+  whose holding PID is dead **and** whose mtime is older than `stuck_timeout`,
+  and old subdirs of `prune_dirs`. A live PID is never removed. Running tasks
+  and atr's own pidfile are never touched.
+- **check.** Doctor plus queue checks (stuck runs, retries exhausted, all
+  providers in cooldown, disk below `disk_min_mb`) written atomically to
+  `{health_dir}/health.json` and a one-line `{health_dir}/health.txt`. A new
+  FAIL (or recovery from FAIL) appends a line to `{health_dir}/health.log`
+  (`timestamp kind message`, rotated at about 1 MiB) and runs `[notify] command`
+  with `ATR_ALERT_KIND=selfheal_failed` / `selfheal_recovered` and
+  `ATR_ALERT_SOURCE=selfheal`, de-duplicated. There is no Telegram poller.
+
+`atr selfheal status` (also a `selfheal:` line on `atr status` and
+`selfheal` on the dashboard JSON) shows the last health snapshot and recent
+actions. Every action is logged at INFO with task key and reason.
+`enabled = false` turns the loop off.
 
 ### Host resource gate
 
@@ -609,11 +662,12 @@ timeout = "10s"
 ```
 
 Runs for operator alerts (GitHub auth failed / recovered / token expiring,
-Telegram unreachable 15+ min / recovered)
+Telegram unreachable 15+ min / recovered, self-heal health FAIL / recovered)
 with `ATR_ALERT_KIND`, `ATR_ALERT_MESSAGE`, `ATR_ALERT_SOURCE`,
 `ATR_ALERT_DAYS_LEFT`, `ATR_ALERT_TOKEN_ENV`, `ATR_ALERT_OWNER`
-(`telegram_unreachable` / `telegram_recovered` for Telegram health). Telegram
-still fires too for GitHub alerts. See
+(`telegram_unreachable` / `telegram_recovered` for Telegram health;
+`selfheal_failed` / `selfheal_recovered` and `ATR_ALERT_SOURCE=selfheal`
+for `[selfheal] check`). Telegram still fires too for GitHub alerts. See
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md#7-notify-hook).
 
 ### GitHub token
