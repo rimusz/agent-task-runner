@@ -177,10 +177,11 @@ pub async fn run(
     }
     let globs = test_globs_for(cfg, repo, worktree);
     let skip = skip_protect(&cfg.verify, task);
+    let base = crate::output::base_branch(cfg, task);
     let changed = if skip {
         Vec::new()
     } else {
-        changed_protected_tests(worktree, &cfg.repo_default_branch, globs)
+        changed_protected_tests(worktree, &base, globs)
     };
     let scrub = scrubbed_env(
         cfg,
@@ -197,7 +198,7 @@ pub async fn run(
         .await;
         (p, c, Vec::new(), None)
     } else {
-        let guard = TestRestore::apply(worktree, &cfg.repo_default_branch, &changed);
+        let guard = TestRestore::apply(worktree, &base, &changed);
         let (base_ok, base_checks) = run_cmds(
             &cmds,
             worktree,
@@ -1070,6 +1071,147 @@ cli = "/bin/true"
         assert_eq!(
             std::fs::read_to_string(dir.path().join("tests/new.spec.ts")).unwrap(),
             "new\n"
+        );
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let st = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?} failed: {st}");
+    }
+
+    fn repo_with_diverging_tests(root: &Path) -> std::path::PathBuf {
+        let repo = root.join("app");
+        crate::worktree::init_sample_repo(&repo).unwrap();
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/check.sh"), "MAIN\n").unwrap();
+        git(&repo, &["add", "tests/check.sh"]);
+        git(&repo, &["commit", "-m", "tests on main"]);
+        git(&repo, &["checkout", "-b", "develop"]);
+        std::fs::write(repo.join("tests/check.sh"), "DEVELOP\n").unwrap();
+        git(&repo, &["add", "tests/check.sh"]);
+        git(&repo, &["commit", "-m", "tests on develop"]);
+        repo
+    }
+
+    fn protect_cfg(dir: &Path, repo: &Path, commands: &[&str]) -> crate::config::Config {
+        let cmds = commands
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cfg_path = dir.join("cfg.toml");
+        std::fs::write(
+            &cfg_path,
+            format!(
+                r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{repo}"
+repo_default_branch = "main"
+system_prompt_file = "{root}/p.md"
+[github]
+poll_interval = "60s"
+[verify]
+enabled = true
+protect_tests = true
+commands = [{cmds}]
+[[repo]]
+name = "app"
+path = "{repo}"
+github = "o/app"
+base = "develop"
+[[provider]]
+name = "claude"
+kind = "claude"
+cli = "/bin/true"
+"#,
+                db = dir.join("s.db").display(),
+                root = dir.display(),
+                repo = repo.display(),
+                cmds = cmds,
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("p.md"), "p\n").unwrap();
+        crate::config::load_config(&cfg_path).unwrap()
+    }
+
+    fn git_task(repo: &Path) -> crate::db::Task {
+        crate::db::Task {
+            key: "app-1".into(),
+            repo: Some(repo.to_string_lossy().into_owned()),
+            status: "running".into(),
+            workspace_kind: "git".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn protect_tests_uses_per_repo_base_not_global_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repo_with_diverging_tests(dir.path());
+        let cfg = protect_cfg(dir.path(), &repo, &["grep -q DEVELOP tests/check.sh"]);
+        let task = git_task(&repo);
+        let base = crate::output::base_branch(&cfg, &task);
+        assert_eq!(base, "develop");
+        assert_eq!(cfg.repo_default_branch, "main");
+
+        let globs = crate::config::default_test_globs();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tests/check.sh")).unwrap(),
+            "DEVELOP\n"
+        );
+        let vs_main = changed_protected_tests(&repo, "main", &globs);
+        assert_eq!(vs_main, vec!["tests/check.sh".to_string()], "{vs_main:?}");
+        assert!(
+            changed_protected_tests(&repo, &base, &globs).is_empty(),
+            "worktree matches develop; per-repo base must not flag tests"
+        );
+
+        std::fs::write(repo.join("tests/check.sh"), "AGENT\n").unwrap();
+        let changed = changed_protected_tests(&repo, &base, &globs);
+        assert_eq!(changed, vec!["tests/check.sh".to_string()], "{changed:?}");
+        {
+            let guard = TestRestore::apply(&repo, &base, &changed);
+            let now = std::fs::read_to_string(repo.join("tests/check.sh")).unwrap();
+            assert_eq!(now, "DEVELOP\n", "restore must use develop, not main");
+            drop(guard);
+        }
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tests/check.sh")).unwrap(),
+            "AGENT\n"
+        );
+        {
+            let guard = TestRestore::apply(&repo, "main", &changed);
+            let wrong = std::fs::read_to_string(repo.join("tests/check.sh")).unwrap();
+            assert_eq!(wrong, "MAIN\n", "global main would restore the wrong file");
+            drop(guard);
+        }
+    }
+
+    #[tokio::test]
+    async fn protect_tests_run_does_not_flag_base_only_divergence() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repo_with_diverging_tests(dir.path());
+        let cfg = protect_cfg(dir.path(), &repo, &["grep -q DEVELOP tests/check.sh"]);
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        db.upsert_task("app-1", &repo.to_string_lossy(), None)
+            .unwrap();
+        let run_id = db.start_run("app-1", "claude", "").unwrap();
+        let task = git_task(&repo);
+        let v = run(&cfg, &db, "app-1", &repo, &repo, run_id, &task)
+            .await
+            .unwrap();
+        assert!(v.passed, "{v:?}");
+        assert!(v.tests_modified.is_empty(), "{v:?}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("tests/check.sh")).unwrap(),
+            "DEVELOP\n"
         );
     }
 }
