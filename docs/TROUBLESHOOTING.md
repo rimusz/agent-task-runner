@@ -129,9 +129,9 @@ agent process while serve is still up, the supervisor finishes the run as
 `failed`; that is not a self-heal reap (the reaper is for orphans after
 serve died).
 
-**Task is `waiting` with a finished `summary.md` and looks stuck.** A sealed
+**Task is `idle` (stored `waiting`) with a finished `summary.md` and looks stuck.** A sealed
 summary (not writable, or marked `<!-- atr-sealed -->` / `sealed: true`)
-is settled to `done`. Unsealed files are left waiting.
+is settled to `done`. Unsealed files stay `idle` (stored `waiting`).
 
 **Stale `m1-runner.lock` or old evidence dirs.** Self-heal removes only the
 paths in `[selfheal] lock_files` (default `~/.local/state/m1-runner.lock`)

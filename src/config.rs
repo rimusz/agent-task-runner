@@ -985,7 +985,7 @@ pub struct RawSelfheal {
     /// Re-queue a serve-owned running task whose CLI is gone, once.
     #[serde(default = "default_true")]
     pub reap: bool,
-    /// Settle `waiting` tasks that have a sealed `summary.md` to `done`.
+    /// Settle stored `waiting` tasks (shown as `idle`) that have a sealed `summary.md` to `done`.
     #[serde(default = "default_true")]
     pub settle: bool,
     /// Drop stale worktrees/slots, dead lock files, and old prune_dirs.
