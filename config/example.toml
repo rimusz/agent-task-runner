@@ -231,6 +231,7 @@ interval = "30s"
 check_interval = "5m"
 stuck_timeout = "10m"
 artifact_age = "14d"
+slot_grace = "2m"
 disk_min_mb = 512
 health_dir = "~/.local/state/atr"
 lock_files = ["~/.local/state/m1-runner.lock"]

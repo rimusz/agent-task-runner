@@ -1004,6 +1004,10 @@ pub struct RawSelfheal {
     /// Age after which terminal worktrees and prune_dirs are removed.
     #[serde(default = "default_selfheal_artifact")]
     pub artifact_age: String,
+    /// Do not reclaim a pool slot whose owner changed status more recently
+    /// than this (queued / just-retried / still starting).
+    #[serde(default = "default_selfheal_slot_grace")]
+    pub slot_grace: String,
     #[serde(default = "default_selfheal_disk")]
     pub disk_min_mb: u64,
     #[serde(default = "default_selfheal_health_dir")]
@@ -1032,6 +1036,7 @@ impl Default for RawSelfheal {
             check_interval: default_selfheal_check_interval(),
             stuck_timeout: default_selfheal_stuck(),
             artifact_age: default_selfheal_artifact(),
+            slot_grace: default_selfheal_slot_grace(),
             disk_min_mb: default_selfheal_disk(),
             health_dir: default_selfheal_health_dir(),
             lock_files: default_selfheal_locks(),
@@ -1052,6 +1057,7 @@ pub struct SelfhealConfig {
     pub check_interval: Duration,
     pub stuck_timeout: Duration,
     pub artifact_age: Duration,
+    pub slot_grace: Duration,
     pub disk_min_mb: u64,
     pub health_dir: PathBuf,
     pub lock_files: Vec<String>,
@@ -1071,6 +1077,7 @@ impl Default for SelfhealConfig {
             check_interval: Duration::from_secs(5 * 60),
             stuck_timeout: Duration::from_secs(10 * 60),
             artifact_age: Duration::from_secs(14 * 86400),
+            slot_grace: Duration::from_secs(2 * 60),
             disk_min_mb: default_selfheal_disk(),
             health_dir: expand_path(&default_selfheal_health_dir()),
             lock_files: default_selfheal_locks(),
@@ -1477,6 +1484,9 @@ fn default_selfheal_stuck() -> String {
 fn default_selfheal_artifact() -> String {
     "14d".into()
 }
+fn default_selfheal_slot_grace() -> String {
+    "2m".into()
+}
 fn default_selfheal_disk() -> u64 {
     512
 }
@@ -1512,6 +1522,7 @@ fn parse_selfheal(raw: RawSelfheal) -> Result<SelfhealConfig> {
         check_interval: dur(&raw.check_interval, "5m", "check_interval")?,
         stuck_timeout: dur(&raw.stuck_timeout, "10m", "stuck_timeout")?,
         artifact_age: dur(&raw.artifact_age, "14d", "artifact_age")?,
+        slot_grace: dur(&raw.slot_grace, "2m", "slot_grace")?,
         disk_min_mb: raw.disk_min_mb,
         health_dir: expand_path(if raw.health_dir.trim().is_empty() {
             "~/.local/state/atr"
@@ -4064,6 +4075,7 @@ kind = "claude"
         assert_eq!(cfg.selfheal.check_interval, Duration::from_secs(5 * 60));
         assert_eq!(cfg.selfheal.stuck_timeout, Duration::from_secs(10 * 60));
         assert_eq!(cfg.selfheal.artifact_age, Duration::from_secs(14 * 86400));
+        assert_eq!(cfg.selfheal.slot_grace, Duration::from_secs(2 * 60));
         assert_eq!(cfg.selfheal.disk_min_mb, 512);
         assert_eq!(cfg.selfheal.lock_files, ["~/.local/state/m1-runner.lock"]);
         assert_eq!(cfg.selfheal.summary_names, ["summary.md"]);
