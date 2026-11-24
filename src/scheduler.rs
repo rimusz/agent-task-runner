@@ -1390,7 +1390,7 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
         {
             rendered = crate::task::insert_before_messages(&rendered, &note);
         }
-        if task.check_only {
+        if task.check_only && task.role != "plan" {
             rendered =
                 crate::task::insert_before_messages(&rendered, crate::task::check_only_note());
         }
@@ -1679,7 +1679,9 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
 
     // A worker run that "succeeded" but changed nothing (empty diff, no
     // usable suggestion, no answer) is a no-op, never reported as success.
-    // check_only tasks are the exception: no changes is `checked` (done).
+    // check_only is the exception: no changes is `checked` (done). That
+    // classification is for the worker only; a plan-role run must still
+    // spawn the worker (which inherits check_only).
     let no_deliver: Option<String> = if result.outcome == "success"
         && !assistant
         && !task.shadow
@@ -1732,8 +1734,11 @@ async fn run_claimed(shared: Arc<Shared>, key: String, mut provider: Provider) -
     } else {
         "no_op"
     };
-    let check_only_ok =
-        task.check_only && result.outcome == "success" && escaped.is_none() && !assistant;
+    let check_only_ok = task.check_only
+        && task.role != "plan"
+        && result.outcome == "success"
+        && escaped.is_none()
+        && !assistant;
     let git_changed = check_only_ok
         && crate::worktree::is_git_repo(&wt)
         && (crate::output::has_uncommitted(&wt)

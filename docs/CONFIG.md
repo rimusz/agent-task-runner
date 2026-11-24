@@ -220,7 +220,9 @@ assistant):
   text for an `issue_comment` task, is an honest **no-op**: `needs_attention`
   with `NO-OP <key>: …`, never success. `--check-only` / `check_only` is the
   exception: no file changes is outcome `checked` (done); file changes go to
-  `needs_attention` with why `check-only task modified files` and are not pushed;
+  `needs_attention` with why `check-only task modified files` and are not pushed.
+  That applies only to the worker's final outcome; a planner turn still
+  succeeds and spawns the worker (which inherits `check_only`);
 - `issue_comment` output is posted with `gh issue comment --body-file -`,
   sanitized (ANSI, control characters and tool-call markup removed) and capped
   at GitHub's limit (65,000 characters). Triage approvals keep a 4,000-character cap.

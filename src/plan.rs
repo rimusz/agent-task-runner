@@ -200,6 +200,9 @@ pub fn apply_plan(db: &Db, parent: &Task, plan: &Plan, max_subtasks: u32) -> Res
         if parent.shadow {
             db.mark_shadow(&key)?;
         }
+        if parent.check_only {
+            db.set_check_only(&key, true)?;
+        }
         keys.push(key.clone());
         title_to_key.push((sub.title.to_ascii_lowercase(), key));
     }
@@ -293,5 +296,60 @@ kind = "grok"
             resolve_deps(&["One".into(), "1".into()], &titles, &keys),
             vec!["p-s1", "p-s1"]
         );
+    }
+
+    #[test]
+    fn apply_plan_children_inherit_check_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        db.upsert_task("p", "/tmp/r", None).unwrap();
+        db.set_check_only("p", true).unwrap();
+        db.set_task_role("p", "plan").unwrap();
+        let parent = db.get_task("p").unwrap().unwrap();
+        let plan = Plan {
+            subtasks: vec![
+                Subtask {
+                    title: "A".into(),
+                    prompt: "do a".into(),
+                    provider_hint: String::new(),
+                    deps: vec![],
+                },
+                Subtask {
+                    title: "B".into(),
+                    prompt: "do b".into(),
+                    provider_hint: String::new(),
+                    deps: vec![],
+                },
+            ],
+        };
+        let kids = apply_plan(&db, &parent, &plan, 8).unwrap();
+        assert_eq!(kids, vec!["p-s1", "p-s2"]);
+        assert!(db.get_task("p-s1").unwrap().unwrap().check_only);
+        assert!(db.get_task("p-s2").unwrap().unwrap().check_only);
+        assert!(db.get_task("p").unwrap().unwrap().check_only);
+        assert_eq!(db.get_task("p").unwrap().unwrap().role, "parent");
+    }
+
+    #[test]
+    fn apply_plan_single_keeps_check_only_on_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("s.db")).unwrap();
+        db.upsert_task("p", "/tmp/r", None).unwrap();
+        db.set_check_only("p", true).unwrap();
+        db.set_task_role("p", "plan").unwrap();
+        let parent = db.get_task("p").unwrap().unwrap();
+        let plan = Plan {
+            subtasks: vec![Subtask {
+                title: "Only".into(),
+                prompt: "do it".into(),
+                provider_hint: String::new(),
+                deps: vec![],
+            }],
+        };
+        let kids = apply_plan(&db, &parent, &plan, 8).unwrap();
+        assert_eq!(kids, vec!["p"]);
+        let t = db.get_task("p").unwrap().unwrap();
+        assert_eq!(t.role, "worker");
+        assert!(t.check_only);
     }
 }

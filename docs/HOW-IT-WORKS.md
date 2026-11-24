@@ -230,7 +230,10 @@ Grok plan command (verified on 1.0.52): `--max-turns N --output-format json
 --json-schema … --permission-mode plan`. Other providers use their
 structured/JSON output, or a fenced JSON block.
 
-The planning session ends with the plan. When the task becomes a worker (one
+The planning session ends with the plan. `--check-only` / `check_only` does
+not apply to this turn: a successful plan is outcome `success` and still
+spawns the worker, which inherits `check_only` so a no-diff worker run is
+`checked` instead of a no-op. When the task becomes a worker (one
 subtask, an empty plan, or output atr can't parse), the worker starts a fresh
 session, with the original task and the planner's summary in its handoff block.
 A resumed Grok session would still be in plan mode and refuse every edit. An
@@ -477,8 +480,9 @@ Tools: `add_task` (`body` required; `title` optional, derived from the prompt;
 workspace defaults to `none` when neither `dir` nor `repo` is set; optional
 `workspace` git/dir/none, `dir`, `repo`, `output`, `issue` (GitHub issue
 number for `output: issue_comment`),
-`webhook`, `patch`, `check_only` (proof run: no file changes is `checked`,
-not no-op; file changes go to `needs_attention` and are not pushed),
+`webhook`, `patch`, `check_only` (proof run: the **worker**'s no file changes
+is `checked`, not no-op; the planner turn still spawns the worker, which
+inherits `check_only`; file changes go to `needs_attention` and are not pushed),
 `idempotency_key`, `files`), `wait_task` (block until idle/waiting, done, failed or
 `timeout_seconds`), `get_result` (text, diff, PR URL), `list_tasks`,
 `task_status` (timeline + last output), `steer_task` (`interrupt: true` stops the

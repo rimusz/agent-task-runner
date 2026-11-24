@@ -40,6 +40,27 @@ async fn wait_two_runs(h: &Harness, key: &str) {
     .await;
 }
 
+fn submit_check_only(h: &Harness, key: &str, body: &str) {
+    h.shared
+        .submit_with(
+            key,
+            body,
+            "test",
+            Some(&h.repo.display().to_string()),
+            None,
+            false,
+            false,
+            atr::SubmitOpts {
+                workspace_kind: Some("git".into()),
+                output_kind: Some("pr".into()),
+                source_kind: Some("cli".into()),
+                check_only: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+}
+
 #[tokio::test]
 async fn grok_worker_after_plan_starts_a_fresh_session_out_of_plan_mode() {
     let h = Harness::with_providers(&[("grok", true, "success")], "127.0.0.1:0").await;
@@ -140,4 +161,79 @@ async fn retry_of_a_failed_plan_run_starts_fresh() {
     h.shared.retry("demo-p5").unwrap();
     assert_eq!(h.shared.db.task_session("demo-p5", "grok").unwrap(), None);
     let _ = fs::write(h.fake_dir.join("grok.release"), "");
+}
+
+#[tokio::test]
+async fn check_only_plan_run_is_success_then_worker_checked() {
+    // check_only must not seal the planner as `checked`; the worker inherits
+    // the flag and a no-diff worker run is `checked`.
+    let h = Harness::with_providers(&[("grok", true, "success")], "127.0.0.1:0").await;
+    h.install_gh_stub();
+    fs::write(h.fake_dir.join("plan.json"), ONE).unwrap();
+    submit_check_only(&h, "demo-cplan", &big_body());
+    wait_two_runs(&h, "demo-cplan").await;
+    h.wait_status("demo-cplan", &["waiting"], 15000).await;
+
+    let t = h.shared.db.get_task("demo-cplan").unwrap().unwrap();
+    assert!(t.check_only);
+    assert_eq!(t.role, "worker", "planner must become the worker");
+    assert_eq!(t.status, "waiting");
+
+    let runs = h.shared.db.list_runs(Some("demo-cplan")).unwrap();
+    let outcomes: Vec<_> = runs.iter().filter_map(|r| r.outcome.as_deref()).collect();
+    assert!(
+        outcomes.len() >= 2,
+        "expected plan then worker, got {outcomes:?}"
+    );
+    assert_eq!(outcomes[0], "success", "plan-role run must not be checked");
+    assert!(!outcomes[..outcomes.len() - 1].contains(&"checked"));
+    assert_eq!(*outcomes.last().unwrap(), "checked");
+    assert!(
+        !h.fake_dir.join("gh-pr.log").exists(),
+        "no PR for check-only"
+    );
+}
+
+#[tokio::test]
+async fn check_only_split_plan_children_inherit_flag() {
+    let h = Harness::with_providers(&[("grok", true, "success")], "127.0.0.1:0").await;
+    h.install_gh_stub();
+    fs::write(h.fake_dir.join("plan.json"), TWO).unwrap();
+    submit_check_only(&h, "demo-cplit", &big_body());
+    h.wait_until("demo-cplit", 20000, |h| {
+        h.shared.db.get_task("demo-cplit-s2").unwrap().is_some()
+    })
+    .await;
+
+    let parent = h.shared.db.get_task("demo-cplit").unwrap().unwrap();
+    assert_eq!(parent.role, "parent");
+    assert!(parent.check_only);
+    let plan_runs = h.shared.db.list_runs(Some("demo-cplit")).unwrap();
+    assert_eq!(
+        plan_runs.last().and_then(|r| r.outcome.as_deref()),
+        Some("success"),
+        "parent plan run must not be sealed as checked"
+    );
+
+    for key in ["demo-cplit-s1", "demo-cplit-s2"] {
+        let child = h.shared.db.get_task(key).unwrap().unwrap();
+        assert!(child.check_only, "{key} must inherit check_only");
+        assert_eq!(child.role, "worker");
+        h.wait_status(key, &["waiting"], 15000).await;
+        let t = h.shared.db.get_task(key).unwrap().unwrap();
+        assert_eq!(t.status, "waiting", "{key}");
+        let outcomes: Vec<_> = h
+            .shared
+            .db
+            .list_runs(Some(key))
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| r.outcome)
+            .collect();
+        assert_eq!(
+            outcomes.last().map(String::as_str),
+            Some("checked"),
+            "{key} {outcomes:?}"
+        );
+    }
 }
