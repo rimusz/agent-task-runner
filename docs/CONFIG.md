@@ -584,6 +584,7 @@ interval = "30s"
 check_interval = "5m"
 stuck_timeout = "10m"
 artifact_age = "14d"
+slot_grace = "2m"
 disk_min_mb = 512
 health_dir = "~/.local/state/atr"
 lock_files = ["~/.local/state/m1-runner.lock"]
@@ -610,8 +611,14 @@ Serve runs this on `interval` so the hand-run operator bot can stay frozen.
 - **cleanup.** Terminal worktrees past `artifact_age`, pool slots of finished
   tasks, explicit `lock_files` (default only `~/.local/state/m1-runner.lock`)
   whose holding PID is dead **and** whose mtime is older than `stuck_timeout`,
-  and old subdirs of `prune_dirs`. A live PID is never removed. Running tasks
-  and atr's own pidfile are never touched.
+  and old subdirs of `prune_dirs`. A live PID is never removed. Running,
+  queued, and in-flight tasks keep their slot, as does any task whose status
+  changed inside `slot_grace` (default `2m`) so a just-queued or just-retried
+  task cannot lose the slot it is about to use. Reclaiming a leftover slot
+  from a finished task does not change the new task's status. If a slot is
+  still cleaned under a `waiting` (idle) task that never got a session, that
+  task is re-queued (unconsuming its last run if needed) instead of left idle.
+  atr's own pidfile is never touched.
 - **check.** Doctor plus queue checks (stuck runs, retries exhausted, all
   providers in cooldown, disk below `disk_min_mb`) written atomically to
   `{health_dir}/health.json` and a one-line `{health_dir}/health.txt`. A new

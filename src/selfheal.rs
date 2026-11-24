@@ -330,7 +330,7 @@ fn file_not_writable(meta: &fs::Metadata) -> bool {
 }
 
 fn cleanup(shared: &Shared, cfg: &Config, report: &mut TickReport) -> Result<()> {
-    cleanup_slots(shared, report)?;
+    cleanup_slots(shared, cfg, report)?;
     let mut gc_cfg = cfg.clone();
     gc_cfg.gc.worktree_retention = cfg.selfheal.artifact_age;
     let mut gc_report = crate::gc::GcReport::default();
@@ -345,7 +345,7 @@ fn cleanup(shared: &Shared, cfg: &Config, report: &mut TickReport) -> Result<()>
     Ok(())
 }
 
-fn cleanup_slots(shared: &Shared, report: &mut TickReport) -> Result<()> {
+fn cleanup_slots(shared: &Shared, cfg: &Config, report: &mut TickReport) -> Result<()> {
     for (path, key) in shared.db.list_pool_slots()? {
         let Some(t) = shared.db.get_task(&key)? else {
             shared.db.release_pool_slots(&key)?;
@@ -354,7 +354,8 @@ fn cleanup_slots(shared: &Shared, report: &mut TickReport) -> Result<()> {
             report.slots.push(key);
             continue;
         };
-        if t.status == "running" || shared.inflight.lock().unwrap().contains_key(&key) {
+        if keep_pool_slot(&t, shared, cfg) {
+            requeue_unstarted_slot_owner(shared, &t, report)?;
             continue;
         }
         if !Db::removable_status(&t.status) {
@@ -363,7 +364,59 @@ fn cleanup_slots(shared: &Shared, report: &mut TickReport) -> Result<()> {
         shared.db.release_pool_slots(&key)?;
         record(shared, "cleanup_slot", &key, &path);
         tracing::info!(task = %key, reason = %path, "selfheal cleanup slot");
-        report.slots.push(key);
+        report.slots.push(key.clone());
+        requeue_unstarted_slot_owner(shared, &t, report)?;
+    }
+    Ok(())
+}
+
+/// Keep the slot while a start is in flight, queued, or still inside the
+/// grace window after the last status change. There is no stored
+/// `claimed`/`starting` status: `claim_task` writes `running`, and inflight
+/// is registered before that.
+fn keep_pool_slot(t: &Task, shared: &Shared, cfg: &Config) -> bool {
+    if t.status == "running" || t.status == "queued" {
+        return true;
+    }
+    if shared.inflight.lock().unwrap().contains_key(&t.key) {
+        return true;
+    }
+    !age_exceeds(&t.updated, cfg.selfheal.slot_grace)
+}
+
+fn has_provider_session(t: &Task) -> bool {
+    t.session_id.as_deref().is_some_and(|s| !s.is_empty())
+}
+
+/// A `waiting` (idle) owner with no session never finished a turn. Re-queue
+/// it so slot cleanup cannot leave that work idle. A finished PASS keeps its
+/// session and is left `waiting`.
+fn requeue_unstarted_slot_owner(shared: &Shared, t: &Task, report: &mut TickReport) -> Result<()> {
+    if t.status != "waiting" || has_provider_session(t) {
+        return Ok(());
+    }
+    if shared.db.pending_messages(&t.key)?.is_empty() {
+        let Some(run_id) = shared.db.last_finished_run_id(&t.key)? else {
+            return Ok(());
+        };
+        shared.db.unconsume_run(run_id)?;
+        if shared.db.pending_messages(&t.key)?.is_empty() {
+            return Ok(());
+        }
+    }
+    if shared.db.queue_unless_running(&t.key)? {
+        record(
+            shared,
+            "requeue",
+            &t.key,
+            "slot reclaim of unstarted task; re-queued",
+        );
+        tracing::info!(
+            task = %t.key,
+            reason = "unstarted waiting task still owns a slot",
+            "selfheal requeue"
+        );
+        report.requeued.push(t.key.clone());
     }
     Ok(())
 }

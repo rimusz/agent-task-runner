@@ -133,6 +133,14 @@ serve died).
 summary (not writable, or marked `<!-- atr-sealed -->` / `sealed: true`)
 is settled to `done`. Unsealed files stay `idle` (stored `waiting`).
 
+**New or retried task goes `idle` with no session right after `atr add` / `atr retry`.**
+Self-heal must not reclaim the pool slot that task is about to use (leftover
+tree from a finished PASS on the same `.atr/wt/<provider>-n` is not a reason
+to mark the new key idle). `[selfheal] slot_grace` (default `2m`) keeps the
+slot after the last status change; if a slot is still cleaned under a
+`waiting` task with no session, atr re-queues it. Check `atr selfheal status`
+for a `cleanup slot` line on that key.
+
 **Stale `m1-runner.lock` or old evidence dirs.** Self-heal removes only the
 paths in `[selfheal] lock_files` (default `~/.local/state/m1-runner.lock`)
 when the holding PID is dead **and** the file is older than `stuck_timeout`.
