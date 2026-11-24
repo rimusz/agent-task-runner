@@ -1426,4 +1426,181 @@ cli = "/bin/true"
         assert!(!old.exists(), "old evidence dir must go");
         assert!(live.join("log.txt").exists(), "running task dir must stay");
     }
+
+    fn claude0(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let slot = dir.path().join("work/repo/.atr/wt/claude-0");
+        fs::create_dir_all(&slot).unwrap();
+        slot
+    }
+
+    fn ago(mins: i64) -> String {
+        rfc3339::millis(Timestamp::now() - SignedDuration::from_mins(mins))
+    }
+
+    fn owns_slot(shared: &Shared, key: &str) -> bool {
+        shared
+            .db
+            .list_pool_slots()
+            .unwrap()
+            .iter()
+            .any(|(_, k)| k == key)
+    }
+
+    /// Production 03:49: leftover claude-0 from a finished PASS, new task
+    /// already owns the slot, stored `waiting` (idle) with no session.
+    #[test]
+    fn cleanup_does_not_idle_a_fresh_task_on_a_finished_tasks_slot() {
+        let (dir, shared) = harness();
+        let slot = claude0(&dir);
+
+        shared.db.upsert_task("m1pro-325", "/repo", None).unwrap();
+        shared.db.set_status("m1pro-325", "waiting").unwrap();
+        shared
+            .db
+            .set_task_result("m1pro-325", "PASS", "", None)
+            .unwrap();
+        shared
+            .db
+            .set_provider_session("m1pro-325", Some("claude"), Some("old-sid"))
+            .unwrap();
+        shared
+            .db
+            .set_worktree("m1pro-325", &slot.display().to_string())
+            .unwrap();
+        assert!(shared
+            .db
+            .hold_pool_slot("m1pro-325", 0, &slot, &[])
+            .unwrap());
+        let old = ago(30);
+        shared.db.set_timestamps("m1pro-325", &old, &old).unwrap();
+
+        shared.db.upsert_task("m1pro-333", "/repo", None).unwrap();
+        shared
+            .db
+            .enqueue_message("m1pro-333", "do the proof", "cli")
+            .unwrap();
+        shared.db.set_status("m1pro-333", "waiting").unwrap();
+        shared
+            .db
+            .set_worktree("m1pro-333", &slot.display().to_string())
+            .unwrap();
+        let candidates = [(0u32, slot.as_path())];
+        assert_eq!(
+            shared
+                .db
+                .allocate_pool_slot("m1pro-333", &candidates, Some(&slot), &[])
+                .unwrap(),
+            Some(0)
+        );
+
+        tick(&shared).unwrap();
+
+        let fresh = shared.db.get_task("m1pro-333").unwrap().unwrap();
+        assert_eq!(
+            fresh.status, "queued",
+            "new task must be re-queued, not left idle: {}",
+            fresh.status
+        );
+        assert!(
+            !shared.db.pending_messages("m1pro-333").unwrap().is_empty(),
+            "new task must still have work to run"
+        );
+        assert!(
+            owns_slot(&shared, "m1pro-333"),
+            "new task must keep the slot it was about to use"
+        );
+        assert_eq!(
+            shared.db.get_task("m1pro-325").unwrap().unwrap().status,
+            "waiting",
+            "finished predecessor must not be re-queued"
+        );
+        assert!(
+            !owns_slot(&shared, "m1pro-325"),
+            "finished predecessor must not keep the slot"
+        );
+    }
+
+    /// Production 04:06: `atr retry` of the idle task, then the same
+    /// `cleanup slot` line, idle again with no session.
+    #[test]
+    fn cleanup_does_not_idle_a_retried_task_when_reclaiming_its_slot() {
+        let (dir, shared) = harness();
+        let slot = claude0(&dir);
+
+        shared.db.upsert_task("retry-me", "/repo", None).unwrap();
+        shared.db.set_status("retry-me", "waiting").unwrap();
+        shared
+            .db
+            .set_worktree("retry-me", &slot.display().to_string())
+            .unwrap();
+        assert!(shared.db.hold_pool_slot("retry-me", 0, &slot, &[]).unwrap());
+        let run = shared.db.start_run("retry-me", "claude", "").unwrap();
+        let mid = shared
+            .db
+            .enqueue_message("retry-me", "do the proof", "cli")
+            .unwrap();
+        shared.db.mark_consumed(&[mid], run).unwrap();
+        shared.db.finish_run(run, "failed", Some(-1)).unwrap();
+        shared.db.unconsume_run(run).unwrap();
+        shared.db.set_status("retry-me", "waiting").unwrap();
+
+        tick(&shared).unwrap();
+
+        let t = shared.db.get_task("retry-me").unwrap().unwrap();
+        assert_eq!(
+            t.status, "queued",
+            "retry must not be left idle: {}",
+            t.status
+        );
+        assert!(
+            !shared.db.pending_messages("retry-me").unwrap().is_empty(),
+            "retry must still have work to run"
+        );
+        assert!(
+            owns_slot(&shared, "retry-me"),
+            "retried task must keep its slot"
+        );
+        assert!(
+            t.session_id.as_deref().unwrap_or("").is_empty(),
+            "this path never had a session"
+        );
+    }
+
+    #[test]
+    fn cleanup_still_releases_an_aged_finished_tasks_slot() {
+        let (dir, shared) = harness();
+        let slot = claude0(&dir);
+
+        shared.db.upsert_task("done-pass", "/repo", None).unwrap();
+        shared.db.set_status("done-pass", "waiting").unwrap();
+        shared
+            .db
+            .set_task_result("done-pass", "PASS", "", None)
+            .unwrap();
+        shared
+            .db
+            .set_provider_session("done-pass", Some("claude"), Some("sid"))
+            .unwrap();
+        shared
+            .db
+            .set_worktree("done-pass", &slot.display().to_string())
+            .unwrap();
+        assert!(shared
+            .db
+            .hold_pool_slot("done-pass", 0, &slot, &[])
+            .unwrap());
+        let old = ago(30);
+        shared.db.set_timestamps("done-pass", &old, &old).unwrap();
+
+        tick(&shared).unwrap();
+
+        assert_eq!(
+            shared.db.get_task("done-pass").unwrap().unwrap().status,
+            "waiting"
+        );
+        assert!(
+            !owns_slot(&shared, "done-pass"),
+            "aged finished task must drop the slot"
+        );
+    }
 }
