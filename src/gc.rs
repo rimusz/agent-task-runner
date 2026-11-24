@@ -3,8 +3,9 @@ use crate::config::{expand_path, Config};
 use crate::db::Db;
 use anyhow::Result;
 use jiff::{SignedDuration, Timestamp};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[derive(Debug, Default, Clone)]
@@ -251,7 +252,7 @@ pub(crate) fn prune_worktrees(
             continue;
         }
         if !under_root(&dest, &cfg.worktree_root) {
-            tracing::warn!(path = %dest.display(), "gc skip worktree outside worktree_root");
+            log_skip_outside(&dest);
             continue;
         }
         let updated = parse_ts(&t.updated).unwrap_or_else(Timestamp::now);
@@ -286,6 +287,27 @@ pub(crate) fn prune_worktrees(
 
 fn is_done_or_cancelled(status: &str) -> bool {
     crate::db::Db::removable_status(status)
+}
+
+/// Paths already WARNed as outside `worktree_root` in this process.
+static SEEN_OUTSIDE_ROOT: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+fn seen_outside_root() -> &'static Mutex<HashSet<PathBuf>> {
+    SEEN_OUTSIDE_ROOT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Never touch worktrees outside `worktree_root`. WARN the first time a path is
+/// skipped in this process; later passes log at debug so the ~30s gc tick stays quiet.
+fn log_skip_outside(dest: &Path) {
+    let first = seen_outside_root()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(dest.to_path_buf());
+    if first {
+        tracing::warn!(path = %dest.display(), "gc skip worktree outside worktree_root");
+    } else {
+        tracing::debug!(path = %dest.display(), "gc skip worktree outside worktree_root");
+    }
 }
 
 fn under_root(path: &Path, root: &Path) -> bool {
@@ -831,6 +853,120 @@ cli = "/bin/true"
         assert!(done.tasks.contains(&"done-a".into()), "{done:?}");
         assert!(shared.db.get_task("done-a").unwrap().is_none());
         assert!(shared.db.get_task("fail-b").unwrap().is_some());
+        std::mem::forget(dir);
+    }
+
+    fn capture_logs(f: impl FnOnce()) -> String {
+        use std::io::Write;
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(Buf(buf.clone()))
+            .with_max_level(tracing::Level::WARN)
+            .with_target(false)
+            .compact()
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    fn skip_warn_count(logs: &str, path: &Path) -> usize {
+        let needle = path.display().to_string();
+        logs.lines()
+            .filter(|line| {
+                line.contains("WARN")
+                    && line.contains("gc skip worktree outside worktree_root")
+                    && line.contains(&needle)
+            })
+            .count()
+    }
+
+    fn register_outside(shared: &Shared, key: &str, dest: &Path) {
+        shared.db.upsert_task(key, "/repo", None).unwrap();
+        shared
+            .db
+            .set_worktree(key, &dest.display().to_string())
+            .unwrap();
+        shared.db.set_status(key, "waiting").unwrap();
+        shared.db.set_timestamps(key, &old(20), &old(20)).unwrap();
+    }
+
+    #[test]
+    fn skips_outside_root_worktree_and_warns_once_per_path() {
+        let (dir, shared) = harness();
+        let outside_a = dir.path().join("outside-a").join("tree");
+        let outside_b = dir.path().join("outside-b").join("tree");
+        std::fs::create_dir_all(&outside_a).unwrap();
+        std::fs::create_dir_all(&outside_b).unwrap();
+        std::fs::write(outside_a.join("keep.txt"), "a\n").unwrap();
+        std::fs::write(outside_b.join("keep.txt"), "b\n").unwrap();
+        register_outside(&shared, "out-a", &outside_a);
+        register_outside(&shared, "out-b", &outside_b);
+
+        let logs1 = capture_logs(|| {
+            let report = run(&shared, false, true, None, None, None).unwrap();
+            assert!(
+                !report
+                    .worktrees
+                    .iter()
+                    .any(|p| p.contains("outside-a") || p.contains("outside-b")),
+                "{report:?}"
+            );
+        });
+        assert!(
+            outside_a.join("keep.txt").exists(),
+            "outside-root worktree must not be removed"
+        );
+        assert!(
+            outside_b.join("keep.txt").exists(),
+            "outside-root worktree must not be removed"
+        );
+        assert_eq!(skip_warn_count(&logs1, &outside_a), 1, "{logs1}");
+        assert_eq!(skip_warn_count(&logs1, &outside_b), 1, "{logs1}");
+
+        let logs2 = capture_logs(|| {
+            let _ = run(&shared, false, true, None, None, None).unwrap();
+        });
+        assert_eq!(skip_warn_count(&logs2, &outside_a), 0, "{logs2}");
+        assert_eq!(skip_warn_count(&logs2, &outside_b), 0, "{logs2}");
+        assert!(outside_a.join("keep.txt").exists());
+        assert!(outside_b.join("keep.txt").exists());
+
+        let outside_c = dir.path().join("outside-c").join("tree");
+        std::fs::create_dir_all(&outside_c).unwrap();
+        std::fs::write(outside_c.join("keep.txt"), "c\n").unwrap();
+        register_outside(&shared, "out-c", &outside_c);
+
+        let logs3 = capture_logs(|| {
+            let _ = run(&shared, false, true, None, None, None).unwrap();
+        });
+        assert_eq!(skip_warn_count(&logs3, &outside_a), 0, "{logs3}");
+        assert_eq!(skip_warn_count(&logs3, &outside_b), 0, "{logs3}");
+        assert_eq!(skip_warn_count(&logs3, &outside_c), 1, "{logs3}");
+        assert!(
+            outside_c.join("keep.txt").exists(),
+            "new outside-root path must still be skipped"
+        );
         std::mem::forget(dir);
     }
 }
