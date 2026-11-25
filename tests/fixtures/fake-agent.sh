@@ -10,6 +10,7 @@ case "$KIND" in
   codex) VER="${ATR_FAKE_CODEX_VERSION:-0.162.1}" ;;
   opencode) VER="${ATR_FAKE_OPENCODE_VERSION:-1.0.132}" ;;
   gemini) VER="${ATR_FAKE_GEMINI_VERSION:-0.22.0}" ;;
+  agy) VER="${ATR_FAKE_AGY_VERSION:-1.5.17}" ;;
   *) VER="0.0.0" ;;
 esac
 
@@ -139,7 +140,7 @@ args=("$@")
 i=0
 while [[ $i -lt ${#args[@]} ]]; do
   a="${args[$i]}"
-  if [[ "$a" == "--resume" || "$a" == "-r" || "$a" == "--session-id" || "$a" == "--session" || "$a" == "-s" ]]; then
+  if [[ "$a" == "--resume" || "$a" == "-r" || "$a" == "--session-id" || "$a" == "--session" || "$a" == "-s" || "$a" == "--conversation" ]]; then
     i=$((i + 1))
     SESSION="${args[$i]:-}"
   elif [[ "$a" == --session-id=* ]]; then
@@ -233,6 +234,13 @@ EOF
       echo "{\"type\":\"step_start\",\"sessionID\":\"${sid}\",\"part\":{\"type\":\"step-start\"}}"
       cat <<EOF
 {"type":"step_finish","sessionID":"${sid}","part":{"type":"step-finish","reason":"stop","tokens":{"input":50,"output":10,"reasoning":0,"cache":{"read":100,"write":5}}}}
+EOF
+      ;;
+    agy)
+      echo "{\"event\":\"init\",\"conversation_id\":\"${sid}\",\"init\":{\"cwd\":\"/wt\",\"permission_mode\":\"always-proceed\"}}"
+      echo '{"event":"step_update","step_update":{"state":"DONE","step_type":"agent_response","text_delta":"done"}}'
+      cat <<EOF
+{"event":"result","result":{"conversation_id":"${sid}","status":"SUCCESS","response":"done\n","usage":{"input_tokens":100,"output_tokens":50,"thinking_tokens":0,"cache_read_tokens":20,"total_tokens":150}}}
 EOF
       ;;
     gemini)

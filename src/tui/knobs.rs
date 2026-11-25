@@ -49,6 +49,8 @@ pub(crate) fn effort_values(kind: &str) -> Option<&'static [&'static str]> {
         "claude" => Some(&["low", "medium", "high", "xhigh", "max", "ultra"]),
         "cursor" => Some(&["low", "medium", "high"]),
         "codex" => Some(&["low", "medium", "high", "xhigh"]),
+        // https://antigravity.google/docs/cli/headless (`--effort`)
+        "agy" => Some(&["low", "medium", "high", "xhigh", "max"]),
         _ => None,
     }
 }
@@ -239,6 +241,11 @@ pub(crate) fn apply_knobs_to_provider(
                     "model_reasoning_effort",
                     &format!("model_reasoning_effort=\"{e}\""),
                 );
+            }
+        }
+        "agy" => {
+            if let Some(e) = effort {
+                replace_flag(&mut provider.extra_args, "--effort", Some(e));
             }
         }
         _ => {}

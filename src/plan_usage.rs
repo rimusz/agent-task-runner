@@ -155,7 +155,9 @@ fn targets_from(providers: &[Provider]) -> Vec<Target> {
             cli: p.cli.clone(),
         })
         .collect();
-    for kind in ["claude", "grok", "cursor", "codex", "gemini", "opencode"] {
+    for kind in [
+        "claude", "grok", "cursor", "codex", "gemini", "opencode", "agy",
+    ] {
         if !out.iter().any(|t| t.kind == kind) {
             out.push(Target {
                 name: kind.to_string(),
@@ -354,6 +356,13 @@ fn read_http(home: &Path, targets: &[Target], read_at: &str) -> Vec<PlanRow> {
                 &t.name,
                 "plan",
                 "no proven GET plan meter (the Code Assist quota call that returns remaining fraction is a POST, which plan_usage will not send)",
+                read_at,
+            ));
+        } else if t.kind == "agy" {
+            rows.push(unknown(
+                &t.name,
+                "plan",
+                "no proven GET plan meter (Antigravity /usage is an interactive panel; statusline quota JSON is not a read-only GET)",
                 read_at,
             ));
         } else if t.kind == "opencode" {

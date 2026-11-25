@@ -2359,18 +2359,43 @@ pub fn kind_defaults(kind: &str) -> Option<KindDefaults> {
             sandbox: "",
             config_overrides: &[],
         }),
+        // Antigravity CLI (`agy`). Headless prompt is one JSON line on stdin
+        // (`--input-format stream-json`); `-p` is ignored in that mode.
+        // https://antigravity.google/docs/cli/headless
+        // https://antigravity.google/docs/cli/reference/
+        "agy" => Some(KindDefaults {
+            cli_names: &["agy"],
+            model_flag: "--model",
+            args: &[
+                "--output-format",
+                "stream-json",
+                "--input-format",
+                "stream-json",
+                "--dangerously-skip-permissions",
+            ],
+            resume_flag: "--conversation",
+            session_id_flag: "",
+            cwd_flag: "",
+            permission_mode: "",
+            permission_mode_flag: "--permission-mode",
+            prompt_mode: "stdin",
+            prompt_file_prefix: "@",
+            reported_usage: "none",
+            sandbox: "",
+            config_overrides: &[],
+        }),
         _ => None,
     }
 }
 
 pub fn known_kinds_hint() -> &'static str {
-    "claude, grok, cursor, codex, opencode, or gemini"
+    "claude, grok, cursor, codex, opencode, gemini, or agy"
 }
 
 pub fn is_known_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "claude" | "grok" | "cursor" | "codex" | "opencode" | "gemini"
+        "claude" | "grok" | "cursor" | "codex" | "opencode" | "gemini" | "agy"
     )
 }
 

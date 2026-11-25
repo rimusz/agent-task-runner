@@ -7,7 +7,7 @@ description: Set up and operate atr (agent task runner) — init, providers, Ope
 
 `atr` is a long-running service that drives official agent CLIs on existing subscription plans — never per-use API billing.
 
-Kinds: `claude`, `grok`, `cursor`, `codex`, `gemini`, `opencode`. A `[[provider]]` block can be just `name` + `kind`. Nothing else is hardcoded — policy lives in `~/.config/atr/config.toml`.
+Kinds: `claude`, `grok`, `cursor`, `codex`, `agy`, `gemini` (legacy), `opencode`. A `[[provider]]` block can be just `name` + `kind`. Nothing else is hardcoded — policy lives in `~/.config/atr/config.toml`.
 
 OpenCode covers Ollama and the Chinese providers (Kimi, Qwen, GLM, MiniMax, DeepSeek, MiMo) plus local spark. **Any model OpenCode supports works with atr by its `provider/model` id.** Presets are shortcuts only.
 
@@ -132,13 +132,16 @@ Vendor coding CLIs (Kimi Code, Qwen Code, ZCode, MiMo Code, …) are interactive
 | Grok Build | `atr providers add grok --kind grok` |
 | Cursor CLI | `atr providers add cursor --kind cursor` |
 | Codex | `atr providers add codex --kind codex` |
-| Gemini CLI | `atr providers add gemini --kind gemini` |
+| Antigravity CLI | `atr providers add agy --kind agy` |
+| Gemini CLI (legacy) | `atr providers add gemini --kind gemini` |
 
 Codex gets atr's instructions as `-c model_instructions_file=<worktree>/.atr/system.md`, which replaces Codex's built-in base prompt (codex-cli 0.166 checked; the old `instructions_file` key is ignored by codex). An operator `--override 'model_instructions_file="…"'` wins. If Codex ignores atr's rules (commits or pushes itself, wrong answer format), check `codex --version` and the run's argv.
 
 Grok Build gets the same file as the `--rules` text. `grok 1.0.89 --help` says `--rules <RULES>` ("Extra rules to append to the system prompt"); `--rules-file` is not a flag. atr reads `<worktree>/.atr/system.md` and passes those bytes as one argument, with no shell. The task prompt stays `--prompt-file`. If Grok ignores atr's rules, check that the run's argv contains the rules text.
 
-Gemini CLI runs headless with `--output-format stream-json --skip-trust --approval-mode yolo` and the prompt on stdin (do not pass boolean `-p`; `--prompt` takes a string). Sign in with `gemini` (Login with Google) or set `GEMINI_API_KEY`. `/model` lists full ids (`gemini-2.5-pro`, …), not aliases (`auto`, `pro`, `flash`). There is no documented system-prompt file flag.
+Antigravity CLI (`agy`) runs headless with `--output-format stream-json --input-format stream-json --dangerously-skip-permissions`. The prompt is one stdin JSON line (`event: user`). Do not pass `-p` in that mode. Resume with `--conversation`. Sign in by running `agy` (over SSH it prints a URL and waits for a code). Doctor does not start sign-in. `/model` seeds documented slugs (`gemini-3.8-flash-medium`, …). Quota `/usage` is interactive, so plan usage is unknown.
+
+Gemini CLI (`kind = gemini`, legacy) runs headless with `--output-format stream-json --skip-trust --approval-mode yolo` and the prompt on stdin (do not pass boolean `-p`; `--prompt` takes a string). Sign in with `gemini` (Login with Google) or set `GEMINI_API_KEY`. Personal Google login stopped on 18 June 2026; use `agy` for those accounts. `/model` lists full ids (`gemini-2.5-pro`, …), not aliases (`auto`, `pro`, `flash`). There is no documented system-prompt file flag.
 
 ### Chinese providers (via OpenCode)
 
@@ -266,7 +269,8 @@ A proof run (MCP/HTTP `check_only`) tells the **worker** not to edit files. No f
 | 401 on a run | Key missing in the **serve** environment. Desktop login does not help a LaunchAgent unless `auth.json` or `shadow.env` is sourced. |
 | Ollama / spark connection refused | Local server down. Doctor: URL missing from `opencode.json`. |
 | Cursor / Claude fail over SSH | Keychain locked. Run doctor and serve in the desktop session. |
-| Gemini `auth` warn / `GEMINI_API_KEY unset` | Run `gemini` (Login with Google) or set `GEMINI_API_KEY` in the serve environment / `shadow.env`. Doctor reports set/unset only, never the value. |
+| Gemini `auth` warn / `GEMINI_API_KEY unset` | Legacy `kind = gemini`. Run `gemini` (Login with Google) or set `GEMINI_API_KEY` in the serve environment / `shadow.env`. Doctor reports set/unset only, never the value. |
+| Antigravity `auth` warn | Run `agy` and finish the Google URL prompt. Doctor does not read the keyring and does not print secrets. API-key mode needs `modelProvider: gemini` plus `GEMINI_API_KEY`. |
 | `atr submit` does nothing | `atr serve` (or the user service) not running. `/status`. |
 | Task `held` | An `after:` dependency failed or is gone. `atr retry <key>` clears the hold. |
 | Queued with retry time | Transient provider error (overloaded / 429 / 5xx / 408). Wait, or `atr retry <key>`. `[retry]` in CONFIG.md. |

@@ -47,6 +47,7 @@ impl Harness {
             "codex",
             "opencode",
             "gemini",
+            "agy",
         ] {
             let dest = bin.join(name);
             fs::copy(&script, &dest).unwrap();
@@ -410,6 +411,19 @@ resume_flag = "--session"
 model_flag = "--model"
 prompt_mode = "stdin"
 cwd_flag = "--dir"
+config_overrides = []
+reported_usage = "none"
+"#,
+        ),
+        "agy" => (
+            "agy",
+            "agy",
+            "1.5.17",
+            r#"args = ["--output-format", "stream-json", "--input-format", "stream-json", "--dangerously-skip-permissions"]
+resume_flag = "--conversation"
+model_flag = "--model"
+prompt_mode = "stdin"
+cwd_flag = ""
 config_overrides = []
 reported_usage = "none"
 "#,

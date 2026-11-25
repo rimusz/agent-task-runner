@@ -107,7 +107,8 @@ detected and signed in) plus those OpenCode picks.
 | Grok Build | `grok` | `grok` |
 | Cursor CLI | `cursor-agent` | `cursor` |
 | Codex | `codex` | `codex` |
-| Gemini CLI | `gemini` | `gemini` |
+| Antigravity CLI | `agy` | `agy` |
+| Gemini CLI (legacy) | `gemini` | `gemini` |
 | OpenCode | `opencode` | `opencode` |
 
 OpenCode covers Ollama and the Chinese providers (Kimi/Moonshot, Qwen/DashScope,
@@ -132,7 +133,8 @@ atr tasks smoke
 | Grok Build | `grok` | `atr providers add grok --kind grok` |
 | Cursor CLI | Cursor app (keychain) | `atr providers add cursor --kind cursor` |
 | Codex | `codex login` | `atr providers add codex --kind codex` |
-| Gemini CLI | `gemini` (Login with Google) or `GEMINI_API_KEY` | `atr providers add gemini --kind gemini` |
+| Antigravity CLI | `agy` (Google sign-in; SSH prints a URL) | `atr providers add agy --kind agy` |
+| Gemini CLI (legacy) | `gemini` (Login with Google) or `GEMINI_API_KEY` | `atr providers add gemini --kind gemini` |
 
 ### OpenCode (any provider/model)
 

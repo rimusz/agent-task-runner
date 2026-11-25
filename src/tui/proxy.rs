@@ -124,6 +124,20 @@ pub(crate) const GEMINI_MODELS: &[&str] = &[
 /// full [`GEMINI_MODELS`] ids (`gemini-…`).
 pub(crate) const GEMINI_ALIASES: &[&str] = &["auto", "pro", "flash", "flash-lite"];
 
+/// Antigravity `agy models` slugs from the headless docs example.
+/// `agy models` needs a signed-in session, so the picker seeds these
+/// instead of spawning the CLI.
+/// https://antigravity.google/docs/cli/headless
+pub(crate) const AGY_MODELS: &[&str] = &[
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-high",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-high",
+    "gemini-4-argon-medium",
+    "gemini-4-carbon-medium",
+    "gemini-4-neon-medium",
+];
+
 /// Last-resort Codex ids when `~/.codex/models_cache.json` (and the
 /// picker catalog) are missing. `codex models` is a TUI — never spawn it.
 pub(crate) const CODEX_ALIASES: &[&str] = &[
@@ -266,6 +280,11 @@ pub(crate) fn collect_models(
             push((*id).to_string(), "catalog");
         }
     }
+    if kind == "agy" {
+        for id in AGY_MODELS {
+            push((*id).to_string(), "catalog");
+        }
+    }
     if kind == "codex" {
         let slugs = codex_catalog_slugs();
         if slugs.is_empty() {
@@ -339,6 +358,7 @@ fn kind_seed_models(kind: &str) -> &'static [&'static str] {
         "claude" => CLAUDE_MODELS,
         "codex" => CODEX_ALIASES,
         "gemini" => GEMINI_MODELS,
+        "agy" => AGY_MODELS,
         _ => &[],
     }
 }

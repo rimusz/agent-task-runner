@@ -117,6 +117,9 @@ pub fn build_command_opts(
             system_prompt,
         );
     }
+    if p.kind == "agy" {
+        return build_agy(p, worktree, prompt, session);
+    }
 
     let mut args = p.args.clone();
     if !p.model.is_empty() && !p.model_flag.is_empty() {
@@ -199,8 +202,61 @@ pub fn apply_dir_confinement(p: &Provider, spec: &mut CommandSpec, dir: &Path) {
             spec.args.push("--include-directories".into());
             spec.args.push(dir.display().to_string());
         }
+        // https://antigravity.google/docs/cli/reference/ (`--add-dir`, repeatable)
+        "agy" if !spec.args.iter().any(|a| a == "--add-dir") => {
+            spec.args.push("--add-dir".into());
+            spec.args.push(dir.display().to_string());
+        }
         _ => {}
     }
+}
+
+/// Antigravity CLI headless turn.
+///
+/// `--input-format stream-json` reads prompts only from stdin. A `-p` argument
+/// is dropped. One `user` event is one turn.
+/// https://antigravity.google/docs/cli/headless
+fn build_agy(
+    p: &Provider,
+    worktree: &Path,
+    prompt: &str,
+    session: Option<&str>,
+) -> Result<CommandSpec> {
+    let mut args = p.args.clone();
+    if !args.iter().any(|a| a == "--output-format") {
+        args.push("--output-format".into());
+        args.push("stream-json".into());
+    }
+    if !args.iter().any(|a| a == "--input-format") {
+        args.push("--input-format".into());
+        args.push("stream-json".into());
+    }
+    if !p.model.is_empty() && !p.model_flag.is_empty() {
+        args.push(p.model_flag.clone());
+        args.push(p.model.clone());
+    }
+    if let Some(sid) = session.filter(|s| !s.is_empty()) {
+        let flag = if p.resume_flag.is_empty() {
+            "--conversation"
+        } else {
+            p.resume_flag.as_str()
+        };
+        args.push(flag.into());
+        args.push(sid.to_string());
+    }
+    args.extend(p.extra_args.iter().cloned());
+    let stdin_text = serde_json::json!({
+        "event": "user",
+        "message": { "content": prompt }
+    })
+    .to_string();
+    Ok(CommandSpec {
+        program: p.cli.clone(),
+        args,
+        cwd: worktree.to_path_buf(),
+        stdin_text: Some(stdin_text),
+        env: Vec::new(),
+    })
 }
 
 /// codex-cli config key that replaces the model's base instructions.
@@ -595,6 +651,11 @@ pub fn parse_blob(kind: &str, text: &str) -> Vec<ParsedEvent> {
 }
 
 pub fn parse_value(kind: &str, value: &Value) -> Option<ParsedEvent> {
+    if kind == "agy" {
+        if let Some(ev) = parse_agy_event(value) {
+            return Some(ev);
+        }
+    }
     if let Some(id) = session_id(value) {
         if looks_like_usage(value) || is_error_event(value) || type_is(value, "error") {
             // fall through; session is also applied by the caller
@@ -681,6 +742,52 @@ pub fn parse_value(kind: &str, value: &Value) -> Option<ParsedEvent> {
         return Some(ParsedEvent::Heartbeat);
     }
     None
+}
+
+/// Antigravity stream-json: `event` is `init`, `step_update`, or `result`.
+/// Per-step usage is not stored (the terminal `result.usage` is the turn total).
+/// https://antigravity.google/docs/cli/headless
+fn parse_agy_event(value: &Value) -> Option<ParsedEvent> {
+    let event = value.get("event").and_then(|v| v.as_str())?;
+    match event {
+        "init" => Some(match session_id(value) {
+            Some(id) => ParsedEvent::Session(id),
+            None => ParsedEvent::Heartbeat,
+        }),
+        "step_update" | "user" => Some(ParsedEvent::Heartbeat),
+        "result" => {
+            let inner = value.get("result").unwrap_or(value);
+            Some(agy_terminal(inner))
+        }
+        _ => None,
+    }
+}
+
+fn agy_terminal(value: &Value) -> ParsedEvent {
+    let status = value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("SUCCESS");
+    let failed = !status.eq_ignore_ascii_case("SUCCESS");
+    if failed && value.get("usage").is_none() {
+        let msg = value
+            .get("error")
+            .map(value_to_string)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| status.to_string());
+        return ParsedEvent::Failed(msg);
+    }
+    let usage = extract_usage("agy", value);
+    let result_text = value
+        .get("response")
+        .or_else(|| value.get("error"))
+        .map(value_to_string);
+    ParsedEvent::Usage {
+        usage,
+        raw: value.clone(),
+        result_text,
+        is_error: failed || value.get("error").is_some_and(|e| !e.is_null()),
+    }
 }
 
 fn type_is(value: &Value, want: &str) -> bool {
@@ -819,6 +926,7 @@ pub fn session_id(value: &Value) -> Option<String> {
         "threadId",
         "chatId",
         "chat_id",
+        "conversation_id",
     ] {
         if let Some(s) = value.get(key).and_then(|v| v.as_str()) {
             if !s.is_empty() {
@@ -902,6 +1010,7 @@ pub fn extract_usage(kind: &str, value: &Value) -> UsageNumbers {
                 "cache_read_input_tokens",
                 "cacheReadTokens",
                 "cached_input_tokens",
+                "cache_read_tokens",
                 "cache_read",
             ],
         ));
@@ -933,7 +1042,9 @@ pub fn extract_usage(kind: &str, value: &Value) -> UsageNumbers {
     // already includes cached tokens (and cache_write). Store uncached so
     // totals match Claude/Grok/Cursor. Codex hit = cache_read / original
     // input (= input + cache_read after this subtract); do not add write.
-    if kind == "codex" {
+    // Codex and Antigravity report input that already includes cache reads.
+    // https://antigravity.google/docs/cli/headless (usage.input_tokens / cache_read_tokens)
+    if kind == "codex" || kind == "agy" {
         input = input.saturating_sub(cache_read);
     }
     UsageNumbers {
@@ -1408,12 +1519,16 @@ pub(crate) mod tests {
             degraded_after_stall: Duration::from_secs(2),
             heartbeat_timeout: Duration::from_secs(1),
             run_timeout: Duration::from_secs(1),
-            resume_flag: "--resume".into(),
+            resume_flag: if kind == "agy" {
+                "--conversation".into()
+            } else {
+                "--resume".into()
+            },
             session_id_flag: String::new(),
             cwd_flag: String::new(),
             permission_mode: String::new(),
             permission_mode_flag: "--permission-mode".into(),
-            prompt_mode: if kind == "gemini" {
+            prompt_mode: if kind == "gemini" || kind == "agy" {
                 "stdin".into()
             } else {
                 "arg".into()
@@ -1430,6 +1545,14 @@ pub(crate) mod tests {
                     "--skip-trust".into(),
                     "--approval-mode".into(),
                     "yolo".into(),
+                ]
+            } else if kind == "agy" {
+                vec![
+                    "--output-format".into(),
+                    "stream-json".into(),
+                    "--input-format".into(),
+                    "stream-json".into(),
+                    "--dangerously-skip-permissions".into(),
                 ]
             } else {
                 vec!["-p".into()]
@@ -1747,6 +1870,78 @@ pub(crate) mod tests {
         assert!(!spec.args.iter().any(|a| a.contains("SECRET-PROMPT")));
         assert_eq!(spec.stdin_text.as_deref(), Some("SECRET-PROMPT"));
         assert_eq!(spec.cwd, PathBuf::from("/wt"));
+    }
+
+    #[test]
+    fn agy_stream_json_and_stdin_user_event() {
+        let init = r#"{"event":"init","conversation_id":"c3b66b04-872b-4fbe-a3a4-058a026ef20a","init":{"cwd":"/wt","permission_mode":"always-proceed"}}"#;
+        match parse_line("agy", init).unwrap() {
+            ParsedEvent::Session(id) => {
+                assert_eq!(id, "c3b66b04-872b-4fbe-a3a4-058a026ef20a")
+            }
+            other => panic!("{other:?}"),
+        }
+        let step = r#"{"event":"step_update","step_update":{"conversation_id":"c3b66b04-872b-4fbe-a3a4-058a026ef20a","state":"DONE","step_type":"agent_response","usage":{"input_tokens":10,"output_tokens":2,"cache_read_tokens":1,"total_tokens":12}}}"#;
+        assert_eq!(parse_line("agy", step), Some(ParsedEvent::Heartbeat));
+        let result = r#"{"event":"result","result":{"conversation_id":"c3b66b04-872b-4fbe-a3a4-058a026ef20a","status":"SUCCESS","response":"pong\n","usage":{"input_tokens":10415,"output_tokens":657,"thinking_tokens":616,"cache_read_tokens":8113,"total_tokens":11072}}}"#;
+        match parse_line("agy", result).unwrap() {
+            ParsedEvent::Usage {
+                usage,
+                result_text,
+                is_error,
+                ..
+            } => {
+                assert_eq!(usage.input, 10415 - 8113);
+                assert_eq!(usage.output, 657);
+                assert_eq!(usage.cache_read, 8113);
+                assert!(usage.cost_usd.is_none());
+                assert!(!is_error);
+                assert_eq!(result_text.as_deref(), Some("pong\n"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let err = r#"{"event":"result","result":{"conversation_id":"x","status":"ERROR","error":"authentication required"}}"#;
+        match parse_line("agy", err).unwrap() {
+            ParsedEvent::Failed(m) => assert!(m.contains("authentication required"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+
+        let p = stub("agy");
+        let spec = build_command(
+            &p,
+            Path::new("/wt"),
+            Path::new("/wt/.atr/prompt.md"),
+            "SECRET-PROMPT",
+            Some("conv-1"),
+            false,
+        );
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|w| w == ["--output-format", "stream-json"]));
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|w| w == ["--input-format", "stream-json"]));
+        assert!(spec
+            .args
+            .iter()
+            .any(|a| a == "--dangerously-skip-permissions"));
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|w| w == ["--conversation", "conv-1"]));
+        assert!(!spec.args.iter().any(|a| a == "-p" || a.contains("SECRET")));
+        let stdin: serde_json::Value =
+            serde_json::from_str(spec.stdin_text.as_deref().unwrap()).unwrap();
+        assert_eq!(stdin["event"], "user");
+        assert_eq!(stdin["message"]["content"], "SECRET-PROMPT");
+        let mut confined = spec.clone();
+        apply_dir_confinement(&p, &mut confined, Path::new("/notes"));
+        assert!(confined
+            .args
+            .windows(2)
+            .any(|w| w == ["--add-dir", "/notes"]));
     }
 
     #[test]

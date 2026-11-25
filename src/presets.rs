@@ -127,6 +127,9 @@ pub fn auth_login_hint(kind: &str) -> &'static str {
         "cursor" => "sign in to the Cursor app",
         "codex" => "codex login",
         "gemini" => "gemini",
+        // Interactive `agy` over SSH prints a Google authorization URL.
+        // https://antigravity.google/docs/cli/install/
+        "agy" => "agy",
         _ => "log in with that CLI; atr does not store API keys",
     }
 }
