@@ -120,12 +120,27 @@ refused before spawn. Passing the path made Grok treat the path string as
 the rules, so the system prompt never arrived. A `system_prompt_flag` other
 than `--rules` or `--append-system-prompt` is still passed the path.
 
-**Gemini CLI.** For `kind = "gemini"` providers atr runs
-`gemini --output-format stream-json --skip-trust --approval-mode yolo` with
-the prompt on stdin (non-TTY headless). `--prompt`/`-p` takes a string, so
+**Antigravity CLI (`agy`).** For `kind = "agy"` atr runs
+`agy --output-format stream-json --input-format stream-json --dangerously-skip-permissions`
+with one stdin line `{"event":"user","message":{"content":...}}`. `-p` is not
+used (streaming input drops it). Resume is `--conversation <id>` from
+`conversation_id`. `--model` takes an `agy models` slug. Token usage comes
+from the terminal `result.usage` (`input_tokens` minus `cache_read_tokens`).
+There is no dollar cost. Plan quota is unknown (`/usage` is interactive).
+Sign in by running `agy` (SSH prints a Google URL). Doctor does not start
+that flow. API-key mode is `modelProvider: "gemini"` in
+`~/.gemini/antigravity-cli/settings.json` plus `GEMINI_API_KEY` (set/unset
+only). ADC is `AGY_ADC_AUTH=true`. Docs:
+<https://antigravity.google/docs/cli/headless>,
+<https://antigravity.google/docs/cli/install/>.
+
+**Gemini CLI (legacy).** `kind = "gemini"` stays for Code Assist and paid API
+keys. atr runs `gemini --output-format stream-json --skip-trust --approval-mode yolo`
+with the prompt on stdin (non-TTY headless). `--prompt`/`-p` takes a string, so
 it is not used as Claude's boolean print mode. Empty `model` leaves Gemini's
 `auto`. Auth is Login with Google (`~/.gemini/oauth_creds.json`) or
-`GEMINI_API_KEY` (doctor reports set/unset only, never the value). There is
+`GEMINI_API_KEY` (doctor reports set/unset only, never the value). Personal
+Google accounts stopped on 18 June 2026; use `kind = "agy"` for those. There is
 no documented system-prompt file flag; the prefix stays in the prompt.
 
 OpenCode providers only: `allow_shell` (default `false`). When false, atr

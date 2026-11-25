@@ -442,6 +442,9 @@ pub async fn run_with_listen(
         if p.kind == "gemini" {
             gemini_auth_check(&mut checks, p, config_path);
         }
+        if p.kind == "agy" {
+            agy_auth_check(&mut checks, p, config_path);
+        }
     }
 
     let legacy: Vec<&str> = cfg
@@ -672,6 +675,80 @@ fn gemini_auth_check(checks: &mut Vec<Check>, p: &crate::config::Provider, confi
             "not signed in".into(),
             Some(crate::presets::auth_login_hint("gemini").into()),
         );
+    }
+}
+
+/// Antigravity auth without starting `agy` (that prints a Google sign-in URL).
+/// API-key mode is `modelProvider: gemini` plus `GEMINI_API_KEY` (set/unset only).
+/// ADC is `AGY_ADC_AUTH=true`. Account tokens stay in the OS keyring.
+/// https://antigravity.google/docs/cli/install/
+/// https://antigravity.google/docs/install
+fn agy_auth_check(checks: &mut Vec<Check>, p: &crate::config::Provider, config_path: &Path) {
+    let shadow = crate::telegram_setup::shadow_env_path(config_path);
+    let key_set = crate::detect::gemini_api_key_set()
+        || crate::telegram_setup::read_shadow_env_var(&shadow, "GEMINI_API_KEY").is_some();
+    let adc = agy_flag_set("AGY_ADC_AUTH")
+        || crate::telegram_setup::read_shadow_env_var(&shadow, "AGY_ADC_AUTH")
+            .is_some_and(|v| agy_truthy(&v));
+    let home = crate::detect::current_env().home;
+    let settings = home.join(".gemini/antigravity-cli/settings.json");
+    let model_provider = agy_model_provider(&settings);
+    if model_provider.as_deref() == Some("gemini") && key_set {
+        push(
+            checks,
+            &format!("auth {}", p.name),
+            Status::Ok,
+            "Gemini API key mode".into(),
+            None,
+        );
+        return;
+    }
+    if model_provider.as_deref() == Some("gemini") && !key_set {
+        push(
+            checks,
+            &format!("auth {}", p.name),
+            Status::Warn,
+            "modelProvider is gemini but GEMINI_API_KEY is unset".into(),
+            Some("export GEMINI_API_KEY or remove modelProvider".into()),
+        );
+        return;
+    }
+    if adc {
+        push(
+            checks,
+            &format!("auth {}", p.name),
+            Status::Ok,
+            "ADC (AGY_ADC_AUTH)".into(),
+            None,
+        );
+        return;
+    }
+    push(
+        checks,
+        &format!("auth {}", p.name),
+        Status::Warn,
+        "Google sign-in not verified (keyring is not read)".into(),
+        Some(crate::presets::auth_login_hint("agy").into()),
+    );
+}
+
+fn agy_flag_set(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|v| agy_truthy(&v))
+}
+
+fn agy_truthy(v: &str) -> bool {
+    matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+}
+
+/// `modelProvider` only. The rest of settings.json is not logged.
+fn agy_model_provider(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let p = v.get("modelProvider")?.as_str()?.trim().to_string();
+    if p.is_empty() {
+        None
+    } else {
+        Some(p)
     }
 }
 

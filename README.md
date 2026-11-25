@@ -2,7 +2,7 @@
 
 **Your AI subscriptions are idle 16 hours a day. atr turns them into a 24/7 dev team.**
 
-- Hand it a task (a prompt, plus a folder or repo if you like) and it runs it with Claude Code, Grok Build, Cursor, Codex, Gemini CLI or OpenCode.
+- Hand it a task (a prompt, plus a folder or repo if you like) and it runs it with Claude Code, Grok Build, Cursor, Codex, Antigravity CLI (`agy`), Gemini CLI (legacy) or OpenCode.
 - When one provider hits its usage limit, it moves on to the next one in your list. A run wall-clock cap is not a usage limit: a pinned provider stays put unless you allow overflow.
 - Retries transient provider errors (overloaded, 429, 5xx) with backoff, waits on `after:` task dependencies, and keeps new work queued when the host CPU or memory is busy.
 - Takes work from the terminal, GitHub issues, other agents (MCP), Telegram, HTTP or a drop folder.
@@ -70,7 +70,8 @@ Later, `atr upgrade` updates it in place, refreshes the atr skill so it matches 
 claude                 # Claude Code
 grok                   # Grok Build
 codex login            # Codex
-gemini                 # Gemini CLI (Login with Google), or set GEMINI_API_KEY
+agy                    # Antigravity CLI (Google sign-in). Over SSH it prints a URL.
+gemini                 # Legacy Gemini CLI (Code Assist / paid API key), or GEMINI_API_KEY
 opencode auth login    # OpenCode
 # Cursor: sign in to the Cursor app (on a Mac, at the desktop, not over SSH)
 ```
@@ -201,7 +202,7 @@ Settings: [docs/CONFIG.md](docs/CONFIG.md#telegram). Provider choice: [docs/CONF
 
 Claude Code, Grok Build, Cursor, Codex, Gemini CLI and OpenCode. OpenCode also opens the door to DeepSeek, Kimi, Qwen, local Ollama, self-hosted vLLM and more. See [docs/USAGE.md](docs/USAGE.md#providers-and-opencode).
 
-Gemini CLI: `npm install -g @google/gemini-cli` or `brew install gemini-cli`, then sign in with `gemini` (Login with Google) or set `GEMINI_API_KEY`. Details: [docs/INSTALL.md](docs/INSTALL.md#signing-in-to-the-coding-clis).
+Antigravity CLI (`agy`): `curl -fsSL https://antigravity.google/cli/install.sh | bash`, then run `agy` once to sign in (over SSH it prints a URL). `kind = "gemini"` is legacy (Code Assist or a paid API key): `brew install gemini-cli` or `npm install -g @google/gemini-cli`. Details: [docs/INSTALL.md](docs/INSTALL.md#signing-in-to-the-coding-clis).
 
 Each CLI gets atr's instructions in its own system-prompt slot. For Codex that is `-c model_instructions_file`, which replaces Codex's built-in base prompt with atr's (details in [docs/CONFIG.md](docs/CONFIG.md#cache); see also [Prompt caching](#prompt-caching-and-token-savings)). For Grok Build, `--rules` is the rules text: atr reads `<worktree>/.atr/system.md` and passes those bytes as the argument (Grok 1.0.89 has no rules-file flag).
 

@@ -326,11 +326,19 @@ enabled = true
 # config_overrides = ["model_provider=\"openai\""]
 
 # [[provider]]
+# name = "agy"
+# kind = "agy"
+# enabled = true
+# # Antigravity CLI: stream-json in and out, prompt is a stdin user event,
+# # --dangerously-skip-permissions, resume --conversation. Sign in with `agy`.
+
+# [[provider]]
 # name = "gemini"
 # kind = "gemini"
 # enabled = true
-# # Gemini CLI (`gemini`): --output-format stream-json, --approval-mode yolo,
-# # --skip-trust, prompt on stdin (non-TTY headless). Model empty = CLI `auto`.
+# # Legacy Gemini CLI (`gemini`): Code Assist / paid key. Personal Google
+# # accounts should use kind = "agy". --output-format stream-json,
+# # --approval-mode yolo, --skip-trust, prompt on stdin.
 
 # OpenCode spark (atr providers add spark):
 # name = "spark"

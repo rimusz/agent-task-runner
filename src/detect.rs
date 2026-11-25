@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const SUBSCRIPTION_ORDER: &[&str] = &["claude", "grok", "cursor", "codex", "gemini"];
+const SUBSCRIPTION_ORDER: &[&str] = &["claude", "grok", "cursor", "codex", "gemini", "agy"];
 
 const HOME_BIN_DIRS: &[&str] = &[
     ".local/bin",
@@ -107,6 +107,17 @@ pub const SPECS: &[CliSpec] = &[
         auth_args: &[],
         login: "gemini",
         vendor_note: None,
+    },
+    CliSpec {
+        id: "agy",
+        kind: Some("agy"),
+        binaries: &["agy"],
+        version_args: &["--version"],
+        // No `agy auth status`. `agy` itself starts sign-in. Do not run it.
+        // https://antigravity.google/docs/cli/install/
+        auth_args: &[],
+        login: "agy",
+        vendor_note: Some("legacy Gemini CLI kind is gemini; personal accounts use agy"),
     },
     CliSpec {
         id: "opencode",
@@ -297,6 +308,8 @@ fn find_spec(spec: &CliSpec, env: &DetectEnv) -> Option<FoundCli> {
                 probe_grok_auth(&path, env)
             } else if spec.id == "gemini" {
                 probe_gemini_auth(env)
+            } else if spec.id == "agy" {
+                probe_agy_auth(env)
             } else {
                 let mut auth = probe_auth(&path, spec.auth_args);
                 if auth == Auth::Unknown {
@@ -385,6 +398,24 @@ fn env_flag_set(name: &str) -> bool {
         }
     }
     std::env::var_os(name).is_some_and(|v| !v.is_empty())
+}
+
+/// API-key mode or ADC only. Keyring sign-in is not probed (would launch `agy`).
+fn probe_agy_auth(env: &DetectEnv) -> Auth {
+    if env_flag_set("GEMINI_API_KEY") {
+        let settings = env.home.join(".gemini/antigravity-cli/settings.json");
+        if let Ok(text) = std::fs::read_to_string(&settings) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                if v.get("modelProvider").and_then(|p| p.as_str()) == Some("gemini") {
+                    return Auth::Yes;
+                }
+            }
+        }
+    }
+    if env_flag_set("AGY_ADC_AUTH") {
+        return Auth::Yes;
+    }
+    Auth::Unknown
 }
 
 fn probe_gemini_auth(env: &DetectEnv) -> Auth {

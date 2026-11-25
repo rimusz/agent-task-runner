@@ -201,7 +201,8 @@ config points at a local custom-model gateway.
 | Cursor CLI | `cursor-agent -p --force --output-format stream-json` | `--resume <chatId>` | Needs the desktop session (login keychain). |
 | Codex CLI | `codex exec --json -C <wt> -s workspace-write -m <model>` | `codex exec resume <uuid>` | ChatGPT sign-in. Example override: `-c model_provider="openai"`. |
 | OpenCode | file prompt + `opencode` | session id | Preset keys stay in `shadow.env`. |
-| Gemini CLI | `gemini --output-format stream-json --skip-trust --approval-mode yolo` (prompt on stdin) | `--resume <sid>` | `--prompt`/`-p` is a string flag, not Claude's boolean print mode. `--yolo` is deprecated. |
+| Antigravity CLI | `agy --output-format stream-json --input-format stream-json --dangerously-skip-permissions` (stdin `user` event) | `--conversation <id>` | Personal Google accounts. https://antigravity.google/docs/cli/headless |
+| Gemini CLI (legacy) | `gemini --output-format stream-json --skip-trust --approval-mode yolo` (prompt on stdin) | `--resume <sid>` | `--prompt`/`-p` is a string flag, not Claude's boolean print mode. `--yolo` is deprecated. |
 
 Selection: walk the list. Skip a provider that is disabled, in cooldown, or
 full (`max_parallel`). The first match takes the task. Extra parallel tasks
