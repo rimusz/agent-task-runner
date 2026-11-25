@@ -131,7 +131,7 @@ pub fn finalize_with_text(shared: &Shared, key: &str, text: Option<&str>) -> Res
         OutputKind::Text => Ok(()),
         OutputKind::Webhook => post_webhook(&task.output_spec, &payload),
         OutputKind::Patch => write_patch(&task, workspace, &payload),
-        OutputKind::Branch => push_branch(&task),
+        OutputKind::Branch => push_branch(shared, &task),
         OutputKind::PullRequest => open_pr(shared, &task, &payload),
         OutputKind::IssueComment => issue_comment(shared, &task, &payload),
         OutputKind::Triage => record_triage(shared, &task, &payload),
@@ -526,12 +526,51 @@ fn patch_path(task: &Task) -> PathBuf {
     }
 }
 
-fn push_branch(task: &Task) -> Result<()> {
+/// Scratch cleanup (same scope as a PR) then `commit_pending`. A clean tree
+/// makes no commit. Commit errors are logged; delivery still tries to push.
+fn commit_for_delivery(shared: &Shared, task: &Task, wt: &Path) {
+    let cfg = shared.config.read().unwrap().clone();
+    if cfg
+        .scratch
+        .applies_to(task.provider.as_deref().and_then(|p| cfg.provider(p)))
+    {
+        let c = crate::scratch::clean_for_task(&cfg, &shared.db, &task.key, &task.title, wt);
+        if !c.dropped.is_empty() {
+            tracing::info!(task = %task.key, "dropped scratch before commit: {}", c.dropped.join(", "));
+        }
+        if !c.reverted.is_empty() {
+            tracing::info!(task = %task.key, "reverted tracked docs before commit: {}", c.reverted.join(", "));
+        }
+    }
+    if let Err(e) = commit_pending(wt, task) {
+        tracing::warn!(task = %task.key, "commit before push: {e:#}");
+    }
+}
+
+/// True when HEAD already matches its upstream (a push would only report
+/// "Everything up-to-date"). No upstream means the branch still needs a push.
+fn nothing_to_push(wt: &Path) -> bool {
+    if git_out(wt, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_none() {
+        return false;
+    }
+    git_out(wt, &["rev-list", "--count", "@{upstream}..HEAD"]).is_some_and(|n| n.trim() == "0")
+}
+
+fn push_branch(shared: &Shared, task: &Task) -> Result<()> {
     let Some(wt) = task.worktree.as_deref().map(Path::new) else {
         anyhow::bail!("no worktree to push");
     };
     if !crate::worktree::is_git_repo(wt) {
         anyhow::bail!("branch output needs a git worktree");
+    }
+    commit_for_delivery(shared, task, wt);
+    push_head(task, wt)
+}
+
+fn push_head(task: &Task, wt: &Path) -> Result<()> {
+    if nothing_to_push(wt) {
+        tracing::info!(task = %task.key, "nothing to push");
+        return Ok(());
     }
     let status = crate::util::git_command()
         .args(["push", "-u", "origin", "HEAD"])
@@ -555,28 +594,13 @@ fn open_pr(shared: &Shared, task: &Task, payload: &Value) -> Result<()> {
     let Some(wt) = task.worktree.as_deref().map(Path::new) else {
         return Ok(());
     };
-    // Same scope as the post-run cleanup (`[scratch] scope`).
-    if cfg
-        .scratch
-        .applies_to(task.provider.as_deref().and_then(|p| cfg.provider(p)))
-    {
-        let c = crate::scratch::clean_for_task(&cfg, &shared.db, &task.key, &task.title, wt);
-        if !c.dropped.is_empty() {
-            tracing::info!(task = %task.key, "dropped scratch before commit: {}", c.dropped.join(", "));
-        }
-        if !c.reverted.is_empty() {
-            tracing::info!(task = %task.key, "reverted tracked docs before commit: {}", c.reverted.join(", "));
-        }
-    }
-    if let Err(e) = commit_pending(wt, task) {
-        tracing::warn!(task = %task.key, "commit before PR: {e:#}");
-    }
+    commit_for_delivery(shared, task, wt);
     let base = base_branch(&cfg, task);
     if commits_ahead(wt, &base) == 0 {
         tracing::warn!(task = %task.key, "no commits past {base}; not opening a PR");
         return Ok(());
     }
-    let _ = push_branch(task);
+    let _ = push_head(task, wt);
     let title = if task.title.trim().is_empty() {
         task.key.clone()
     } else {
@@ -1123,9 +1147,93 @@ cli = "/bin/true"
             .output()
             .unwrap();
         assert!(String::from_utf8_lossy(&out.stdout).contains("main"));
+        let log = Command::new("git")
+            .args(["log", "-1", "--format=%s%n%b"])
+            .current_dir(&e.repo)
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&log.stdout);
+        assert!(log.contains("Fix the thing"), "{log}");
+        assert!(log.contains("atr task o-br"), "{log}");
+        let readme = Command::new("git")
+            .args([
+                "--git-dir",
+                &remote.display().to_string(),
+                "show",
+                "main:README.md",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&readme.stdout).contains("edited"),
+            "pushed commit is missing the worktree edit"
+        );
+        let n = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&e.repo)
+            .output()
+            .unwrap();
+        let n = String::from_utf8_lossy(&n.stdout).trim().to_string();
+        // Already committed and pushed: a second delivery must not add an empty commit.
+        let t = e.shared.db.get_task("o-br").unwrap().unwrap();
+        push_branch(&e.shared, &t).unwrap();
+        let n2 = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&e.repo)
+            .output()
+            .unwrap();
+        assert_eq!(n, String::from_utf8_lossy(&n2.stdout).trim());
         // No worktree: error, not a panic.
         let t = Task::default();
-        assert!(push_branch(&t).is_err());
+        assert!(push_branch(&e.shared, &t).is_err());
+    }
+
+    #[test]
+    fn branch_output_clean_tree_does_not_empty_commit() {
+        let e = env();
+        let remote = e.dir.path().join("remote.git");
+        assert!(Command::new("git")
+            .args(["init", "-q", "--bare", &remote.display().to_string()])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["remote", "add", "origin", &remote.display().to_string()])
+            .current_dir(&e.repo)
+            .status()
+            .unwrap()
+            .success());
+        task(&e, "o-clean", "branch", "", "cli", "x");
+        // `task` dirties README. Put the tree back to the initial commit.
+        std::fs::write(e.repo.join("README.md"), "test repo\n").unwrap();
+        assert!(!has_uncommitted(&e.repo));
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&e.repo)
+            .output()
+            .unwrap();
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        finalize(&e.shared, "o-clean").unwrap();
+        let head2 = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&e.repo)
+            .output()
+            .unwrap();
+        assert_eq!(head, String::from_utf8_lossy(&head2.stdout).trim());
+        let remote_head = Command::new("git")
+            .args([
+                "--git-dir",
+                &remote.display().to_string(),
+                "rev-parse",
+                "main",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            head,
+            String::from_utf8_lossy(&remote_head.stdout).trim(),
+            "clean tree should push the existing commit, not a new one"
+        );
     }
 
     #[test]

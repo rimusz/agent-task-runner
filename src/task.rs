@@ -403,7 +403,9 @@ JSON suggestion for a maintainer to approve.\n"
         }
         OutputKind::Branch => {
             parts.push(
-                "## Output\nCommit on the task branch. atr will push it. Do not open a pull request.\n"
+                "## Output\nEdit the files in the Worktree. atr commits your changes and pushes \
+the branch. Do not run `git commit` or `git push`, and do not open a pull request. \
+End with a short summary of what you changed and why.\n"
                     .into(),
             );
         }

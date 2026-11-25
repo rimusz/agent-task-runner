@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- `--output branch` commits uncommitted worktree edits before
+  `git push` (same message and author rules as `--output pr`). A clean
+  tree does not get an empty commit. When HEAD already matches its
+  upstream, the push is skipped. The branch prompt tells the agent that
+  atr commits and pushes, and not to run `git commit` or `git push`.
+
 - `atr doctor` no longer caps `tincan ping` at 5s. The ping waits at least
   20s, or `notify.tincan.timeout` when that is longer (real pongs take
   about 10–12s, so the 5s cap warned on a healthy relay). A ping that
