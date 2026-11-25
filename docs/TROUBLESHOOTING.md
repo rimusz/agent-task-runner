@@ -42,7 +42,7 @@ broken. Each non-ok line prints a `fix:` hint.
 | `telegram`, `telegram token`, `telegram chat` | config incomplete | token set but unusable / no chat | `atr telegram setup`, then `atr telegram test` |
 | `tincan` | — | enabled but `tincan` binary missing | install Agent Tincan or set `notify.tincan.bin` |
 | `tincan agent` | — | enabled but no `default_agent` / `notify_agent` | set `notify.tincan.default_agent` (e.g. `nixer`) |
-| `tincan ping <agent>` | `tincan ping` failed / timed out | — | `tincan ping <agent>` by hand |
+| `tincan ping <agent>` | `slow`: ping exceeded the doctor budget (at least 20s, or `notify.tincan.timeout` if longer). `failed`: the ping exited non-zero or could not start | — | `tincan ping <agent>` by hand. `slow` is a long pong, not a dead relay |
 | `mcp token`, `mcp http` | — | MCP on but no token | create `~/.config/atr/mcp.token` (0600) |
 | `atr on PATH` | `atr` not on PATH | — | re-run `install.sh` or add `~/.local/bin` to PATH |
 | `probe <name>` (`--probe` only) | replied, but the provider has no resume flag, so follow-ups start fresh | could not start, signed out / limit / error, timed out, no session id in the output, or the resumed turn did not recall the code word | Run the CLI by hand and sign in; a recall FAIL means follow-ups and retries lose context |
@@ -387,7 +387,10 @@ teammate via `tincan ask <agent> --notify`.
   kill is the whole process group, then the process is reaped, so a child
   of `tincan` does not stay running and the CLI does not stay a zombie.
   `atr doctor` pings run off the async worker (self-heal and `/doctor`
-  await doctor).
+  await doctor). Doctor does not use the 5s cap anymore: each ping waits
+  at least 20s, or `notify.tincan.timeout` if that is longer. The warn
+  line says `slow` when that budget elapses and `failed` when `tincan ping`
+  exits non-zero.
 - Duplicate `finished` pings: Telegram reply delivery is Telegram-only;
   Tincan is notified once from the scheduler after output delivery (`pr=`
   included when atr opened a PR).

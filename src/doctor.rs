@@ -1375,25 +1375,58 @@ fn tincan_check(checks: &mut Vec<Check>, cfg: &Config) {
         );
         return;
     }
-    let timeout = tc
-        .timeout
-        .min(std::time::Duration::from_secs(5))
-        .max(std::time::Duration::from_millis(100));
+    // Real mesh pongs take about 10–12s. `notify.tincan.timeout` (default
+    // 10s) is the fire-and-forget budget for `tincan ask`, and the old 5s
+    // cap made doctor warn on a healthy relay. Wait at least 20s, or the
+    // configured timeout when it is longer.
+    let timeout = doctor_tincan_ping_timeout(tc.timeout);
     let scrub = crate::tincan::scrub_keys(cfg);
     let bin = bin.to_string_lossy().into_owned();
     for agent in agents {
-        let name = format!("tincan ping {agent}");
-        match crate::tincan::run_tincan(&bin, &crate::tincan::ping_args(&agent), timeout, &scrub) {
-            Ok(_) => push(checks, &name, Status::Ok, "reachable".into(), None),
-            Err(e) => push(
+        push_tincan_ping(checks, &bin, &agent, timeout, &scrub);
+    }
+}
+
+/// Doctor ping budget. Never shorter than 20s. A longer
+/// `notify.tincan.timeout` is honored so an operator who already raised the
+/// notify budget is not capped below it.
+fn doctor_tincan_ping_timeout(configured: std::time::Duration) -> std::time::Duration {
+    configured.max(std::time::Duration::from_secs(20))
+}
+
+fn push_tincan_ping(
+    checks: &mut Vec<Check>,
+    bin: &str,
+    agent: &str,
+    timeout: std::time::Duration,
+    scrub: &[String],
+) {
+    let name = format!("tincan ping {agent}");
+    match crate::tincan::run_tincan(bin, &crate::tincan::ping_args(agent), timeout, scrub) {
+        Ok(_) => push(checks, &name, Status::Ok, "reachable".into(), None),
+        Err(e) => {
+            let msg = e.to_string();
+            // `run_tincan` says "timed out after …" when the budget elapses,
+            // and "exited …" / "spawn …" when the ping itself failed.
+            let slow = msg.contains("timed out");
+            let kind = if slow { "slow" } else { "failed" };
+            let hint = if slow {
+                let waited = crate::duration::format_duration(timeout);
+                format!(
+                    "tincan ping {agent} was slow (over {waited}); a pong often takes 10–12s. Retry `tincan ping {agent}`, or raise notify.tincan.timeout if it is already above 20s"
+                )
+            } else {
+                format!(
+                    "tincan ping {agent} failed; check Agent Tincan login and that this host can reach {agent}"
+                )
+            };
+            push(
                 checks,
                 &name,
                 Status::Warn,
-                e.to_string(),
-                Some(format!(
-                    "check Agent Tincan login and that this host can reach {agent}"
-                )),
-            ),
+                format!("{kind}: {msg}"),
+                Some(hint),
+            );
         }
     }
 }
@@ -1774,6 +1807,7 @@ default_agent = "nixer"
             .find(|c| c.name == "tincan ping nixer")
             .unwrap();
         assert_eq!(ping.status, Status::Warn, "{}", ping.detail);
+        assert!(ping.detail.starts_with("failed:"), "{}", ping.detail);
         assert!(
             ping.hint
                 .as_deref()
@@ -1781,6 +1815,90 @@ default_agent = "nixer"
                 .contains("Agent Tincan login"),
             "{:?}",
             ping.hint
+        );
+    }
+
+    #[test]
+    fn doctor_tincan_ping_budget_is_at_least_20s() {
+        use std::time::Duration;
+        assert_eq!(
+            doctor_tincan_ping_timeout(Duration::from_secs(10)),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            doctor_tincan_ping_timeout(Duration::from_millis(100)),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            doctor_tincan_ping_timeout(Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn tincan_ping_slow_warns_slow_and_failure_says_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let slow = tmp.path().join("slow-tincan");
+        std::fs::write(&slow, "#!/bin/sh\nsleep 30\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&slow).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&slow, perms).unwrap();
+        }
+        let mut checks = Vec::new();
+        push_tincan_ping(
+            &mut checks,
+            &slow.display().to_string(),
+            "nixer",
+            std::time::Duration::from_millis(200),
+            &[],
+        );
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, Status::Warn);
+        assert!(
+            checks[0].detail.starts_with("slow:"),
+            "{}",
+            checks[0].detail
+        );
+        assert!(
+            checks[0].hint.as_deref().unwrap_or("").contains("slow"),
+            "{:?}",
+            checks[0].hint
+        );
+
+        let bad = tmp.path().join("bad-tincan");
+        std::fs::write(&bad, "#!/bin/sh\nexit 2\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&bad).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bad, perms).unwrap();
+        }
+        let mut checks = Vec::new();
+        push_tincan_ping(
+            &mut checks,
+            &bad.display().to_string(),
+            "nixer",
+            std::time::Duration::from_secs(2),
+            &[],
+        );
+        assert_eq!(checks[0].status, Status::Warn);
+        assert!(
+            checks[0].detail.starts_with("failed:"),
+            "{}",
+            checks[0].detail
+        );
+        assert!(
+            checks[0]
+                .hint
+                .as_deref()
+                .unwrap_or("")
+                .contains("Agent Tincan login"),
+            "{:?}",
+            checks[0].hint
         );
     }
 
