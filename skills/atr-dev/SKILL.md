@@ -20,7 +20,7 @@ atr is a single Rust binary (`atr`, edition 2021, MSRV 1.89) that runs as a long
 | `src/providers.rs`, `providers_edit.rs`, `presets.rs`, `opencode_cfg.rs`, `detect.rs` | provider kinds, presets, CLI detection/versions |
 | `src/scheduler.rs`, `runner.rs`, `task.rs`, `plan.rs`, `review.rs`, `verify.rs`, `worktree.rs`, `handoff.rs` | task lifecycle: plan → run in worktree → review/verify |
 | `src/shadow.rs`, `github.rs`, `github_auth.rs`, `gh_token*.rs` | GitHub shadow mode, labels, gh wrapper, per-owner tokens |
-| `src/telegram*.rs`, `notify.rs`, `tincan.rs` | Telegram bot/assistant, health, alerts, `[notify] command` hook, `[notify.tincan]` Agent Tincan pings |
+| `src/telegram*.rs`, `notify.rs`, `tincan.rs` | Telegram bot/assistant, health, alerts, `[notify] command` hook, `[notify.tincan]` Agent Tincan pings (optional, off by default: `enabled` defaults to false; with it off atr never runs `tincan` and doctor shows `tincan disabled`) |
 | `src/http.rs`, `dashboard.rs`, `dashboard.html`, `mcp.rs` | HTTP API, read-only dashboard (`dashboard.json`), MCP server |
 | `src/doctor.rs`, `service.rs`, `upgrade.rs`, `init.rs`, `skill.rs`, `plugin.rs` | doctor checks, launchd/systemd service, self-upgrade, init, skill install |
 | `src/db.rs`, `usage.rs`, `quota.rs`, `plan_usage.rs`, `gc.rs`, `logrotate.rs` | SQLite state, usage/quota, read-only vendor plan meters, cleanup |

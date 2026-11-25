@@ -194,7 +194,7 @@ Settings: [docs/CONFIG.md](docs/CONFIG.md#telegram). Provider choice: [docs/CONF
 - **Grok Bot operator**: import the [atr Operator](https://x.ai/bot/8N21KO1uz_jDJt3eqELFA) bot template to queue work and watch atr from Grok Bot. A bot needs MCP over HTTP (Tailscale plus a token), not stdio.
 - **Inbox folder**: scripts drop a task file and atr runs it. [More](docs/USAGE.md#hand-work-to-atr)
 - **Telegram**: add tasks, check progress, or ask the [assistant](#telegram-assistant) in an allowed private chat. Optional `[telegram] events` filter. [More](docs/USE-CASES.md#7-control-from-your-phone)
-- **Tincan**: push those same task events to an owning agent (`[notify.tincan]`, `tincan ask <agent> --notify`). [CONFIG](docs/CONFIG.md#tincan-task-pings-notifytincan)
+- **Tincan** (optional, off by default): `[notify.tincan]` `enabled` defaults to `false`. With it off, atr never runs `tincan`, and `atr doctor` shows `tincan disabled`. When on, those same task events go to an owning agent (`tincan ask <agent> --notify`). Install Agent Tincan and join a relay (`tincan join <code> --relay <url>`), then `tincan ping <agent>`. [CONFIG](docs/CONFIG.md#tincan-task-pings-notifytincan)
 - **Terminal TUI**: chat with your coding CLIs in the terminal, with atr as the proxy. [More](#interactive-tui)
 
 ## Providers

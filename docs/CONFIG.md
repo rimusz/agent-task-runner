@@ -708,12 +708,30 @@ for `[selfheal] check`). Telegram still fires too for GitHub alerts. See
 
 ### Tincan task pings (`[notify.tincan]`)
 
-Push the same task-lifecycle events Telegram uses (`src/notify.rs` `Event`)
-to an owning Agent Tincan teammate. Independent of Telegram: both can be on.
+The Tincan sink is optional and off by default. `TincanConfig::default`
+sets `enabled` to `false` (`src/config.rs`). With it off, atr never runs
+`tincan`, and `atr doctor` shows `tincan disabled`.
+
+Turn it on to push the same task-lifecycle events Telegram uses
+(`src/notify.rs` `Event`) to an owning Agent Tincan teammate. Independent
+of Telegram: both can be on.
+
+Prerequisites: Agent Tincan is installed, and this host has joined a relay:
+
+```bash
+tincan join <code> --relay <url>
+tincan ping <agent>
+```
+
+`tincan ping <agent>` is the quick check that the teammate answers before
+you rely on the sink. If the mesh identity lives in a named file such as
+`~/.config/tincan/<agent>.json`, point `bin` at a wrapper that exports
+`TINCAN_CONFIG` (no secrets in the script). See
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md#7b-tincan-notify).
 
 ```toml
 [notify.tincan]
-enabled = true
+enabled = true                 # default is false; true turns the sink on
 bin = "tincan"                 # PATH name or absolute path
 default_agent = "nixer"        # one lowercase name (no spaces or commas)
 # Empty = finished, failed, needs_attention, stalled, cap_reached,
