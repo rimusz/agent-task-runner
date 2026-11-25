@@ -88,4 +88,28 @@ mod tests {
         assert_eq!(parse_bytes("5m").unwrap(), 5 * 1024 * 1024);
         assert_eq!(parse_bytes("1gb").unwrap(), 1024 * 1024 * 1024);
     }
+
+    #[test]
+    fn formats_durations() {
+        assert_eq!(format_duration(Duration::from_secs(45)), "45s");
+        assert_eq!(format_duration(Duration::from_secs(2 * 60)), "2m");
+        assert_eq!(format_duration(Duration::from_secs(3 * 3600)), "3h");
+        assert_eq!(format_duration(Duration::from_secs(2 * 86400)), "2d");
+        // 90 seconds is not a whole minute, so it stays in seconds.
+        assert_eq!(format_duration(Duration::from_secs(90)), "90s");
+    }
+
+    #[test]
+    fn parses_day_and_rejects_bad() {
+        assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86400));
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("10").is_err());
+    }
+
+    #[test]
+    fn parses_suffixed_byte_sizes() {
+        assert_eq!(parse_bytes("2kb").unwrap(), 2 * 1024);
+        assert_eq!(parse_bytes("3mb").unwrap(), 3 * 1024 * 1024);
+        assert_eq!(parse_bytes("10b").unwrap(), 10);
+    }
 }
