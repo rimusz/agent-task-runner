@@ -354,8 +354,14 @@ Non-zero exits and timeouts are logged as warnings.
 - Agent name is lowercase (`nixer`). `tincan ping nixer` checks the path
   without model reasoning.
 - A hung `tincan` never blocks a run (killed after `timeout`, default 10s).
+  The timeout covers message build (`git rev-parse`) plus the CLI.
+- Duplicate `finished` pings: Telegram reply delivery is Telegram-only;
+  Tincan is notified once from the scheduler after output delivery (`pr=`
+  included when atr opened a PR).
 - Messages never include secrets; the subprocess does not inherit `ATR_*` or
   GitHub/Telegram/MCP token env vars.
+- Shadow tasks never ping. `status=` is the post-transition row (a `failed`
+  event should not still say `running`).
 
 ## 8. MCP / HTTP token
 

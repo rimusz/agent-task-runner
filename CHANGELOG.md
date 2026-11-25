@@ -23,8 +23,10 @@
   (`tincan ask <agent> --notify --json`). Same `Event` names as Telegram;
   empty `events` is a default subset (finished, failed, needs_attention,
   stalled, cap_reached, review, held, cancelled). Owner is `default_agent`
-  or `[labels.<name>] notify_agent`. Fire-and-forget (10s timeout); `atr doctor`
-  checks the binary and `tincan ping <agent>` when enabled.
+  or `[labels.<name>] notify_agent`. Fire-and-forget (10s timeout covering
+  message build + CLI); `atr doctor` checks the binary and `tincan ping
+  <agent>` when enabled. One event is one ping; `status=` is the
+  post-transition row; `finished` waits until output delivery so `pr=` is set.
 
   ```toml
   [notify.tincan]

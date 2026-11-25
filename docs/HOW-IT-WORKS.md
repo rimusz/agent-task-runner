@@ -347,7 +347,10 @@ cancelled), not Telegram's empty-means-all. A listed `stalled` still admits
 (optional `--about`, optional `--urgent` on failed / needs_attention /
 cap_reached). atr never waits on Tincan and never fails a run if the CLI is
 missing or slow. Assistant (`tg…`) and TUI (`cli-…`) keys are skipped, same
-as Telegram task notifies.
+as Telegram task notifies. One event is one Tincan ping: Telegram reply
+delivery does not send a second `finished`. Shadow tasks are skipped. The
+message `status=` field is the task row after the transition; `pr=` is filled
+when atr opened a pull request (`finished` waits until output delivery).
 
 ## Task dependencies (`after`)
 

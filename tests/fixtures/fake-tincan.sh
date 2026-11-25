@@ -6,8 +6,20 @@
 #   $0.fail  if present, exit 1
 base=$0
 log=${TINC_LOG:-$base.log}
-printf '%s\n' "$0" "$@" >>"$log"
-printf '---\n' >>"$log"
+{
+    printf '%s\n' "$0" "$@"
+    printf '---\n'
+    if [ -n "${ATR_TINCAN_SECRET+x}" ]; then
+        printf 'HAS_ATR_TINCAN_SECRET\n'
+    else
+        printf 'NO_ATR_TINCAN_SECRET\n'
+    fi
+    if [ -n "${TINC_MARKER+x}" ]; then
+        printf 'HAS_TINC_MARKER\n'
+    else
+        printf 'NO_TINC_MARKER\n'
+    fi
+} >>"$log"
 if [ -f "$base.sleep" ]; then
     sleep "$(cat "$base.sleep")"
 fi

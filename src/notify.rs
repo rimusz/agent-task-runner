@@ -153,6 +153,11 @@ pub fn allows_event(cfg: &TelegramConfig, event: Event) -> bool {
 }
 
 pub fn tincan_allows(cfg: &TincanConfig, event: Event) -> bool {
+    // Parse fills the default set; empty here still means that subset,
+    // not Telegram's empty-means-all.
+    if cfg.events.is_empty() {
+        return names_allow(&default_tincan_event_names(), event);
+    }
     names_allow(&cfg.events, event)
 }
 
@@ -322,5 +327,17 @@ mod tests {
         };
         assert!(allows_event(&cfg, Event::CapReached));
         assert!(!allows_event(&cfg, Event::Stalled));
+    }
+
+    #[test]
+    fn tincan_empty_events_use_default_set_not_allow_all() {
+        let cfg = TincanConfig {
+            events: vec![],
+            ..TincanConfig::default()
+        };
+        assert!(tincan_allows(&cfg, Event::Failed));
+        assert!(tincan_allows(&cfg, Event::Finished));
+        assert!(!tincan_allows(&cfg, Event::Start));
+        assert!(!tincan_allows(&cfg, Event::Hook));
     }
 }

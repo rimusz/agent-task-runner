@@ -460,12 +460,13 @@ fn deliver_reply(shared: &Shared, task: &Task, source: SourceKind, payload: &Val
                 }
                 s
             };
-            crate::notify::emit(
-                &cfg,
+            // Telegram delivery of the reply text. Tincan already got one
+            // `finished` ping from `finish_waiting` (one event = one ping).
+            crate::notify::notify_event(
+                &cfg.telegram,
                 crate::notify::Event::Finished,
                 &body,
                 task.shadow,
-                Some(task),
             );
             Ok(())
         }

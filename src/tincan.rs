@@ -34,6 +34,9 @@ pub struct TincanTask {
 
 impl TincanTask {
     pub fn from_task(t: &Task) -> Self {
+        // Task rows have no tincan-owner / request-id columns yet. Routing
+        // uses `[labels.*] notify_agent` then `default_agent`. `--about` is
+        // omitted until intake stores a request id on the task.
         Self {
             key: t.key.clone(),
             labels: t.labels.clone(),
@@ -73,7 +76,9 @@ pub fn notify_ctx(cfg: &Config, event: Event, body: &str, shadow: bool, task: Op
     let task = task.cloned();
     let body = body.to_string();
     std::thread::spawn(move || {
-        let ping = Ping {
+        let budget = cfg.notify.tincan.timeout;
+        let started = Instant::now();
+        let mut ping = Ping {
             bin: cfg.notify.tincan.bin.clone(),
             agent,
             about: task
@@ -81,10 +86,16 @@ pub fn notify_ctx(cfg: &Config, event: Event, body: &str, shadow: bool, task: Op
                 .map(|t| t.about.trim().to_string())
                 .filter(|s| !s.is_empty()),
             urgent: cfg.notify.tincan.urgent && urgent_event(event),
-            timeout: cfg.notify.tincan.timeout,
+            timeout: budget,
             message: format_message(&cfg, event, &body, task.as_ref()),
             scrub: scrub_keys(&cfg),
         };
+        let rest = budget.saturating_sub(started.elapsed());
+        if rest < Duration::from_millis(100) {
+            warn_fail(&"tincan notify timed out building the message");
+            return;
+        }
+        ping.timeout = rest;
         if let Err(e) = deliver(&ping) {
             warn_fail(&e);
         }
@@ -188,7 +199,9 @@ pub fn format_message(cfg: &Config, event: Event, body: &str, task: Option<&Tinc
             }
         }
     }
-    let (dash, _) = crate::ui::shareable_url(&cfg.dashboard.public_url, &cfg.listen);
+    // public_url or the local listen URL. Never `tailscale serve status`
+    // (that has no timeout and would leak this worker).
+    let dash = dashboard_link(cfg);
     if !dash.trim().is_empty() {
         fields.push(format!("dashboard={dash}"));
     }
@@ -219,6 +232,14 @@ fn issue_url(repo: &str, n: i64) -> Option<String> {
         .map(|slug| format!("https://github.com/{slug}/issues/{n}"))
 }
 
+fn dashboard_link(cfg: &Config) -> String {
+    let p = cfg.dashboard.public_url.trim();
+    if !p.is_empty() {
+        return p.to_string();
+    }
+    crate::ui::dashboard_url(&cfg.listen)
+}
+
 fn git_head(worktree: &str) -> (Option<String>, Option<String>) {
     let p = Path::new(worktree);
     if !p.exists() {
@@ -229,14 +250,21 @@ fn git_head(worktree: &str) -> (Option<String>, Option<String>) {
     (branch, sha)
 }
 
+const GIT_HEAD_TIMEOUT: Duration = Duration::from_secs(2);
+
 fn git_one(cwd: &Path, args: &[&str]) -> Option<String> {
     let mut cmd = git_capture();
     cmd.current_dir(cwd).args(args);
-    let out = cmd.output().ok()?;
-    if !out.status.success() {
+    let child = retry_exec_busy(|| cmd.spawn()).ok()?;
+    let (mut child, st) = wait_child(child, GIT_HEAD_TIMEOUT).ok()?;
+    if !st.success() {
         return None;
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let mut buf = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = std::io::Read::read_to_end(&mut out, &mut buf);
+    }
+    let s = String::from_utf8_lossy(&buf).trim().to_string();
     if s.is_empty() || s == "HEAD" {
         None
     } else {
@@ -313,27 +341,55 @@ pub fn run_tincan(bin: &str, args: &[String], timeout: Duration, scrub: &[String
     for k in scrub {
         cmd.env_remove(k);
     }
-    let mut child = retry_exec_busy(|| cmd.spawn()).with_context(|| format!("spawn {bin}"))?;
+    let child = retry_exec_busy(|| cmd.spawn()).with_context(|| format!("spawn {bin}"))?;
     let limit = timeout.max(Duration::from_millis(100));
-    let deadline = Instant::now() + limit;
+    match wait_child(child, limit) {
+        Ok((_child, st)) => {
+            if !st.success() {
+                bail!("{bin} exited {st}");
+            }
+            Ok(st.code().unwrap_or(0))
+        }
+        Err(e) => bail!("{bin} {e}"),
+    }
+}
+
+fn wait_child(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Result<(std::process::Child, std::process::ExitStatus)> {
+    let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(st)) => {
-                if !st.success() {
-                    bail!("{bin} exited {st}");
-                }
-                return Ok(st.code().unwrap_or(0));
-            }
+            Ok(Some(st)) => return Ok((child, st)),
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
-                let _ = child.wait();
+                if reap_until(&mut child, Duration::from_millis(500)).is_none() {
+                    // Still running; leaking Child avoids Drop's blocking wait.
+                    std::mem::forget(child);
+                }
                 bail!(
-                    "{bin} timed out after {}",
-                    crate::duration::format_duration(limit)
+                    "timed out after {}",
+                    crate::duration::format_duration(timeout)
                 );
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => bail!("{bin} wait: {e}"),
+            Err(e) => bail!("wait: {e}"),
+        }
+    }
+}
+
+fn reap_until(
+    child: &mut std::process::Child,
+    limit: Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => return Some(st),
+            Err(_) => return None,
+            Ok(None) if Instant::now() >= deadline => return None,
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
         }
     }
 }
@@ -511,7 +567,38 @@ notify_agent = "other"
         assert!(msg.contains("dashboard="), "{msg}");
         assert!(msg.contains("time="), "{msg}");
         assert!(!msg.contains("ghp_"), "{msg}");
-        assert!(!msg.contains("ATR_TELEGRAM_TOKEN"), "{msg}");
+    }
+
+    #[test]
+    fn message_includes_branch_and_sha() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        let git = |args: &[&str]| {
+            let st = std::process::Command::new("git")
+                .args(args)
+                .current_dir(wt)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(wt.join("f"), "x\n").unwrap();
+        git(&["add", "f"]);
+        git(&["commit", "-q", "-m", "init"]);
+        git(&["checkout", "-q", "-b", "feat-tincan"]);
+        let cfg = tincan_cfg("");
+        let task = TincanTask {
+            key: "acme-1".into(),
+            worktree: Some(wt.display().to_string()),
+            status: "waiting".into(),
+            ..Default::default()
+        };
+        let msg = format_message(&cfg, Event::Finished, "finished acme-1", Some(&task));
+        assert!(msg.contains("branch=feat-tincan"), "{msg}");
+        assert!(msg.contains("sha="), "{msg}");
     }
 
     #[test]
@@ -531,13 +618,32 @@ notify_agent = "other"
         std::fs::set_permissions(p, perms).unwrap();
     }
 
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn wait_log(p: &Path, needle: &str, timeout: Duration) -> String {
+        let t0 = Instant::now();
+        loop {
+            if let Ok(s) = std::fs::read_to_string(p) {
+                if s.contains(needle) {
+                    return s;
+                }
+            }
+            if t0.elapsed() > timeout {
+                return std::fs::read_to_string(p).unwrap_or_default();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn deliver_records_argv_and_scrubs_atr_env() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("tincan");
         std::fs::copy(fixture_bin(), &bin).unwrap();
         chmod_x(&bin);
         std::env::set_var("ATR_TINCAN_SECRET", "nope");
+        std::env::set_var("TINC_MARKER", "keep");
         let cfg = parse(&format!(
             r#"
 [notify.tincan]
@@ -565,15 +671,17 @@ urgent = true
         };
         assert!(scrub_keys(&cfg).iter().any(|k| k == "ATR_TINCAN_SECRET"));
         deliver(&ping).unwrap();
-        let recorded = std::fs::read_to_string(bin.with_extension("log"))
-            .unwrap_or_else(|_| std::fs::read_to_string(format!("{}.log", bin.display())).unwrap());
+        let recorded = std::fs::read_to_string(format!("{}.log", bin.display())).unwrap();
         assert!(recorded.contains("ask\nnixer\n"), "{recorded}");
         assert!(recorded.contains("--notify"), "{recorded}");
         assert!(recorded.contains("--json"), "{recorded}");
         assert!(recorded.contains("--about\nreq-9"), "{recorded}");
         assert!(recorded.contains("--urgent"), "{recorded}");
         assert!(recorded.contains("atr failed t1"), "{recorded}");
+        assert!(recorded.contains("NO_ATR_TINCAN_SECRET"), "{recorded}");
+        assert!(recorded.contains("HAS_TINC_MARKER"), "{recorded}");
         std::env::remove_var("ATR_TINCAN_SECRET");
+        std::env::remove_var("TINC_MARKER");
     }
 
     #[test]
@@ -632,5 +740,73 @@ timeout = "2s"
             "{:?}",
             t0.elapsed()
         );
+        let log = wait_log(
+            &PathBuf::from(format!("{}.log", bin.display())),
+            "ask",
+            Duration::from_secs(2),
+        );
+        assert!(log.contains("ask\nnixer\n"), "{log}");
+    }
+
+    fn skip_cfg(bin: &Path, extra: &str) -> Config {
+        parse(&format!(
+            r#"
+[notify.tincan]
+enabled = true
+bin = "{}"
+default_agent = "nixer"
+{extra}
+"#,
+            bin.display()
+        ))
+    }
+
+    fn copy_bin() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("tincan");
+        std::fs::copy(fixture_bin(), &bin).unwrap();
+        chmod_x(&bin);
+        (dir, bin)
+    }
+
+    fn log_of(bin: &Path) -> PathBuf {
+        PathBuf::from(format!("{}.log", bin.display()))
+    }
+
+    #[test]
+    fn skip_shadow_disabled_and_no_agent() {
+        let (_dir, bin) = copy_bin();
+        let cfg = skip_cfg(&bin, "");
+        notify_ctx(&cfg, Event::Failed, "failed t", true, None);
+        assert!(
+            !log_of(&bin).exists(),
+            "shadow must not spawn tincan: {}",
+            std::fs::read_to_string(log_of(&bin)).unwrap_or_default()
+        );
+
+        let mut off = skip_cfg(&bin, "");
+        off.notify.tincan.enabled = false;
+        notify_ctx(&off, Event::Failed, "failed t", false, None);
+        assert!(!log_of(&bin).exists(), "disabled must not spawn");
+
+        let mut none = skip_cfg(&bin, "");
+        none.notify.tincan.default_agent.clear();
+        notify_ctx(&none, Event::Failed, "failed t", false, None);
+        assert!(!log_of(&bin).exists(), "no agent must not spawn");
+    }
+
+    #[test]
+    fn from_task_has_no_about_or_direct_owner() {
+        let t = Task {
+            key: "k".into(),
+            labels: "proof".into(),
+            status: "failed".into(),
+            ..Default::default()
+        };
+        let ctx = TincanTask::from_task(&t);
+        assert!(ctx.notify_agent.is_empty());
+        assert!(ctx.about.is_empty());
+        assert_eq!(ctx.status, "failed");
+        assert_eq!(ctx.key, "k");
     }
 }

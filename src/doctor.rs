@@ -1372,7 +1372,9 @@ fn tincan_check(checks: &mut Vec<Check>, cfg: &Config) {
                 &name,
                 Status::Warn,
                 e.to_string(),
-                Some(format!("tincan ping {agent}")),
+                Some(format!(
+                    "check Agent Tincan login and that this host can reach {agent}"
+                )),
             ),
         }
     }
@@ -1695,6 +1697,73 @@ default_agent = "nixer"
             .find(|c| c.name == "tincan ping nixer")
             .unwrap();
         assert_eq!(ping.status, Status::Ok, "{}", ping.detail);
+    }
+
+    fn copy_fake_tincan() -> (tempfile::TempDir, std::path::PathBuf) {
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fake-tincan.sh");
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("tincan");
+        std::fs::copy(&src, &bin).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).unwrap();
+        }
+        (tmp, bin)
+    }
+
+    #[tokio::test]
+    async fn tincan_enabled_no_agent_fails() {
+        let (_bin_dir, bin) = copy_fake_tincan();
+        let (_dir, cfg, path) = mini_cfg(&format!(
+            r#"
+[notify.tincan]
+enabled = true
+bin = "{}"
+"#,
+            bin.display()
+        ));
+        let report = run(&cfg, &path, false).await;
+        let tc = report
+            .checks
+            .iter()
+            .find(|c| c.name == "tincan agent")
+            .unwrap();
+        assert_eq!(tc.status, Status::Fail, "{}", tc.detail);
+        assert!(tc.detail.contains("no default_agent"), "{}", tc.detail);
+    }
+
+    #[tokio::test]
+    async fn tincan_enabled_ping_failure_is_warn() {
+        let (_bin_dir, bin) = copy_fake_tincan();
+        std::fs::write(format!("{}.fail", bin.display()), "").unwrap();
+        let (_dir, cfg, path) = mini_cfg(&format!(
+            r#"
+[notify.tincan]
+enabled = true
+bin = "{}"
+default_agent = "nixer"
+"#,
+            bin.display()
+        ));
+        let report = run(&cfg, &path, false).await;
+        let ping = report
+            .checks
+            .iter()
+            .find(|c| c.name == "tincan ping nixer")
+            .unwrap();
+        assert_eq!(ping.status, Status::Warn, "{}", ping.detail);
+        assert!(
+            ping.hint
+                .as_deref()
+                .unwrap_or("")
+                .contains("Agent Tincan login"),
+            "{:?}",
+            ping.hint
+        );
     }
 
     #[tokio::test]

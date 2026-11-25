@@ -713,12 +713,15 @@ notify_agent = "nixer"         # first matching task label wins (case-insensitiv
 Owner for one event: a task-level owner if the task carries one, else the
 first `[labels.<name>] notify_agent` in the task's label list, else
 `default_agent`. One agent per event (`tincan ask <agent> "<msg>" --notify --json`).
-`--about <request-id>` is added when the task came from a Tincan request.
-The ping is fire-and-forget (about 10s timeout, rate-limited warning on
-failure). The child environment is scrubbed like verify (no `ATR_*` or token
-vars). Messages are short structured lines (task, label, repo, issue/PR,
-event, status, branch/SHA when known, dashboard URL, UTC) with secrets
-redacted.
+`--about <request-id>` is added when the task came from a Tincan request
+(not stored on the task row yet, so omitted until intake sets one).
+The ping is fire-and-forget (about 10s timeout covering message build +
+`tincan`, rate-limited warning on failure). One event = one ping. The child
+environment is scrubbed like verify (no `ATR_*` or token vars). Messages are
+short structured lines (task, label, repo, issue/PR, event, status after the
+transition, branch/SHA when known, dashboard URL, UTC) with secrets redacted.
+`dashboard=` is `[dashboard] public_url` or the local listen URL (no Tailscale
+probe).
 
 `atr doctor` checks the binary and `tincan ping <agent>` when this sink is
 enabled. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#8-tincan-notify).
