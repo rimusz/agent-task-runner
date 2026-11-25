@@ -180,6 +180,11 @@ host_dir = "~/atr-ops"
 # wrapper = false
 
 # Task-status pings to an Agent Tincan teammate (beside Telegram).
+# Optional and off by default (enabled = false). With it off, atr never
+# runs tincan, and `atr doctor` shows "tincan disabled".
+# Prerequisites: Agent Tincan installed and joined (`tincan join <code> --relay <url>`),
+# then `tincan ping <agent>`. Named identity file: wrapper that exports
+# TINCAN_CONFIG, set as bin. See docs/TROUBLESHOOTING.md (7b).
 # Empty events = finished, failed, needs_attention, stalled, cap_reached,
 # review, held, cancelled. Owner: default_agent or [labels.<name>] notify_agent.
 # [notify.tincan]

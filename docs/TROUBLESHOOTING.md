@@ -342,9 +342,38 @@ Non-zero exits and timeouts are logged as warnings.
 
 ## 7b. Tincan notify
 
-`[notify.tincan] enabled = true` sends task events to a teammate via
-`tincan ask <agent> --notify`.
+The sink is optional and off by default (`enabled` defaults to
+`false`). With it off, atr never runs `tincan`, and `atr doctor` shows
+`tincan disabled`. `[notify.tincan] enabled = true` sends task events to a
+teammate via `tincan ask <agent> --notify`.
 
+- Prerequisites: Agent Tincan is installed and this host has joined a relay
+  (`tincan join <code> --relay <url>`). Confirm with `tincan ping <agent>`
+  before enabling the sink.
+- Named config: when the host's mesh identity lives in a named file
+  (for example `~/.config/tincan/<agent>.json`), atr does not read that path
+  itself. Add a small wrapper that exports `TINCAN_CONFIG` and execs
+  `tincan`, and set `notify.tincan.bin` to the wrapper. Put no secrets,
+  tokens, or invite codes in the script:
+
+  ```sh
+  #!/bin/sh
+  # ~/.local/bin/tincan-agent
+  export TINCAN_CONFIG="${HOME}/.config/tincan/agent.json"
+  exec tincan "$@"
+  ```
+
+  ```toml
+  [notify.tincan]
+  enabled = true
+  bin = "/home/you/.local/bin/tincan-agent"
+  default_agent = "agent"
+  ```
+
+  `chmod +x` the wrapper. `no relay configured` means that file (or
+  tincan's default config, if the wrapper forgot `TINCAN_CONFIG`) has not
+  joined a relay. Run `tincan join <code> --relay <url>` with
+  `TINCAN_CONFIG` set to the same file, then `tincan ping <agent>`.
 - `atr doctor` → `tincan` (binary) and `tincan ping <agent>`. Missing binary
   is FAIL; a failed ping is warn. Disabled is `ok disabled`.
 - No pings: `default_agent` or `[labels.<name>] notify_agent` must be set;
