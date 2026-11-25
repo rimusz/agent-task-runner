@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- `atr doctor` no longer caps `tincan ping` at 5s. The ping waits at least
+  20s, or `notify.tincan.timeout` when that is longer (real pongs take
+  about 10–12s, so the 5s cap warned on a healthy relay). A ping that
+  exceeds the budget is warn `slow`; a non-zero exit or a missing spawn
+  is warn `failed`.
+
 - Hitting `[[provider]] run_timeout` (the per-run wall-clock cap, default
   `90m`) is no longer reported as a stall / CLI hang / heartbeat, and no
   longer cools the provider as a usage `limit`. Telegram now sends

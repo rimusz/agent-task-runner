@@ -758,7 +758,10 @@ transition, branch/SHA when known, dashboard URL, UTC) with secrets redacted.
 probe).
 
 `atr doctor` checks the binary and `tincan ping <agent>` when this sink is
-enabled. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#7b-tincan-notify).
+enabled. The ping waits at least 20s, or `notify.tincan.timeout` when that
+is longer (a real pong often takes 10–12s). A timeout is warn `slow`; a
+non-zero exit is warn `failed`. See
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md#7b-tincan-notify).
 
 ### GitHub token
 

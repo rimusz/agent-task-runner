@@ -486,7 +486,8 @@ independent of Telegram). Default events are finished / failed /
 needs_attention / stalled / cap_reached / review / held / cancelled. Owner is
 `default_agent` or `[labels.<name>] notify_agent`. One event is one ping.
 `atr doctor` checks `tincan`
-and `tincan ping <agent>` when the sink is on. Details:
+and `tincan ping <agent>` when the sink is on (at least 20s, or
+`notify.tincan.timeout` if longer; `slow` vs `failed`). Details:
 [CONFIG.md](CONFIG.md#tincan-task-pings-notifytincan).
 
 Commands (allowed private chats only; also registered in the `/` menu via setMyCommands):
