@@ -479,6 +479,14 @@ Read-only page. Do not add buttons. Ask in a comment if the empty copy should ma
 Later: `atr telegram test` to ping. Unknown chats, groups, and a private chat
 whose `from.id` is not allowed get no reply. Full command list: `/help`.
 
+Task-status pings can also go to an Agent Tincan teammate (`[notify.tincan]`,
+independent of Telegram). Default events are finished / failed /
+needs_attention / stalled / cap_reached / review / held / cancelled. Owner is
+`default_agent` or `[labels.<name>] notify_agent`. One event is one ping.
+`atr doctor` checks `tincan`
+and `tincan ping <agent>` when the sink is on. Details:
+[CONFIG.md](CONFIG.md#tincan-task-pings-notifytincan).
+
 Commands (allowed private chats only; also registered in the `/` menu via setMyCommands):
 
 | Command | What it does |

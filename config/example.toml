@@ -179,6 +179,17 @@ host_dir = "~/atr-ops"
 # rules = []
 # wrapper = false
 
+# Task-status pings to an Agent Tincan teammate (beside Telegram).
+# Empty events = finished, failed, needs_attention, stalled, cap_reached,
+# review, held, cancelled. Owner: default_agent or [labels.<name>] notify_agent.
+# [notify.tincan]
+# enabled = false
+# bin = "tincan"
+# default_agent = "nixer"
+# events = []
+# timeout = "10s"
+# urgent = false
+
 # Free-text (not a /command) from an allowed chat. /help lists commands.
 [telegram.assistant]
 enabled = false
@@ -247,6 +258,7 @@ summary_names = ["summary.md"]
 # [labels.proof]
 # run_timeout = "3h"
 # stall_resumes = 4
+# notify_agent = "nixer"
 
 # Host CPU/memory gate before starting a new task. While over the limit,
 # work stays queued. Starts are one at a time with `settle` between them.

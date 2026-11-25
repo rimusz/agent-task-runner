@@ -466,10 +466,17 @@ fn after_arm_inner(shared: &Shared, arm_key: &str) -> Result<()> {
                 d.error = format!("{e:#}");
                 save(&shared.db, &parent_key, &d)?;
                 shared.db.set_status(&parent_key, "needs_attention")?;
+                let snap = shared
+                    .db
+                    .get_task(&parent_key)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(parent);
                 notify(
                     &cfg,
                     crate::notify::Event::NeedsAttention,
                     &format!("needs_attention {parent_key} (compare: promoting {w} failed: {e:#})"),
+                    Some(&snap),
                 );
                 return Ok(());
             }
@@ -489,6 +496,7 @@ fn after_arm_inner(shared: &Shared, arm_key: &str) -> Result<()> {
                         format!(" {}", d.pr_url)
                     }
                 ),
+                Some(&parent),
             );
         }
         None => {
@@ -504,14 +512,26 @@ fn after_arm_inner(shared: &Shared, arm_key: &str) -> Result<()> {
                     msg.push_str(&format!("\n  {}", a.verify_tail));
                 }
             }
-            notify(&cfg, crate::notify::Event::NeedsAttention, &msg);
+            let snap = shared
+                .db
+                .get_task(&parent_key)
+                .ok()
+                .flatten()
+                .unwrap_or(parent);
+            notify(
+                &cfg,
+                crate::notify::Event::NeedsAttention,
+                &msg,
+                Some(&snap),
+            );
         }
     }
     Ok(())
 }
 
-fn notify(cfg: &Config, event: crate::notify::Event, msg: &str) {
-    crate::notify::notify_event(&cfg.telegram, event, msg, false);
+fn notify(cfg: &Config, event: crate::notify::Event, msg: &str, task: Option<&crate::db::Task>) {
+    let shadow = task.is_some_and(|t| t.shadow);
+    crate::notify::emit(cfg, event, msg, shadow, task);
 }
 
 fn save(db: &Db, key: &str, d: &Decision) -> Result<()> {

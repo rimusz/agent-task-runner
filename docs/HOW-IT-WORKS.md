@@ -277,6 +277,8 @@ still stored; otherwise it reruns the last prompt on a new session.
 `atr status` and Telegram `/status` show the wait. Notify fires once per
 scheduled retry (`retry <key> in 2m (provider overloaded, resume)`),
 unless `[telegram] events` is set and does not include `retry`.
+`[notify.tincan]` uses its own `events` list (retry is off in the Tincan
+default set).
 When the wait is over the scheduler starts through `try_start_run` (same
 cross-process `max_parallel` as serve and TUI).
 
@@ -334,6 +336,22 @@ cursor-agent, gemini and spark/opencode have no matching flag. Optional
 `telegram.deny.wrapper` PATH-prepends git/rm/launchctl/sudo shims
 (`deny-bin/` next to the state db, or the hardened worktree `.atr/bin`).
 These are best-effort. GitHub branch protection is the hard backstop.
+
+## Tincan notifications
+
+`[notify.tincan]` is a second sink beside Telegram. It reuses the same
+`Event` kinds and filter names. Empty `events` is a **default subset**
+(finished, failed, needs_attention, stalled, cap_reached, review, held,
+cancelled), not Telegram's empty-means-all. A listed `stalled` still admits
+`cap_reached`. Delivery is `tincan ask <agent> "<msg>" --notify --json`
+(optional `--about`, optional `--urgent` on failed / needs_attention /
+cap_reached). atr never waits on Tincan and never fails a run if the CLI is
+missing or slow. A timeout kills the `tincan` process group and reaps it
+off the scheduler. Assistant (`tg…`) and TUI (`cli-…`) keys are skipped, same
+as Telegram task notifies. One event is one Tincan ping: Telegram reply
+delivery does not send a second `finished`. Shadow tasks are skipped. The
+message `status=` field is the task row after the transition; `pr=` is filled
+when atr opened a pull request (`finished` waits until output delivery).
 
 ## Task dependencies (`after`)
 

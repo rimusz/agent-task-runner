@@ -40,6 +40,9 @@ broken. Each non-ok line prints a `fix:` hint.
 | `repo_path`, `listen`, `system_prompt` | — | path missing / port busy | Fix the path, or stop whatever holds the port |
 | `telegram reachability` | 3+ failed polls | unreachable 15+ min | network/DNS/proxy to api.telegram.org |
 | `telegram`, `telegram token`, `telegram chat` | config incomplete | token set but unusable / no chat | `atr telegram setup`, then `atr telegram test` |
+| `tincan` | — | enabled but `tincan` binary missing | install Agent Tincan or set `notify.tincan.bin` |
+| `tincan agent` | — | enabled but no `default_agent` / `notify_agent` | set `notify.tincan.default_agent` (e.g. `nixer`) |
+| `tincan ping <agent>` | `tincan ping` failed / timed out | — | `tincan ping <agent>` by hand |
 | `mcp token`, `mcp http` | — | MCP on but no token | create `~/.config/atr/mcp.token` (0600) |
 | `atr on PATH` | `atr` not on PATH | — | re-run `install.sh` or add `~/.local/bin` to PATH |
 | `probe <name>` (`--probe` only) | replied, but the provider has no resume flag, so follow-ups start fresh | could not start, signed out / limit / error, timed out, no session id in the output, or the resumed turn did not recall the code word | Run the CLI by hand and sign in; a recall FAIL means follow-ups and retries lose context |
@@ -336,6 +339,33 @@ ATR_ALERT_KIND=github_auth_failed ATR_ALERT_MESSAGE="test" ~/bin/atr-alert.sh; e
 ```
 
 Non-zero exits and timeouts are logged as warnings.
+
+## 7b. Tincan notify
+
+`[notify.tincan] enabled = true` sends task events to a teammate via
+`tincan ask <agent> --notify`.
+
+- `atr doctor` → `tincan` (binary) and `tincan ping <agent>`. Missing binary
+  is FAIL; a failed ping is warn. Disabled is `ok disabled`.
+- No pings: `default_agent` or `[labels.<name>] notify_agent` must be set;
+  `events` defaults to finished/failed/needs_attention/stalled/cap_reached/
+  review/held/cancelled (not every Telegram kind). Logs: `tincan event filtered`,
+  `tincan: no agent; skip`, or a rate-limited `tincan notify failed`.
+- Agent name is lowercase (`nixer`). `tincan ping nixer` checks the path
+  without model reasoning.
+- A hung `tincan` never blocks a run (killed after `timeout`, default 10s).
+  The timeout covers message build (`git rev-parse`) plus the CLI. The
+  kill is the whole process group, then the process is reaped, so a child
+  of `tincan` does not stay running and the CLI does not stay a zombie.
+  `atr doctor` pings run off the async worker (self-heal and `/doctor`
+  await doctor).
+- Duplicate `finished` pings: Telegram reply delivery is Telegram-only;
+  Tincan is notified once from the scheduler after output delivery (`pr=`
+  included when atr opened a PR).
+- Messages never include secrets; the subprocess does not inherit `ATR_*` or
+  GitHub/Telegram/MCP token env vars.
+- Shadow tasks never ping. `status=` is the post-transition row (a `failed`
+  event should not still say `running`).
 
 ## 8. MCP / HTTP token
 

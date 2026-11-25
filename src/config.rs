@@ -330,6 +330,26 @@ pub struct RawNotify {
     pub command: String,
     #[serde(default)]
     pub timeout: String,
+    #[serde(default)]
+    pub tincan: RawTincan,
+}
+
+/// `[notify.tincan]`: push task events to an Agent Tincan teammate.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RawTincan {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bin: String,
+    #[serde(default)]
+    pub default_agent: String,
+    #[serde(default)]
+    pub events: Vec<String>,
+    #[serde(default)]
+    pub timeout: String,
+    /// `--urgent` on failed / needs_attention / cap_reached.
+    #[serde(default)]
+    pub urgent: bool,
 }
 
 impl Default for RawUpdate {
@@ -717,6 +737,9 @@ pub struct RawLabelPolicy {
     pub stall_resumes: Option<u32>,
     #[serde(default)]
     pub overflow_on_cap: Option<bool>,
+    /// Agent Tincan teammate for tasks with this label (`[notify.tincan]`).
+    #[serde(default)]
+    pub notify_agent: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -907,6 +930,33 @@ pub struct NotifyConfig {
     /// `sh -c` command; empty = off.
     pub command: String,
     pub timeout: Duration,
+    pub tincan: TincanConfig,
+}
+
+/// `[notify.tincan]`. Empty `events` after parse is the built-in default set.
+#[derive(Debug, Clone)]
+pub struct TincanConfig {
+    pub enabled: bool,
+    pub bin: String,
+    pub default_agent: String,
+    /// Canonical event names. Empty input at load becomes
+    /// [`crate::notify::TINCAN_DEFAULT_EVENTS`].
+    pub events: Vec<String>,
+    pub timeout: Duration,
+    pub urgent: bool,
+}
+
+impl Default for TincanConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bin: default_tincan_bin(),
+            default_agent: String::new(),
+            events: crate::notify::default_tincan_event_names(),
+            timeout: Duration::from_secs(10),
+            urgent: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1226,6 +1276,7 @@ pub struct LabelPolicy {
     pub run_timeout: Option<Duration>,
     pub stall_resumes: Option<u32>,
     pub overflow_on_cap: Option<bool>,
+    pub notify_agent: Option<String>,
 }
 
 /// Resolved run-cap policy for one task on one provider.
@@ -1588,7 +1639,7 @@ fn parse_host(raw: RawHost) -> Result<HostConfig> {
     })
 }
 
-fn parse_label_policy(raw: &RawLabelPolicy) -> Result<LabelPolicy> {
+fn parse_label_policy(name: &str, raw: &RawLabelPolicy) -> Result<LabelPolicy> {
     let run_timeout = if raw.run_timeout.trim().is_empty() {
         None
     } else {
@@ -1597,10 +1648,61 @@ fn parse_label_policy(raw: &RawLabelPolicy) -> Result<LabelPolicy> {
                 .with_context(|| format!("[labels] run_timeout {:?}", raw.run_timeout))?,
         )
     };
+    let notify_agent = {
+        let a = raw.notify_agent.trim();
+        if a.is_empty() {
+            None
+        } else {
+            Some(crate::tincan::validate_agent(
+                &format!("labels.{name}.notify_agent"),
+                a,
+            )?)
+        }
+    };
     Ok(LabelPolicy {
         run_timeout,
         stall_resumes: raw.stall_resumes,
         overflow_on_cap: raw.overflow_on_cap,
+        notify_agent,
+    })
+}
+
+fn default_tincan_bin() -> String {
+    "tincan".into()
+}
+
+fn parse_tincan(raw: RawTincan) -> Result<TincanConfig> {
+    let events = if raw.events.iter().all(|e| e.trim().is_empty()) {
+        crate::notify::default_tincan_event_names()
+    } else {
+        crate::notify::parse_event_names_in(&raw.events, "notify.tincan.events")?
+    };
+    let timeout = if raw.timeout.trim().is_empty() {
+        Duration::from_secs(10)
+    } else {
+        parse_duration(&raw.timeout).context("[notify.tincan] timeout")?
+    };
+    if timeout < Duration::from_millis(100) {
+        bail!("[notify.tincan] timeout must be at least 100ms");
+    }
+    let bin = {
+        let b = raw.bin.trim();
+        if b.is_empty() {
+            default_tincan_bin()
+        } else {
+            b.to_string()
+        }
+    };
+    Ok(TincanConfig {
+        enabled: raw.enabled,
+        bin,
+        default_agent: crate::tincan::validate_agent(
+            "notify.tincan.default_agent",
+            &raw.default_agent,
+        )?,
+        events,
+        timeout,
+        urgent: raw.urgent,
     })
 }
 
@@ -2503,6 +2605,7 @@ fn known_field_names() -> Vec<String> {
         introspect::fields::<RawPreset>(),
         introspect::fields::<RawUpdate>(),
         introspect::fields::<RawNotify>(),
+        introspect::fields::<RawTincan>(),
         introspect::fields::<RawRetry>(),
         introspect::fields::<RawRestart>(),
         introspect::fields::<RawSelfheal>(),
@@ -3160,6 +3263,7 @@ impl Config {
                 } else {
                     parse_duration(&raw.notify.timeout)?
                 },
+                tincan: parse_tincan(raw.notify.tincan)?,
             },
             retry: parse_retry(raw.retry)?,
             restart: RestartConfig {
@@ -3328,7 +3432,7 @@ impl Config {
                     if name.is_empty() {
                         continue;
                     }
-                    out.insert(name.to_string(), parse_label_policy(&raw_p)?);
+                    out.insert(name.to_string(), parse_label_policy(name, &raw_p)?);
                 }
                 out
             },
@@ -3368,6 +3472,9 @@ impl Config {
             }
             if out.overflow_on_cap.is_none() {
                 out.overflow_on_cap = p.overflow_on_cap;
+            }
+            if out.notify_agent.is_none() {
+                out.notify_agent = p.notify_agent.clone();
             }
         }
         out
@@ -3989,6 +4096,99 @@ kind = "claude"
     }
 
     #[test]
+    fn tincan_section_parses_and_fills_default_events() {
+        let cfg = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[notify.tincan]
+enabled = true
+default_agent = "Nixer"
+[labels.proof]
+notify_agent = "Proofy"
+run_timeout = "3h"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap();
+        assert!(cfg.notify.tincan.enabled);
+        assert_eq!(cfg.notify.tincan.bin, "tincan");
+        assert_eq!(cfg.notify.tincan.default_agent, "nixer");
+        assert_eq!(
+            cfg.notify.tincan.events,
+            crate::notify::default_tincan_event_names()
+        );
+        assert_eq!(cfg.notify.tincan.timeout, Duration::from_secs(10));
+        assert!(!cfg.notify.tincan.urgent);
+        assert_eq!(
+            cfg.label_policy("proof").notify_agent.as_deref(),
+            Some("proofy")
+        );
+    }
+
+    #[test]
+    fn tincan_events_reject_unknown_names() {
+        let err = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[notify.tincan]
+events = ["failed", "nope"]
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown notify.tincan.events"), "{err}");
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn tincan_rejects_multi_agent_and_zero_timeout() {
+        let agent = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[notify.tincan]
+default_agent = "nixer,other"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(agent.contains("single agent name"), "{agent}");
+        let label = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[labels.proof]
+notify_agent = "-nixer"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(label.contains("labels.proof.notify_agent"), "{label}");
+        let timeout = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[notify.tincan]
+timeout = "0s"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(timeout.contains("at least 100ms"), "{timeout}");
+    }
+
+    #[test]
     fn known_field_names_cover_nested_tables() {
         let known = known_field_names();
         for k in [
@@ -4003,6 +4203,9 @@ kind = "claude"
             "min_memory_mb",
             "resume",
             "timezone",
+            "default_agent",
+            "notify_agent",
+            "urgent",
         ] {
             assert!(known.iter().any(|f| f == k), "{k} missing");
         }

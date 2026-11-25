@@ -19,6 +19,27 @@
 
 ### Added
 
+- `[notify.tincan]` pushes task-lifecycle events to an Agent Tincan teammate
+  (`tincan ask <agent> --notify --json`). Same `Event` names as Telegram;
+  empty `events` is a default subset (finished, failed, needs_attention,
+  stalled, cap_reached, review, held, cancelled). Owner is `default_agent`
+  or `[labels.<name>] notify_agent`. Fire-and-forget (10s timeout covering
+  message build + CLI); `atr doctor` checks the binary and `tincan ping
+  <agent>` when enabled. One event is one ping; `status=` is the
+  post-transition row; `finished` waits until output delivery so `pr=` is set.
+  A timeout kills the process group and reaps it. `default_agent` /
+  `notify_agent` must be a single name. `atr doctor` pings run off the
+  async worker.
+
+  ```toml
+  [notify.tincan]
+  enabled = true
+  default_agent = "nixer"
+
+  [labels.proof]
+  notify_agent = "nixer"
+  ```
+
 - Per-task and per-label overrides for the run cap and same-session resume
   budget. Precedence: task (`atr add --run-timeout` / `--stall-resumes` /
   `--overflow-on-cap` / `--labels`, HTTP/MCP fields) > `[labels.<name>]` >

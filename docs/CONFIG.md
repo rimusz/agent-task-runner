@@ -49,7 +49,8 @@ reloaded with SIGHUP. `atr config migrate` converts shorthand
 `[telegram.assistant]`, `[tui] providers`, `[ui] timezone`, `[[provider]]` order and `enabled`, `[mcp]`, `[cache]`,
 `[retry]`, `[restart]`, `[selfheal]`, `[host]`,
 `overflow_on_cap`, `[labels.<name>]` (per-label `run_timeout` /
-`stall_resumes` / `overflow_on_cap`),
+`stall_resumes` / `overflow_on_cap` / `notify_agent`),
+`[notify.tincan]`,
 `[[source]]`, `max_prompt_bytes` (default `256k`; CLI/HTTP/MCP prompts and
 inbox files).
 
@@ -538,6 +539,7 @@ global / provider default**.
 run_timeout = "3h"
 stall_resumes = 4
 # overflow_on_cap = false
+# notify_agent = "nixer"   # [notify.tincan] owner for this label
 ```
 
 CLI / HTTP / MCP (task wins over `[labels.<name>]`):
@@ -687,6 +689,42 @@ with `ATR_ALERT_KIND`, `ATR_ALERT_MESSAGE`, `ATR_ALERT_SOURCE`,
 `selfheal_failed` / `selfheal_recovered` and `ATR_ALERT_SOURCE=selfheal`
 for `[selfheal] check`). Telegram still fires too for GitHub alerts. See
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md#7-notify-hook).
+
+### Tincan task pings (`[notify.tincan]`)
+
+Push the same task-lifecycle events Telegram uses (`src/notify.rs` `Event`)
+to an owning Agent Tincan teammate. Independent of Telegram: both can be on.
+
+```toml
+[notify.tincan]
+enabled = true
+bin = "tincan"                 # PATH name or absolute path
+default_agent = "nixer"        # one lowercase name (no spaces or commas)
+# Empty = finished, failed, needs_attention, stalled, cap_reached,
+# review, held, cancelled. Unknown names fail at load.
+# events = ["failed", "needs_attention", "cap_reached"]
+timeout = "10s"                # at least 100ms; kills the process group
+urgent = false                 # --urgent on failed / needs_attention / cap_reached
+
+[labels.proof]
+notify_agent = "nixer"         # first matching task label wins (case-insensitive)
+```
+
+Owner for one event: a task-level owner if the task carries one, else the
+first `[labels.<name>] notify_agent` in the task's label list, else
+`default_agent`. One agent per event (`tincan ask <agent> "<msg>" --notify --json`).
+`--about <request-id>` is added when the task came from a Tincan request
+(not stored on the task row yet, so omitted until intake sets one).
+The ping is fire-and-forget (about 10s timeout covering message build +
+`tincan`, rate-limited warning on failure). One event = one ping. The child
+environment is scrubbed like verify (no `ATR_*` or token vars). Messages are
+short structured lines (task, label, repo, issue/PR, event, status after the
+transition, branch/SHA when known, dashboard URL, UTC) with secrets redacted.
+`dashboard=` is `[dashboard] public_url` or the local listen URL (no Tailscale
+probe).
+
+`atr doctor` checks the binary and `tincan ping <agent>` when this sink is
+enabled. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#7b-tincan-notify).
 
 ### GitHub token
 

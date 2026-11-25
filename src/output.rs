@@ -449,7 +449,7 @@ fn deliver_reply(shared: &Shared, task: &Task, source: SourceKind, payload: &Val
             if crate::telegram::is_assistant_key(&task.key) {
                 return Ok(());
             }
-            let cfg = shared.config.read().unwrap().telegram.clone();
+            let cfg = shared.config.read().unwrap().clone();
             let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let body = if text.trim().is_empty() {
                 format!("finished {}", task.key)
@@ -460,7 +460,14 @@ fn deliver_reply(shared: &Shared, task: &Task, source: SourceKind, payload: &Val
                 }
                 s
             };
-            crate::notify::notify_event(&cfg, crate::notify::Event::Finished, &body, task.shadow);
+            // Telegram delivery of the reply text. Tincan already got one
+            // `finished` ping from `finish_waiting` (one event = one ping).
+            crate::notify::notify_event(
+                &cfg.telegram,
+                crate::notify::Event::Finished,
+                &body,
+                task.shadow,
+            );
             Ok(())
         }
         SourceKind::Inbox => {
