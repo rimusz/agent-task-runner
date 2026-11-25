@@ -9,7 +9,7 @@
 - Shows what is running on a local [dashboard](#dashboard), in the terminal or in Telegram.
 - Keeps each provider's session and reuses that CLI's prompt cache. Cache hit % shows in `atr usage`, `atr status`, the [dashboard](#dashboard) and the TUI; the dashboard also shows tokens saved. [More](#prompt-caching-and-token-savings).
 
-atr never calls vendor APIs or handles your API keys. You sign in to each CLI yourself.
+You sign in to each CLI yourself. atr does not store API keys. `atr usage --plan` and the MCP tool `plan_usage` are the exception: read-only GETs to the usage endpoints those CLIs already call (allow-list in the source). Session tokens are not logged, returned, or written to atr's database. A provider with no proven meter is `unknown`.
 
 ## Install
 
@@ -257,5 +257,7 @@ Setup, config and safety details: [docs/USAGE.md](docs/USAGE.md#providers-and-op
 atr is not affiliated with or endorsed by Anthropic, xAI, Anysphere, OpenAI, Google or the OpenCode authors. Claude, Grok, Cursor, Codex, ChatGPT, Gemini and OpenCode are trademarks of their owners. Use atr with **your own** CLI accounts and follow each provider's terms. Do not resell access or share accounts.
 
 Licensed under MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`). Dependency licenses: `THIRD_PARTY_LICENSES`.
+
+shadow-edit
 
 shadow-edit

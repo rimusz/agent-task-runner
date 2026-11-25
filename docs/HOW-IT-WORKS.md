@@ -171,7 +171,7 @@ and Codex shows `not reported`.
 
 ## Token caching
 
-atr never calls vendor HTTP APIs. Cache hits come from the official CLIs only.
+Prompt-cache numbers come from the official CLIs only. `atr usage --plan` (and MCP `plan_usage`) additionally issues read-only GETs on an allow-list: Claude `https://api.anthropic.com/api/oauth/usage`, Cursor `https://cursor.com/api/usage-summary`, Codex `https://chatgpt.com/backend-api/wham/usage`. Grok Build reuses the existing local `grok agent stdio` method `_x.ai/billing` (not HTTP). Gemini and OpenCode (including local spark and Ollama) have no proven GET meter and return `status: unknown` with a reason. Tokens stay in the CLI's own files for the length of the request. Results are cached in memory for about five minutes. Set `ATR_PLAN_USAGE=off` to skip the reads.
 The goal is high prompt-cache hit rates on first runs and resumes.
 
 **What atr does**
@@ -505,7 +505,7 @@ inherits `check_only`; file changes go to `needs_attention` and are not pushed),
 `timeout_seconds`), `get_result` (text, diff, PR URL), `list_tasks`,
 `task_status` (timeline + last output), `steer_task` (`interrupt: true` stops the
 live turn and resumes its session with the message), `cancel_task`,
-`list_repos`, `list_providers` (with usage), `usage_summary`, `doctor`, and
+`list_repos`, `list_providers` (with usage), `usage_summary`, `plan_usage` (vendor plan meters, read-only), `doctor`, and
 read-only `config_get` (secrets redacted).
 `idempotency_key` on `add_task` (HTTP: header `Idempotency-Key` on `POST /tasks`)
 replays a successful create with the same request identity (same body, workspace,

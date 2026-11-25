@@ -13,6 +13,22 @@ Shipped example: [`config/example.toml`](../config/example.toml).
 `atr init` writes this file (or merges missing keys). Reload a running daemon
 with SIGHUP (`atr providers` edits do that) or `atr service restart`.
 
+## Plan usage (read-only)
+
+`atr usage --plan`, MCP `plan_usage`, and the dashboard `plan_line` read vendor plan meters. There is no config key. The allow-list is GET-only and fixed in `src/plan_usage.rs`:
+
+| Provider | Source |
+|---|---|
+| claude | `GET https://api.anthropic.com/api/oauth/usage` using `~/.claude/.credentials.json` (not stored). If that file is missing, the last `claude_stream` window already in atr's database is shown. |
+| cursor | `GET https://cursor.com/api/usage-summary` using the local Cursor `state.vscdb` session (`cursorAuth/accessToken`). The token is not logged or written to atr's database. |
+| codex | `GET https://chatgpt.com/backend-api/wham/usage` using `~/.codex/auth.json` (`tokens.access_token`, `tokens.account_id`). An API-key login has no ChatGPT plan meter and returns `unknown`. |
+| grok | Local `grok agent stdio` JSON-RPC `_x.ai/billing` (the same probe as reported usage). Not an HTTP call. |
+| gemini | `unknown`. The Code Assist quota call that returns a remaining fraction is a POST. plan_usage does not POST. |
+| opencode | `unknown`. No proven GET plan meter for this CLI. |
+| spark, ollama | `unknown`. Local servers have no plan meter. |
+
+One provider's failure is an `error` on that row only. Rows are cached in memory for about five minutes. `ATR_PLAN_USAGE=off` skips the reads (used by tests and locked-down hosts). `ATR_PLAN_USAGE_HOME` overrides the home directory the adapters read (tests only; do not point it at a copy of real tokens in logs).
+
 ## Where files live
 
 | What | Path |

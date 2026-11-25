@@ -192,7 +192,7 @@ atr config get telegram.assistant.providers
 
 `providers` wins over `provider` (doctor warns when both are set); names must be `[[provider]]` names. See [CONFIG.md](CONFIG.md).
 
-**Dashboard.** While atr is running, open `http://127.0.0.1:7420/`. It is read-only: what is running, what is queued, recent results, and usage. No buttons. Times are in `[ui] timezone` when set, else `display_timezone` (empty = host local), shown once in the header and not repeated after each time. Plan usage reads like `5h 0% · resets Oct 16; 7d 4% · resets Oct 17`; hover a reset date for the full time and zone.
+**Dashboard.** While atr is running, open `http://127.0.0.1:7420/`. It is read-only: what is running, what is queued, recent results, and usage. No buttons. Times are in `[ui] timezone` when set, else `display_timezone` (empty = host local), shown once in the header and not repeated after each time. Plan usage from the CLI stream reads like `5h 0% · resets Oct 16; 7d 4% · resets Oct 17`; hover a reset date for the full time and zone. Under that, `plan_line` is the vendor meter from `atr usage --plan` (cached about five minutes): Claude 5h/7d, Cursor models and on-demand dollars, Codex windows, Grok weekly, or `unknown` with a reason.
 
 **Terminal.**
 
@@ -207,6 +207,8 @@ atr status --json
 atr tasks
 atr tasks my-task
 atr usage --repo demo-1 --period 7d
+atr usage --plan
+atr usage --plan --json
 atr logs -f
 atr doctor
 atr selfheal status
@@ -246,7 +248,7 @@ Telegram command to CLI:
 | `/config set <key> <value>` | `atr config set <key> <value>` | none |
 | `/providers …`, `/enable`, `/disable` | `atr providers [add\|enable\|disable\|move\|model]` | none |
 | `/repos` | `atr repos list` | none |
-| `/usage [period] [repo]` | `atr usage [--period P] [--repo R]` | none |
+| `/usage [period] [repo]` | `atr usage [--period P] [--repo R]` or `atr usage --plan [--json]` | none |
 | `/shadow` | `atr shadow report` | none |
 | `/doctor` | `atr doctor` | none |
 | `/tokens` | `atr github token list` | none |

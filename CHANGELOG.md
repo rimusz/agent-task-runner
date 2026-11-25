@@ -19,6 +19,7 @@
 
 ### Added
 
+- Read-only vendor plan meters: MCP `plan_usage`, `atr usage --plan` (`--json`), and a dashboard `plan_line`. One adapter per supported provider (claude, grok, cursor, codex, gemini, opencode). Local spark and Ollama, and any provider without a proven meter, return `status: unknown` and a reason. HTTP is GET-only against a tested allow-list. Session tokens are not logged, returned, or stored. One failure does not drop the other providers. Cached in memory for about five minutes. `ATR_PLAN_USAGE=off` skips the reads.
 - `[notify.tincan]` pushes task-lifecycle events to an Agent Tincan teammate
   (`tincan ask <agent> --notify --json`). Same `Event` names as Telegram;
   empty `events` is a default subset (finished, failed, needs_attention,

@@ -256,6 +256,12 @@ enum Cmd {
         /// Limit usage to this watch repo (name, owner/name, or path).
         #[arg(long)]
         repo: Option<String>,
+        /// Vendor plan meters (read-only). Ignores --days/--by/--period.
+        #[arg(long)]
+        plan: bool,
+        /// With --plan, print JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// One ok/warn/FAIL line per check. Missing config: offers `atr init` on a TTY.
     Doctor {
@@ -1193,12 +1199,27 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             to,
             by,
             repo,
+            plan,
+            json,
         } => {
             let shared = Shared::open(path)?;
-            let period =
-                atr::usage::resolve(period.as_deref(), days, from.as_deref(), to.as_deref())?;
-            let by = atr::usage::parse_group(&by)?;
-            app::print_usage(&shared, &period, by, repo.as_deref())?;
+            if plan {
+                let cfg = shared.config.read().unwrap().clone();
+                let rows = atr::plan_usage::refresh(&cfg.providers, &shared.db).await;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&atr::plan_usage::rows_json(&rows))?
+                    );
+                } else {
+                    print!("{}", atr::plan_usage::format_text(&rows));
+                }
+            } else {
+                let period =
+                    atr::usage::resolve(period.as_deref(), days, from.as_deref(), to.as_deref())?;
+                let by = atr::usage::parse_group(&by)?;
+                app::print_usage(&shared, &period, by, repo.as_deref())?;
+            }
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Doctor {

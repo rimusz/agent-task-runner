@@ -58,6 +58,8 @@ pub async fn json(shared: &Shared, query: Option<&str>) -> Response {
     if !shared.config.read().unwrap().dashboard.enabled {
         return (StatusCode::NOT_FOUND, Json(json!({"ok": false}))).into_response();
     }
+    let cfg = shared.config.read().unwrap().clone();
+    let _ = crate::plan_usage::refresh(&cfg.providers, &shared.db).await;
     Json(snapshot_period(
         shared,
         &crate::usage::period_from_query(query),
@@ -205,6 +207,7 @@ pub fn snapshot_period(
                 "usage": redact(&usage, &refs),
                 "usage_reported": usage_reported,
                 "usage_segments": crate::reported::provider_usage_segments(&view, tz, now),
+                "plan_line": crate::plan_usage::line_for(&p.name),
                 "extra_credits": extra_credits,
                 "model": p.model,
                 "version": crate::providers::recorded_version(&shared.config_path, &p.name).map(|(v, _)| v),
@@ -305,6 +308,7 @@ pub fn snapshot_period(
         "host": host,
         "finished": finished,
         "providers": providers,
+        "plan_usage": crate::plan_usage::cached_rows(),
         "today": today,
         "savings": savings,
         "logs": tail_logs(&cfg, &secrets),
