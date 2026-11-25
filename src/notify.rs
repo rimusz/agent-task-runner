@@ -1,4 +1,5 @@
-use crate::config::TelegramConfig;
+use crate::config::{Config, TelegramConfig, TincanConfig};
+use crate::db::Task;
 use anyhow::{bail, Result};
 
 /// Stable Telegram notification kinds. `[telegram] events` filters these.
@@ -65,6 +66,10 @@ impl Event {
     }
 
     pub fn parse(name: &str) -> Result<Self> {
+        Self::parse_in(name, "telegram.events")
+    }
+
+    pub fn parse_in(name: &str, field: &str) -> Result<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "start" => Ok(Event::Start),
             "finished" => Ok(Event::Finished),
@@ -83,7 +88,7 @@ impl Event {
             "hook" => Ok(Event::Hook),
             "cap_reached" => Ok(Event::CapReached),
             other => bail!(
-                "unknown telegram.events value {other:?}; expected one of: {}",
+                "unknown {field} value {other:?}; expected one of: {}",
                 Event::ALL
                     .iter()
                     .map(|e| e.as_str())
@@ -94,15 +99,38 @@ impl Event {
     }
 }
 
+/// Default `[notify.tincan] events` when the list is omitted or empty.
+pub const TINCAN_DEFAULT_EVENTS: &[Event] = &[
+    Event::Finished,
+    Event::Failed,
+    Event::NeedsAttention,
+    Event::Stalled,
+    Event::CapReached,
+    Event::Review,
+    Event::Held,
+    Event::Cancelled,
+];
+
+pub fn default_tincan_event_names() -> Vec<String> {
+    TINCAN_DEFAULT_EVENTS
+        .iter()
+        .map(|e| e.as_str().to_string())
+        .collect()
+}
+
 /// Canonicalize `[telegram] events`. Empty input stays empty (send every event).
 pub fn parse_event_names(raw: &[String]) -> Result<Vec<String>> {
+    parse_event_names_in(raw, "telegram.events")
+}
+
+pub fn parse_event_names_in(raw: &[String], field: &str) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for name in raw {
         let name = name.trim();
         if name.is_empty() {
             continue;
         }
-        let event = Event::parse(name)?;
+        let event = Event::parse_in(name, field)?;
         let canon = event.as_str().to_string();
         if !out.iter().any(|e| e == &canon) {
             out.push(canon);
@@ -111,13 +139,21 @@ pub fn parse_event_names(raw: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
-pub fn allows_event(cfg: &TelegramConfig, event: Event) -> bool {
-    if cfg.events.is_empty() || cfg.events.iter().any(|e| e == event.as_str()) {
+pub fn names_allow(events: &[String], event: Event) -> bool {
+    if events.is_empty() || events.iter().any(|e| e == event.as_str()) {
         return true;
     }
     // Existing configs that list `stalled` (Mini) still receive cap alerts.
     // The Telegram text is never stall / CLI hang / heartbeat.
-    event == Event::CapReached && cfg.events.iter().any(|e| e == Event::Stalled.as_str())
+    event == Event::CapReached && events.iter().any(|e| e == Event::Stalled.as_str())
+}
+
+pub fn allows_event(cfg: &TelegramConfig, event: Event) -> bool {
+    names_allow(&cfg.events, event)
+}
+
+pub fn tincan_allows(cfg: &TincanConfig, event: Event) -> bool {
+    names_allow(&cfg.events, event)
 }
 
 struct TelegramDest {
@@ -146,6 +182,13 @@ pub fn notify_event(cfg: &TelegramConfig, event: Event, body: &str, shadow: bool
         return;
     }
     notify_unless_shadow(cfg, body, shadow);
+}
+
+/// Telegram plus `[notify.tincan]`. One call site so a task event cannot
+/// reach Telegram and skip Tincan.
+pub fn emit(cfg: &Config, event: Event, body: &str, shadow: bool, task: Option<&Task>) {
+    notify_event(&cfg.telegram, event, body, shadow);
+    crate::tincan::notify(cfg, event, body, shadow, task);
 }
 
 pub fn notify_unless_shadow(cfg: &TelegramConfig, body: &str, shadow: bool) {

@@ -512,11 +512,13 @@ async fn plugin_hook(
         && !crate::telegram::is_assistant_key(&task)
     {
         let cfg = shared.config.read().unwrap().clone();
-        crate::notify::notify_event(
-            &cfg.telegram,
+        let row = shared.db.get_task(&task).ok().flatten();
+        crate::notify::emit(
+            &cfg,
             crate::notify::Event::Hook,
             &format!("hook {kind} {task}"),
             false,
+            row.as_ref(),
         );
     }
     (StatusCode::OK, Json(json!({"ok": true})))

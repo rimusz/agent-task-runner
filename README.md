@@ -194,6 +194,7 @@ Settings: [docs/CONFIG.md](docs/CONFIG.md#telegram). Provider choice: [docs/CONF
 - **Grok Bot operator**: import the [atr Operator](https://x.ai/bot/8N21KO1uz_jDJt3eqELFA) bot template to queue work and watch atr from Grok Bot. A bot needs MCP over HTTP (Tailscale plus a token), not stdio.
 - **Inbox folder**: scripts drop a task file and atr runs it. [More](docs/USAGE.md#hand-work-to-atr)
 - **Telegram**: add tasks, check progress, or ask the [assistant](#telegram-assistant) in an allowed private chat. Optional `[telegram] events` filter. [More](docs/USE-CASES.md#7-control-from-your-phone)
+- **Tincan**: push those same task events to an owning agent (`[notify.tincan]`, `tincan ask <agent> --notify`). [CONFIG](docs/CONFIG.md#tincan-task-pings-notifytincan)
 - **Terminal TUI**: chat with your coding CLIs in the terminal, with atr as the proxy. [More](#interactive-tui)
 
 ## Providers
@@ -256,3 +257,5 @@ Setup, config and safety details: [docs/USAGE.md](docs/USAGE.md#providers-and-op
 atr is not affiliated with or endorsed by Anthropic, xAI, Anysphere, OpenAI, Google or the OpenCode authors. Claude, Grok, Cursor, Codex, ChatGPT, Gemini and OpenCode are trademarks of their owners. Use atr with **your own** CLI accounts and follow each provider's terms. Do not resell access or share accounts.
 
 Licensed under MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`). Dependency licenses: `THIRD_PARTY_LICENSES`.
+
+shadow-edit

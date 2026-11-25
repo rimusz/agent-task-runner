@@ -927,6 +927,7 @@ mod tests {
         let hook = crate::config::NotifyConfig {
             command: format!("printf '%s|%s|%s|%s' \"$ATR_ALERT_KIND\" \"$ATR_ALERT_MESSAGE\" \"$ATR_ALERT_DAYS_LEFT\" \"${{ATR_GH_TOKEN:-none}}\" > {}", out.display()),
             timeout: Duration::from_secs(5),
+            ..Default::default()
         };
         assert_eq!(
             run_hook(
@@ -944,6 +945,7 @@ mod tests {
         let slow = crate::config::NotifyConfig {
             command: "sleep 5".into(),
             timeout: Duration::from_millis(200),
+            ..Default::default()
         };
         let t0 = std::time::Instant::now();
         assert_eq!(run_hook(&slow, "k", "m", &[]), None);

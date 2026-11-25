@@ -351,6 +351,7 @@ pub async fn run_with_listen(
     reported_usage_check(&mut checks, cfg);
     skip_at_check(&mut checks, cfg);
     telegram_check(&mut checks, cfg, config_path);
+    tincan_check(&mut checks, cfg);
     mcp_check(&mut checks, cfg);
     path_check(&mut checks);
 
@@ -1322,6 +1323,61 @@ fn skip_at_check(checks: &mut Vec<Check>, cfg: &Config) {
     }
 }
 
+fn tincan_check(checks: &mut Vec<Check>, cfg: &Config) {
+    let tc = &cfg.notify.tincan;
+    if !tc.enabled {
+        push(checks, "tincan", Status::Ok, "disabled".into(), None);
+        return;
+    }
+    let Some(bin) = crate::tincan::resolve_bin(&tc.bin) else {
+        push(
+            checks,
+            "tincan",
+            Status::Fail,
+            format!("{} not found", tc.bin),
+            Some("install Agent Tincan and put `tincan` on PATH, or set notify.tincan.bin".into()),
+        );
+        return;
+    };
+    push(
+        checks,
+        "tincan",
+        Status::Ok,
+        bin.display().to_string(),
+        None,
+    );
+    let agents = crate::tincan::configured_agents(cfg);
+    if agents.is_empty() {
+        push(
+            checks,
+            "tincan agent",
+            Status::Fail,
+            "no default_agent or labels.*.notify_agent".into(),
+            Some("set notify.tincan.default_agent (e.g. nixer)".into()),
+        );
+        return;
+    }
+    let timeout = tc
+        .timeout
+        .min(std::time::Duration::from_secs(5))
+        .max(std::time::Duration::from_millis(100));
+    let scrub = crate::tincan::scrub_keys(cfg);
+    let bin = bin.to_string_lossy().into_owned();
+    for agent in agents {
+        let name = format!("tincan ping {agent}");
+        match crate::tincan::run_tincan(&bin, &crate::tincan::ping_args(&agent), timeout, &scrub) {
+            Ok(_) => push(checks, &name, Status::Ok, "reachable".into(), None),
+            Err(e) => push(
+                checks,
+                &name,
+                Status::Warn,
+                e.to_string(),
+                Some(format!("tincan ping {agent}")),
+            ),
+        }
+    }
+}
+
 fn telegram_check(checks: &mut Vec<Check>, cfg: &Config, config_path: &Path) {
     if !cfg.telegram.enabled {
         push(checks, "telegram", Status::Ok, "disabled".into(), None);
@@ -1577,6 +1633,68 @@ allowed_chat_ids = []
         assert_eq!(tg.status, Status::Ok);
         assert_eq!(tg.detail, "disabled");
         assert!(report.checks.iter().all(|c| c.name != "telegram token"));
+        let tc = report.checks.iter().find(|c| c.name == "tincan").unwrap();
+        assert_eq!(tc.status, Status::Ok);
+        assert_eq!(tc.detail, "disabled");
+    }
+
+    #[tokio::test]
+    async fn tincan_disabled_is_ok() {
+        let (_dir, cfg, path) = mini_cfg("");
+        let report = run(&cfg, &path, false).await;
+        let tc = report.checks.iter().find(|c| c.name == "tincan").unwrap();
+        assert_eq!(tc.status, Status::Ok);
+        assert_eq!(tc.detail, "disabled");
+    }
+
+    #[tokio::test]
+    async fn tincan_enabled_missing_bin_fails() {
+        let (_dir, cfg, path) = mini_cfg(
+            r#"
+[notify.tincan]
+enabled = true
+bin = "/no/such/tincan-bin"
+default_agent = "nixer"
+"#,
+        );
+        let report = run(&cfg, &path, false).await;
+        let tc = report.checks.iter().find(|c| c.name == "tincan").unwrap();
+        assert_eq!(tc.status, Status::Fail);
+        assert!(tc.detail.contains("not found"), "{}", tc.detail);
+    }
+
+    #[tokio::test]
+    async fn tincan_enabled_pings_fake_bin() {
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fake-tincan.sh");
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("tincan");
+        std::fs::copy(&src, &bin).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).unwrap();
+        }
+        let (_dir, cfg, path) = mini_cfg(&format!(
+            r#"
+[notify.tincan]
+enabled = true
+bin = "{}"
+default_agent = "nixer"
+"#,
+            bin.display()
+        ));
+        let report = run(&cfg, &path, false).await;
+        let tc = report.checks.iter().find(|c| c.name == "tincan").unwrap();
+        assert_eq!(tc.status, Status::Ok, "{}", tc.detail);
+        let ping = report
+            .checks
+            .iter()
+            .find(|c| c.name == "tincan ping nixer")
+            .unwrap();
+        assert_eq!(ping.status, Status::Ok, "{}", ping.detail);
     }
 
     #[tokio::test]

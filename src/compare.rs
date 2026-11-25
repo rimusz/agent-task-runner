@@ -470,6 +470,7 @@ fn after_arm_inner(shared: &Shared, arm_key: &str) -> Result<()> {
                     &cfg,
                     crate::notify::Event::NeedsAttention,
                     &format!("needs_attention {parent_key} (compare: promoting {w} failed: {e:#})"),
+                    Some(&parent),
                 );
                 return Ok(());
             }
@@ -489,6 +490,7 @@ fn after_arm_inner(shared: &Shared, arm_key: &str) -> Result<()> {
                         format!(" {}", d.pr_url)
                     }
                 ),
+                Some(&parent),
             );
         }
         None => {
@@ -504,14 +506,19 @@ fn after_arm_inner(shared: &Shared, arm_key: &str) -> Result<()> {
                     msg.push_str(&format!("\n  {}", a.verify_tail));
                 }
             }
-            notify(&cfg, crate::notify::Event::NeedsAttention, &msg);
+            notify(
+                &cfg,
+                crate::notify::Event::NeedsAttention,
+                &msg,
+                Some(&parent),
+            );
         }
     }
     Ok(())
 }
 
-fn notify(cfg: &Config, event: crate::notify::Event, msg: &str) {
-    crate::notify::notify_event(&cfg.telegram, event, msg, false);
+fn notify(cfg: &Config, event: crate::notify::Event, msg: &str, task: Option<&crate::db::Task>) {
+    crate::notify::emit(cfg, event, msg, false, task);
 }
 
 fn save(db: &Db, key: &str, d: &Decision) -> Result<()> {
