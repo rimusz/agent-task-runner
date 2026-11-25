@@ -6,6 +6,7 @@
 #   $0.fail  if present, exit 1
 base=$0
 log=${TINC_LOG:-$base.log}
+echo $$ >"$base.pid"
 {
     printf '%s\n' "$0" "$@"
     printf '---\n'
@@ -21,7 +22,9 @@ log=${TINC_LOG:-$base.log}
     fi
 } >>"$log"
 if [ -f "$base.sleep" ]; then
-    sleep "$(cat "$base.sleep")"
+    sleep "$(cat "$base.sleep")" &
+    echo $! >"$base.sleeppid"
+    wait
 fi
 if [ -f "$base.fail" ]; then
     exit 1

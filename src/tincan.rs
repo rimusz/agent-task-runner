@@ -75,31 +75,38 @@ pub fn notify_ctx(cfg: &Config, event: Event, body: &str, shadow: bool, task: Op
     let cfg = cfg.clone();
     let task = task.cloned();
     let body = body.to_string();
-    std::thread::spawn(move || {
-        let budget = cfg.notify.tincan.timeout;
-        let started = Instant::now();
-        let mut ping = Ping {
-            bin: cfg.notify.tincan.bin.clone(),
-            agent,
-            about: task
-                .as_ref()
-                .map(|t| t.about.trim().to_string())
-                .filter(|s| !s.is_empty()),
-            urgent: cfg.notify.tincan.urgent && urgent_event(event),
-            timeout: budget,
-            message: format_message(&cfg, event, &body, task.as_ref()),
-            scrub: scrub_keys(&cfg),
-        };
-        let rest = budget.saturating_sub(started.elapsed());
-        if rest < Duration::from_millis(100) {
-            warn_fail(&"tincan notify timed out building the message");
-            return;
-        }
-        ping.timeout = rest;
-        if let Err(e) = deliver(&ping) {
-            warn_fail(&e);
-        }
-    });
+    // `Builder::spawn` returns the error. `thread::spawn` panics, which would
+    // fail the run this ping must not affect.
+    let spawned = std::thread::Builder::new()
+        .name("tincan-notify".into())
+        .spawn(move || {
+            let budget = cfg.notify.tincan.timeout;
+            let started = Instant::now();
+            let mut ping = Ping {
+                bin: cfg.notify.tincan.bin.clone(),
+                agent,
+                about: task
+                    .as_ref()
+                    .map(|t| t.about.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                urgent: cfg.notify.tincan.urgent && urgent_event(event),
+                timeout: budget,
+                message: format_message(&cfg, event, &body, task.as_ref()),
+                scrub: scrub_keys(&cfg),
+            };
+            let rest = budget.saturating_sub(started.elapsed());
+            if rest < Duration::from_millis(100) {
+                warn_fail(&"tincan notify timed out building the message");
+                return;
+            }
+            ping.timeout = rest;
+            if let Err(e) = deliver(&ping) {
+                warn_fail(&e);
+            }
+        });
+    if let Err(e) = spawned {
+        warn_fail(&e);
+    }
 }
 
 fn urgent_event(event: Event) -> bool {
@@ -115,7 +122,11 @@ pub fn route_agent(cfg: &Config, task: Option<&TincanTask>) -> Option<String> {
     if let Some(t) = task {
         let direct = t.notify_agent.trim();
         if !direct.is_empty() {
-            return Some(normalize_agent(direct));
+            if let Ok(agent) = validate_agent("notify_agent", direct) {
+                if !agent.is_empty() {
+                    return Some(agent);
+                }
+            }
         }
         if let Some(a) = cfg.label_policy(&t.labels).notify_agent {
             if !a.trim().is_empty() {
@@ -133,6 +144,23 @@ pub fn route_agent(cfg: &Config, task: Option<&TincanTask>) -> Option<String> {
 
 pub fn normalize_agent(raw: &str) -> String {
     raw.trim().to_ascii_lowercase()
+}
+
+/// One teammate name. A comma is `tincan ask`'s multi-agent separator, and a
+/// leading `-` is an argv flag. Empty is allowed (no owner configured).
+pub fn validate_agent(field: &str, raw: &str) -> Result<String> {
+    let agent = normalize_agent(raw);
+    if agent.is_empty() {
+        return Ok(agent);
+    }
+    if agent.contains(',')
+        || agent.contains(char::is_whitespace)
+        || agent.starts_with('-')
+        || agent.contains('\0')
+    {
+        bail!("{field} must be a single agent name (no spaces, commas, or a leading '-')");
+    }
+    Ok(agent)
 }
 
 /// Agents doctor should ping: default plus unique per-label owners.
@@ -241,10 +269,10 @@ fn dashboard_link(cfg: &Config) -> String {
 }
 
 fn git_head(worktree: &str) -> (Option<String>, Option<String>) {
+    // No `exists()` first: a stuck mount would block this worker with no
+    // deadline. `git` fails fast when the path is missing, and `git_one`
+    // kills it if it hangs.
     let p = Path::new(worktree);
-    if !p.exists() {
-        return (None, None);
-    }
     let branch = git_one(p, &["rev-parse", "--abbrev-ref", "HEAD"]);
     let sha = git_one(p, &["rev-parse", "--short", "HEAD"]);
     (branch, sha)
@@ -255,6 +283,7 @@ const GIT_HEAD_TIMEOUT: Duration = Duration::from_secs(2);
 fn git_one(cwd: &Path, args: &[&str]) -> Option<String> {
     let mut cmd = git_capture();
     cmd.current_dir(cwd).args(args);
+    isolate_group(&mut cmd);
     let child = retry_exec_busy(|| cmd.spawn()).ok()?;
     let (mut child, st) = wait_child(child, GIT_HEAD_TIMEOUT).ok()?;
     if !st.success() {
@@ -338,6 +367,7 @@ pub fn run_tincan(bin: &str, args: &[String], timeout: Duration, scrub: &[String
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    isolate_group(&mut cmd);
     for k in scrub {
         cmd.env_remove(k);
     }
@@ -363,11 +393,13 @@ fn wait_child(
         match child.try_wait() {
             Ok(Some(st)) => return Ok((child, st)),
             Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                if reap_until(&mut child, Duration::from_millis(500)).is_none() {
-                    // Still running; leaking Child avoids Drop's blocking wait.
-                    std::mem::forget(child);
-                }
+                // Kill the process group (the child and anything it spawned),
+                // then reap on another thread. Forgetting the `Child` would
+                // leave a zombie for the life of the atr process. Waiting
+                // here could block this worker if the process is stuck in
+                // uninterruptible sleep; the scheduler is not this thread.
+                kill_group(&mut child);
+                detach_reap(child);
                 bail!(
                     "timed out after {}",
                     crate::duration::format_duration(timeout)
@@ -379,19 +411,42 @@ fn wait_child(
     }
 }
 
-fn reap_until(
-    child: &mut std::process::Child,
-    limit: Duration,
-) -> Option<std::process::ExitStatus> {
-    let deadline = Instant::now() + limit;
-    loop {
-        match child.try_wait() {
-            Ok(Some(st)) => return Some(st),
-            Err(_) => return None,
-            Ok(None) if Instant::now() >= deadline => return None,
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+fn isolate_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+    }
+}
+
+fn kill_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: `pid` is a child spawned with `process_group(0)`, so its
+        // process-group id is `pid`. A negative pid signals that group (the
+        // CLI and its children). A dead pid returns ESRCH.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
         }
     }
+    let _ = child.kill();
+}
+
+/// `wait` on a background thread so a stuck child cannot zombie and cannot
+/// block the caller. If the reaper thread cannot start, `Child`'s drop
+/// waits on this thread (the notify worker or a `spawn_blocking` doctor
+/// thread, never the scheduler).
+fn detach_reap(mut child: std::process::Child) {
+    let _ = std::thread::Builder::new()
+        .name("atr-reap".into())
+        .spawn(move || {
+            let _ = child.wait();
+        });
 }
 
 pub fn scrub_keys(cfg: &Config) -> Vec<String> {
@@ -522,6 +577,16 @@ notify_agent = "other"
             ..Default::default()
         };
         assert_eq!(route_agent(&cfg, Some(&both)).as_deref(), Some("direct"));
+        let multi = TincanTask {
+            labels: "proof".into(),
+            notify_agent: "a,b".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            route_agent(&cfg, Some(&multi)).as_deref(),
+            Some("proofy"),
+            "a comma is not one agent; fall through to the label"
+        );
         let unlabeled = TincanTask {
             labels: "unrelated".into(),
             ..Default::default()
@@ -610,6 +675,34 @@ notify_agent = "other"
         );
         let quiet = ask_args("nixer", "hello", None, false);
         assert_eq!(quiet, vec!["ask", "nixer", "hello", "--notify", "--json"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn proc_state(pid: &str) -> Option<char> {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = text.split_once(')').map(|(_, r)| r.trim_start())?;
+        rest.chars().next()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_dead(pid_file: &str) {
+        let Ok(pid) = std::fs::read_to_string(pid_file) else {
+            return;
+        };
+        let pid = pid.trim();
+        if pid.is_empty() {
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match proc_state(pid) {
+                None => return,
+                Some(st) if Instant::now() >= deadline => {
+                    panic!("pid {pid} still state {st} after timeout kill");
+                }
+                _ => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
     }
 
     fn chmod_x(p: &Path) {
@@ -702,6 +795,12 @@ urgent = true
         .to_string();
         assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
         assert!(err.contains("timed out"), "{err}");
+        // The shell and the `sleep` it spawned must both be gone (not zombies).
+        #[cfg(target_os = "linux")]
+        {
+            wait_dead(&format!("{}.pid", bin.display()));
+            wait_dead(&format!("{}.sleeppid", bin.display()));
+        }
         let _ = std::fs::remove_file(format!("{}.sleep", bin.display()));
         std::fs::write(format!("{}.fail", bin.display()), "").unwrap();
         let err = run_tincan(

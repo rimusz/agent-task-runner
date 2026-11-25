@@ -351,7 +351,25 @@ pub async fn run_with_listen(
     reported_usage_check(&mut checks, cfg);
     skip_at_check(&mut checks, cfg);
     telegram_check(&mut checks, cfg, config_path);
-    tincan_check(&mut checks, cfg);
+    // Pings block for up to a few seconds. Self-heal, MCP, and `/doctor`
+    // await this function on the runtime; keep that wait off the worker.
+    let tincan_cfg = cfg.clone();
+    match tokio::task::spawn_blocking(move || {
+        let mut extra = Vec::new();
+        tincan_check(&mut extra, &tincan_cfg);
+        extra
+    })
+    .await
+    {
+        Ok(extra) => checks.extend(extra),
+        Err(_) => push(
+            &mut checks,
+            "tincan",
+            Status::Warn,
+            "check task failed".into(),
+            None,
+        ),
+    }
     mcp_check(&mut checks, cfg);
     path_check(&mut checks);
 

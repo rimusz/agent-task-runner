@@ -699,11 +699,11 @@ to an owning Agent Tincan teammate. Independent of Telegram: both can be on.
 [notify.tincan]
 enabled = true
 bin = "tincan"                 # PATH name or absolute path
-default_agent = "nixer"        # lowercase teammate name
+default_agent = "nixer"        # one lowercase name (no spaces or commas)
 # Empty = finished, failed, needs_attention, stalled, cap_reached,
 # review, held, cancelled. Unknown names fail at load.
 # events = ["failed", "needs_attention", "cap_reached"]
-timeout = "10s"                # subprocess kill; never blocks a run
+timeout = "10s"                # at least 100ms; kills the process group
 urgent = false                 # --urgent on failed / needs_attention / cap_reached
 
 [labels.proof]
@@ -724,7 +724,7 @@ transition, branch/SHA when known, dashboard URL, UTC) with secrets redacted.
 probe).
 
 `atr doctor` checks the binary and `tincan ping <agent>` when this sink is
-enabled. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#8-tincan-notify).
+enabled. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#7b-tincan-notify).
 
 ### GitHub token
 

@@ -27,6 +27,9 @@
   message build + CLI); `atr doctor` checks the binary and `tincan ping
   <agent>` when enabled. One event is one ping; `status=` is the
   post-transition row; `finished` waits until output delivery so `pr=` is set.
+  A timeout kills the process group and reaps it. `default_agent` /
+  `notify_agent` must be a single name. `atr doctor` pings run off the
+  async worker.
 
   ```toml
   [notify.tincan]

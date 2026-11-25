@@ -346,7 +346,8 @@ cancelled), not Telegram's empty-means-all. A listed `stalled` still admits
 `cap_reached`. Delivery is `tincan ask <agent> "<msg>" --notify --json`
 (optional `--about`, optional `--urgent` on failed / needs_attention /
 cap_reached). atr never waits on Tincan and never fails a run if the CLI is
-missing or slow. Assistant (`tg…`) and TUI (`cli-…`) keys are skipped, same
+missing or slow. A timeout kills the `tincan` process group and reaps it
+off the scheduler. Assistant (`tg…`) and TUI (`cli-…`) keys are skipped, same
 as Telegram task notifies. One event is one Tincan ping: Telegram reply
 delivery does not send a second `finished`. Shadow tasks are skipped. The
 message `status=` field is the task row after the transition; `pr=` is filled

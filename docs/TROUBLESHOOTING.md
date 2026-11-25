@@ -354,7 +354,11 @@ Non-zero exits and timeouts are logged as warnings.
 - Agent name is lowercase (`nixer`). `tincan ping nixer` checks the path
   without model reasoning.
 - A hung `tincan` never blocks a run (killed after `timeout`, default 10s).
-  The timeout covers message build (`git rev-parse`) plus the CLI.
+  The timeout covers message build (`git rev-parse`) plus the CLI. The
+  kill is the whole process group, then the process is reaped, so a child
+  of `tincan` does not stay running and the CLI does not stay a zombie.
+  `atr doctor` pings run off the async worker (self-heal and `/doctor`
+  await doctor).
 - Duplicate `finished` pings: Telegram reply delivery is Telegram-only;
   Tincan is notified once from the scheduler after output delivery (`pr=`
   included when atr opened a PR).

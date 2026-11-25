@@ -1639,7 +1639,7 @@ fn parse_host(raw: RawHost) -> Result<HostConfig> {
     })
 }
 
-fn parse_label_policy(raw: &RawLabelPolicy) -> Result<LabelPolicy> {
+fn parse_label_policy(name: &str, raw: &RawLabelPolicy) -> Result<LabelPolicy> {
     let run_timeout = if raw.run_timeout.trim().is_empty() {
         None
     } else {
@@ -1653,7 +1653,10 @@ fn parse_label_policy(raw: &RawLabelPolicy) -> Result<LabelPolicy> {
         if a.is_empty() {
             None
         } else {
-            Some(a.to_ascii_lowercase())
+            Some(crate::tincan::validate_agent(
+                &format!("labels.{name}.notify_agent"),
+                a,
+            )?)
         }
     };
     Ok(LabelPolicy {
@@ -1679,6 +1682,9 @@ fn parse_tincan(raw: RawTincan) -> Result<TincanConfig> {
     } else {
         parse_duration(&raw.timeout).context("[notify.tincan] timeout")?
     };
+    if timeout < Duration::from_millis(100) {
+        bail!("[notify.tincan] timeout must be at least 100ms");
+    }
     let bin = {
         let b = raw.bin.trim();
         if b.is_empty() {
@@ -1690,7 +1696,10 @@ fn parse_tincan(raw: RawTincan) -> Result<TincanConfig> {
     Ok(TincanConfig {
         enabled: raw.enabled,
         bin,
-        default_agent: raw.default_agent.trim().to_ascii_lowercase(),
+        default_agent: crate::tincan::validate_agent(
+            "notify.tincan.default_agent",
+            &raw.default_agent,
+        )?,
         events,
         timeout,
         urgent: raw.urgent,
@@ -3423,7 +3432,7 @@ impl Config {
                     if name.is_empty() {
                         continue;
                     }
-                    out.insert(name.to_string(), parse_label_policy(&raw_p)?);
+                    out.insert(name.to_string(), parse_label_policy(name, &raw_p)?);
                 }
                 out
             },
@@ -4134,6 +4143,49 @@ kind = "claude"
         .to_string();
         assert!(err.contains("unknown notify.tincan.events"), "{err}");
         assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn tincan_rejects_multi_agent_and_zero_timeout() {
+        let agent = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[notify.tincan]
+default_agent = "nixer,other"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(agent.contains("single agent name"), "{agent}");
+        let label = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[labels.proof]
+notify_agent = "-nixer"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(label.contains("labels.proof.notify_agent"), "{label}");
+        let timeout = parse_config_toml(
+            r#"
+repo_path = "/tmp/repo"
+[notify.tincan]
+timeout = "0s"
+[[provider]]
+name = "claude"
+kind = "claude"
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(timeout.contains("at least 100ms"), "{timeout}");
     }
 
     #[test]
