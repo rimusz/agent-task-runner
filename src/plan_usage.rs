@@ -797,15 +797,16 @@ fn cursor_session_token_usable(token: &str) -> bool {
 /// Plaintext session from the Cursor macOS keychain. The `state.vscdb` copy
 /// is ciphertext when `cursor.storage.authTokenEncryptionAtRest` is true.
 /// Stderr is dropped so a prompt or blob cannot land in the error string.
+#[cfg(not(target_os = "macos"))]
 fn keychain_cursor_access_token() -> Result<String, String> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return Err(
-            "Cursor access token in state.vscdb is not a session JWT and there is no macOS keychain item cursor-access-token to read"
-                .into(),
-        );
-    }
-    #[cfg(target_os = "macos")]
+    Err(
+        "Cursor access token in state.vscdb is not a session JWT and there is no macOS keychain item cursor-access-token to read"
+            .into(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_cursor_access_token() -> Result<String, String> {
     {
         let out = std::process::Command::new("/usr/bin/security")
             .args([
