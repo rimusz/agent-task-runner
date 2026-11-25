@@ -248,6 +248,10 @@ assistant):
   with `--base`/`--head` and a body it writes (Summary, Task, Changes, Agent
   notes). An agent that already pushed or opened the PR itself is fine. A run
   with no commits past the base branch opens no PR;
+- `--output branch`: atr commits any uncommitted edits (same message and
+  author as a PR; a clean tree is not an empty commit) and pushes the branch.
+  It does not open a PR. If HEAD already matches its upstream, the push is
+  skipped;
 - a run that changed nothing for a `pr`/`branch`/`patch` task, or returned no
   text for an `issue_comment` task, is an honest **no-op**: `needs_attention`
   with `NO-OP <key>: …`, never success. `--check-only` / `check_only` is the
