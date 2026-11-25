@@ -32,6 +32,8 @@ pub struct Harness {
 #[allow(dead_code)]
 impl Harness {
     pub async fn with_providers(providers: &[(&str, bool, &str)], listen: &str) -> Self {
+        // Keep plan_usage off the real home session files during e2e.
+        std::env::set_var("ATR_PLAN_USAGE", "off");
         let dir = TempDir::new().unwrap();
         let fake_dir = dir.path().join("fake");
         fs::create_dir_all(&fake_dir).unwrap();

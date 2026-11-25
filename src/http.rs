@@ -1291,7 +1291,7 @@ token_file = "{token}"
         let body = listed.into_string().unwrap();
         assert!(!body.contains(&token), "token leaked in tools/list");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 12, "{v}");
+        assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 13, "{v}");
 
         let empty = tool_json(
             rpc(

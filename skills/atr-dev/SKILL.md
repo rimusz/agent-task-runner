@@ -23,7 +23,7 @@ atr is a single Rust binary (`atr`, edition 2021, MSRV 1.89) that runs as a long
 | `src/telegram*.rs`, `notify.rs`, `tincan.rs` | Telegram bot/assistant, health, alerts, `[notify] command` hook, `[notify.tincan]` Agent Tincan pings |
 | `src/http.rs`, `dashboard.rs`, `dashboard.html`, `mcp.rs` | HTTP API, read-only dashboard (`dashboard.json`), MCP server |
 | `src/doctor.rs`, `service.rs`, `upgrade.rs`, `init.rs`, `skill.rs`, `plugin.rs` | doctor checks, launchd/systemd service, self-upgrade, init, skill install |
-| `src/db.rs`, `usage.rs`, `quota.rs`, `gc.rs`, `logrotate.rs` | SQLite state, usage/quota, cleanup |
+| `src/db.rs`, `usage.rs`, `quota.rs`, `plan_usage.rs`, `gc.rs`, `logrotate.rs` | SQLite state, usage/quota, read-only vendor plan meters, cleanup |
 | `src/lessons.rs` | per-repo lessons: scrubber, `## Repo lessons (atr)` block (variable tail only, first runs, worker roles), export; automatic reflect (signal mapping, hidden `<key>-reflect` task, JSON parse, dedupe, ttl). Fake CLIs answer reflect runs from `fake/reflect.json` |
 | `src/compare.rs` | compare mode: parent (role `compare`) + arms `K-a`/`K-b` (role `arm`, own hardened worktree via `worktree::ensure_worktree_no_push`, strict pin). `after_arm` judges once both arms are terminal (`judge` is pure; `diff_stats`, `promote`, `cleanup_loser`), `add` validates for the CLI, `show_text`/`show_json`. Strict pin lives in `scheduler::pick_provider` / `handle_failover` / `fail_strict_arm`. `tests/compare.rs` covers failover paths and judge outcomes; fake CLIs do `edit_lines` (lines from `fake/<cli>.lines`), fake gh accepts `pr create` when `fake/gh-allow-pr` exists |
 | `tests/` | integration tests (`e2e.rs`, `init.rs`, `readme.rs` docs checks, `release_decide.rs`, shell tests, `fixtures/` fake CLIs) |
@@ -70,10 +70,10 @@ CI (`.github/workflows/ci.yml`): docs-only diffs (`docs/`, `*.md`, LICENSE) skip
 ## Making changes
 
 - **Config key:** add to the struct in `src/config.rs` with a serde default so old configs still load; unknown/removed keys must be ignored with an info line, never a hard error. Add edit support in `config_edit.rs` if settable. Document it in `docs/CONFIG.md` (tests/readme.rs checks CONFIG.md).
-- **CLI command:** add the clap subcommand in `src/main.rs`, logic in its module, `--json` output where status-like. Document in `docs/USAGE.md`/`CONFIG.md`, and in the operator skill if operators use it.
+- **CLI command:** add the clap subcommand in `src/main.rs`, logic in its module, `--json` output where status-like. Document in `docs/USAGE.md`/`CONFIG.md`, and in the operator skill if operators use it. `atr usage --plan` is the vendor plan meter (`src/plan_usage.rs`).
 - **Doctor / status:** new health facts get a `doctor` line (ok/warn/fail) and, if useful, a `status` line and dashboard badge.
 - **Prompt text:** per-task additions go after `prompt::VARIABLE_MARKER` via `task::insert_before_messages`, never into the stable prefix (`tests/lessons.rs` asserts the prefix hash stays equal when lessons change).
-- **Dashboard:** keep it **read-only** (GET `dashboard.json` + `dashboard.html`; no mutating endpoints, no actions). Never expose secret values — env var names only.
+- **Dashboard:** keep it **read-only** (GET `dashboard.json` + `dashboard.html`; no mutating endpoints, no actions). Never expose secret values — env var names only. `plan_usage` may GET only the URLs in `ALLOWED_GET_URLS` (`src/plan_usage.rs`); a test rejects every other URL. Do not log, return, or store session tokens.
 - **Docs to update with behaviour changes:** `docs/CONFIG.md`, `docs/HOW-IT-WORKS.md`, `docs/TROUBLESHOOTING.md` (plus USAGE/README as relevant).
 - **Operator skill:** edit `skills/atr/SKILL.md` and copy it to `plugins/atr-operator/skills/atr/SKILL.md` — the two must be identical (`tests/skills-sync.sh` enforces this).
 - No hardcoded policy: provider order, models, driver, repos all come from config.

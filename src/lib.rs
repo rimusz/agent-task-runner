@@ -35,6 +35,7 @@ pub mod opencode_cfg;
 pub mod output;
 pub mod owner;
 pub mod plan;
+pub mod plan_usage;
 pub mod plugin;
 pub mod presets;
 pub mod probe;

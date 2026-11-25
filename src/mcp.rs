@@ -49,6 +49,10 @@ const TOOLS: &[(&str, &str)] = &[
         "usage_summary",
         "Token usage and cache savings. period: today, 7d, 30d, month, or YYYY-MM-DD..YYYY-MM-DD.",
     ),
+    (
+        "plan_usage",
+        "Read-only vendor plan meters (Claude, Cursor, Codex, Grok Build, Gemini, OpenCode and local presets). GET allow-list only. One provider failing does not fail the rest. No session token is returned.",
+    ),
     ("doctor", "Run atr doctor (ok/warn/FAIL). Secrets redacted."),
     (
         "config_get",
@@ -449,6 +453,7 @@ fn tool_schema(name: &str) -> Value {
                 "repo": {"type": "string"}
             }
         }),
+        "plan_usage" => json!({"type": "object", "properties": {}}),
         "doctor" => json!({"type": "object", "properties": {
             "cache": {"type": "boolean"}
         }}),
@@ -506,6 +511,7 @@ async fn call_tool(shared: &Shared, params: &Value) -> Result<Value, (i64, Strin
         "list_repos" => list_repos(shared),
         "list_providers" => list_providers(shared),
         "usage_summary" => usage_summary(shared, &args),
+        "plan_usage" => plan_usage(shared).await,
         "doctor" => doctor(shared, &args).await,
         "config_get" => config_get(shared),
         "" => return Err((-32602, "missing tool name".into())),
@@ -896,6 +902,16 @@ fn list_providers(shared: &Shared) -> Result<Value, String> {
     }))
 }
 
+async fn plan_usage(shared: &Shared) -> Result<Value, String> {
+    let cfg = shared.config.read().map_err(|e| e.to_string())?.clone();
+    let rows = crate::plan_usage::refresh(&cfg.providers, &shared.db).await;
+    let text = serde_json::to_string(&rows).unwrap_or_default();
+    if text.contains("accessToken") || text.to_ascii_lowercase().contains("bearer ") {
+        return Err("plan_usage output looked like a secret; dropped".into());
+    }
+    Ok(crate::plan_usage::rows_json(&rows))
+}
+
 fn usage_summary(shared: &Shared, args: &Value) -> Result<Value, String> {
     let spec = arg_str(args, &["period"]).unwrap_or_else(|| "7d".into());
     let period = crate::usage::parse_period(&spec).map_err(|e| e.to_string())?;
@@ -1130,6 +1146,7 @@ cli = "/bin/true"
             "list_repos",
             "list_providers",
             "usage_summary",
+            "plan_usage",
             "doctor",
             "config_get",
         ] {
