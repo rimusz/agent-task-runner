@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- `atr usage --plan` Cursor no longer reports `unknown` / "Cursor session has no user id" when `cursorAuth/userId` is missing and `cursorAuth/accessToken` in `state.vscdb` is not a JWT. The WorkOS user id is read from `stripeMembershipAuthId`, `cachedScopedProfile.authId`, `glass.lastSignedInAuthId`, or `~/.cursor/cli-config.json` `authInfo.authId`. On macOS an encrypted desktop token is read from the keychain item `cursor-access-token` (account `cursor-user`). If that item cannot be read, the row stays `unknown` and names that item.
+- A stored Claude `claude_stream` window whose `resets_at` is already past is not shown as the current meter. It is `unknown` with source `stored claude_stream (stale)`. A window that has not reset, or has no `resets_at`, is unchanged. The old utilization is not rolled forward.
+
 - `--output branch` commits uncommitted worktree edits before
   `git push` (same message and author rules as `--output pr`). A clean
   tree does not get an empty commit. When HEAD already matches its

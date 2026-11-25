@@ -255,12 +255,7 @@ pub async fn refresh(providers: &[Provider], db: &Db) -> Vec<PlanRow> {
     });
     rows.extend(grok_rows);
     rows.extend(stored_if_missing(&rows, stored));
-    let have_stored: Vec<String> = rows
-        .iter()
-        .filter(|r| r.status == "ok" && r.source.starts_with("stored"))
-        .map(|r| r.provider.clone())
-        .collect();
-    rows.retain(|r| !(r.status == "unknown" && have_stored.iter().any(|n| n == &r.provider)));
+    let mut rows = hide_placeholder_when_stored_ok(rows);
     rows.sort_by(|a, b| (&a.provider, &a.metric).cmp(&(&b.provider, &b.metric)));
     cache_put(rows);
     cache_get().unwrap_or_default()
@@ -278,6 +273,23 @@ impl Clone for Target {
     }
 }
 
+/// Drop the placeholder `unknown` row (source `none`) for a provider that
+/// already has a current stored window. Stale stored rows stay.
+fn hide_placeholder_when_stored_ok(mut rows: Vec<PlanRow>) -> Vec<PlanRow> {
+    let have_stored: Vec<String> = rows
+        .iter()
+        .filter(|r| r.status == "ok" && r.source.starts_with("stored"))
+        .map(|r| r.provider.clone())
+        .collect();
+    rows.retain(|r| {
+        if r.status != "unknown" || r.source.starts_with("stored") {
+            return true;
+        }
+        !have_stored.iter().any(|n| n == &r.provider)
+    });
+    rows
+}
+
 fn stored_if_missing(rows: &[PlanRow], stored: Vec<PlanRow>) -> Vec<PlanRow> {
     stored
         .into_iter()
@@ -290,6 +302,7 @@ fn stored_if_missing(rows: &[PlanRow], stored: Vec<PlanRow>) -> Vec<PlanRow> {
 }
 
 fn claude_stored(db: &Db, targets: &[Target], read_at: &str) -> Vec<PlanRow> {
+    let now = Timestamp::now();
     let mut out = Vec::new();
     for t in targets.iter().filter(|t| t.kind == "claude") {
         let Ok(list) = db.list_provider_usage(&t.name) else {
@@ -299,6 +312,27 @@ fn claude_stored(db: &Db, targets: &[Target], read_at: &str) -> Vec<PlanRow> {
             let Some(util) = row.utilization else {
                 continue;
             };
+            // A passed resets_at is a finished window. Do not roll the old
+            // utilization forward: the row does not prove the next window's use.
+            if !resets_still_current(row.resets_at.as_deref(), now) {
+                let when = row.resets_at.clone().unwrap_or_default();
+                out.push(PlanRow {
+                    provider: t.name.clone(),
+                    metric: row.window,
+                    used: None,
+                    limit: None,
+                    pct: None,
+                    resets_at: row.resets_at,
+                    source: "stored claude_stream (stale)".into(),
+                    read_at: read_at.into(),
+                    error: None,
+                    status: "unknown".into(),
+                    reason: Some(format!(
+                        "stored claude_stream window resets_at {when} has passed; not a current meter"
+                    )),
+                });
+                continue;
+            }
             out.push(PlanRow {
                 provider: t.name.clone(),
                 metric: row.window,
@@ -315,6 +349,17 @@ fn claude_stored(db: &Db, targets: &[Target], read_at: &str) -> Vec<PlanRow> {
         }
     }
     out
+}
+
+/// Missing or unparseable `resets_at` is kept (nothing proves it ended).
+fn resets_still_current(resets_at: Option<&str>, now: Timestamp) -> bool {
+    let Some(raw) = resets_at.map(str::trim).filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    match rfc3339::parse(raw) {
+        Some(t) => t > now,
+        None => true,
+    }
 }
 
 fn read_http(home: &Path, targets: &[Target], read_at: &str) -> Vec<PlanRow> {
@@ -605,16 +650,36 @@ fn parse_claude_usage(body: &str) -> std::result::Result<Vec<Metric>, String> {
 
 fn read_cursor(home: &Path) -> std::result::Result<Vec<Metric>, String> {
     let db = cursor_state_db(home);
-    if !db.exists() {
-        return Err("unknown: no Cursor state.vscdb (cursorAuth/accessToken)".into());
+    let sqlite_token = if db.exists() {
+        read_sqlite_item(&db, "cursorAuth/accessToken")
+    } else {
+        None
+    };
+    let explicit = cursor_explicit_user_id(home, db.exists().then_some(db.as_path()));
+    let mut token = sqlite_token.clone().unwrap_or_default();
+    if !cursor_session_token_usable(&token) {
+        match keychain_cursor_access_token() {
+            Ok(kc) => token = kc,
+            Err(reason) if sqlite_token.is_some() => {
+                return Err(format!("unknown: {reason}"));
+            }
+            Err(_) => {}
+        }
     }
-    let token = read_sqlite_item(&db, "cursorAuth/accessToken")
-        .ok_or_else(|| "unknown: Cursor state.vscdb has no cursorAuth/accessToken".to_string())?;
-    let user = cursor_user_id(
-        &token,
-        &read_sqlite_item(&db, "cursorAuth/userId").unwrap_or_default(),
-    );
-    let user = user.ok_or_else(|| "unknown: Cursor session has no user id".to_string())?;
+    if token.trim().is_empty() {
+        if !db.exists() {
+            return Err("unknown: no Cursor state.vscdb (cursorAuth/accessToken)".into());
+        }
+        return Err("unknown: Cursor state.vscdb has no cursorAuth/accessToken".into());
+    }
+    if !cursor_session_token_usable(&token) {
+        return Err(
+            "unknown: Cursor access token is not a WorkOS session JWT (expected user_…::jwt or a JWT). state.vscdb cursorAuth/accessToken is encrypted when cursor.storage.authTokenEncryptionAtRest is set; macOS keychain item cursor-access-token (account cursor-user) was not readable"
+                .into(),
+        );
+    }
+    let user = cursor_user_id(&token, &explicit)
+        .ok_or_else(|| "unknown: Cursor session has no user id".to_string())?;
     let cookie = format!("WorkosCursorSessionToken={user}%3A%3A{token}");
     let body = http_get(
         "https://cursor.com/api/usage-summary",
@@ -655,10 +720,138 @@ fn read_sqlite_item(db: &Path, key: &str) -> Option<String> {
     }
 }
 
+/// WorkOS user id (`user_…`) from an auth id, a raw id, or empty.
+fn workos_user_id(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let tail = raw.rsplit('|').next().unwrap_or(raw).trim();
+    if tail.starts_with("user_") && tail.len() > "user_".len() {
+        Some(tail.to_string())
+    } else if raw.starts_with("user_") {
+        Some(raw.to_string())
+    } else {
+        None
+    }
+}
+
+/// User id stored beside the access token. Newer Cursor builds omit
+/// `cursorAuth/userId` and encrypt `cursorAuth/accessToken`, so the id is
+/// taken from `stripeMembershipAuthId`, `cachedScopedProfile.authId`,
+/// `glass.lastSignedInAuthId`, or `~/.cursor/cli-config.json` `authInfo.authId`.
+fn cursor_explicit_user_id(home: &Path, db: Option<&Path>) -> String {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(db) = db {
+        for key in [
+            "cursorAuth/userId",
+            "cursorAuth/stripeMembershipAuthId",
+            "glass.lastSignedInAuthId",
+        ] {
+            if let Some(v) = read_sqlite_item(db, key) {
+                candidates.push(v);
+            }
+        }
+        if let Some(profile) = read_sqlite_item(db, "cursorAuth/cachedScopedProfile") {
+            if let Ok(v) = serde_json::from_str::<Value>(&profile) {
+                if let Some(id) = v.get("authId").and_then(|s| s.as_str()) {
+                    candidates.push(id.to_string());
+                }
+            }
+        }
+    }
+    let cli = home.join(".cursor/cli-config.json");
+    if let Ok(text) = std::fs::read_to_string(&cli) {
+        if let Ok(v) = serde_json::from_str::<Value>(&text) {
+            if let Some(id) = v.pointer("/authInfo/authId").and_then(|s| s.as_str()) {
+                candidates.push(id.to_string());
+            }
+        }
+    }
+    for c in &candidates {
+        if let Some(id) = workos_user_id(c) {
+            return id;
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|c| !c.trim().is_empty())
+        .unwrap_or_default()
+}
+
+fn cursor_session_token_usable(token: &str) -> bool {
+    let token = token.trim();
+    if token.is_empty() || token.contains(char::is_whitespace) {
+        return false;
+    }
+    if let Some((id, rest)) = token.split_once("::") {
+        return id.starts_with("user_") && rest.split('.').nth(2).is_some();
+    }
+    let mut parts = token.split('.');
+    parts.next().is_some()
+        && parts.next().is_some()
+        && parts.next().is_some()
+        && !token.contains(':')
+}
+
+/// Plaintext session from the Cursor macOS keychain. The `state.vscdb` copy
+/// is ciphertext when `cursor.storage.authTokenEncryptionAtRest` is true.
+/// Stderr is dropped so a prompt or blob cannot land in the error string.
+#[cfg(not(target_os = "macos"))]
+fn keychain_cursor_access_token() -> Result<String, String> {
+    Err(
+        "Cursor access token in state.vscdb is not a session JWT and there is no macOS keychain item cursor-access-token to read"
+            .into(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_cursor_access_token() -> Result<String, String> {
+    {
+        let out = std::process::Command::new("/usr/bin/security")
+            .args([
+                "find-generic-password",
+                "-s",
+                "cursor-access-token",
+                "-a",
+                "cursor-user",
+                "-w",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("could not run security for cursor-access-token: {e}"))?;
+        if !out.status.success() {
+            let code = out.status.code().unwrap_or(-1);
+            return Err(format!(
+                "macOS keychain item cursor-access-token (account cursor-user) is not readable from this session (security exit {code}). state.vscdb cursorAuth/accessToken is not a session JWT"
+            ));
+        }
+        let token = String::from_utf8(out.stdout)
+            .map_err(|_| "keychain cursor-access-token was not utf-8".to_string())?;
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(
+                "macOS keychain item cursor-access-token (account cursor-user) was empty".into(),
+            );
+        }
+        Ok(token)
+    }
+}
+
 fn cursor_user_id(token: &str, explicit: &str) -> Option<String> {
+    if let Some(id) = workos_user_id(explicit) {
+        return Some(id);
+    }
     let explicit = explicit.trim();
-    if !explicit.is_empty() {
+    if !explicit.is_empty() && !explicit.contains('|') {
         return Some(explicit.to_string());
+    }
+    if let Some((id, _)) = token.split_once("::") {
+        if let Some(id) = workos_user_id(id) {
+            return Some(id);
+        }
     }
     let payload = token.split('.').nth(1)?;
     let bytes = b64url(payload)?;
@@ -1040,6 +1233,149 @@ mod tests {
         let jwt = "e30.eyJzdWIiOiJnb29nbGUtb2F1dGgyfHVzZXJfYWJjIn0.sig";
         assert_eq!(cursor_user_id(jwt, "").as_deref(), Some("user_abc"));
         assert_eq!(cursor_user_id(jwt, "explicit").as_deref(), Some("explicit"));
+        assert_eq!(
+            cursor_user_id(jwt, "github|user_from_auth").as_deref(),
+            Some("user_from_auth")
+        );
+        assert_eq!(
+            workos_user_id("github|user_from_auth").as_deref(),
+            Some("user_from_auth")
+        );
+        assert!(cursor_session_token_usable(jwt));
+        assert!(cursor_session_token_usable("user_abc::e30.e30.sig"));
+        assert!(!cursor_session_token_usable("cipher-id:v1:notajwt"));
+    }
+
+    #[test]
+    fn cursor_encrypted_sqlite_token_uses_auth_id_and_does_not_claim_missing_user() {
+        let home = tempfile::tempdir().unwrap();
+        let db_path = cursor_state_db(home.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+            [],
+        )
+        .unwrap();
+        let token = "cipher-id-aaaa-bbbbbbb:v1:not-a-jwt-token-value";
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            ["cursorAuth/accessToken", token],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            ["cursorAuth/stripeMembershipAuthId", "github|user_abc"],
+        )
+        .unwrap();
+        let err = read_cursor(home.path()).unwrap_err();
+        assert!(err.starts_with("unknown:"), "{err}");
+        assert!(
+            !err.contains("no user id"),
+            "auth id was present, got {err}"
+        );
+        assert!(
+            err.contains("cursor-access-token")
+                || err.contains("not a session JWT")
+                || err.contains("not a WorkOS"),
+            "{err}"
+        );
+        assert!(!err.contains(token), "{err}");
+        assert!(!err.contains("user_abc"), "{err}");
+    }
+
+    #[test]
+    fn stored_claude_window_past_resets_at_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::open(&dir.path().join("state.db")).unwrap();
+        db.upsert_provider_usage(
+            "claude",
+            "five_hour",
+            Some(0.42),
+            None,
+            None,
+            Some("2026-10-31T17:40:00.000Z"),
+            Some("ok"),
+            "2026-10-31T12:00:00.000Z",
+        )
+        .unwrap();
+        db.upsert_provider_usage(
+            "claude",
+            "seven_day",
+            Some(0.1),
+            None,
+            None,
+            Some("2099-01-01T00:00:00.000Z"),
+            Some("ok"),
+            "2026-10-31T12:00:00.000Z",
+        )
+        .unwrap();
+        let targets = [Target {
+            name: "claude".into(),
+            kind: "claude".into(),
+            preset: String::new(),
+            model: String::new(),
+            cli: PathBuf::from("claude"),
+        }];
+        let rows = claude_stored(&db, &targets, "2026-11-25T16:02:00.000Z");
+        let five = rows.iter().find(|r| r.metric == "five_hour").unwrap();
+        assert_eq!(five.status, "unknown");
+        assert_eq!(five.source, "stored claude_stream (stale)");
+        assert!(
+            five.reason.as_deref().unwrap().contains("has passed"),
+            "{five:?}"
+        );
+        assert!(five.pct.is_none());
+        let seven = rows.iter().find(|r| r.metric == "seven_day").unwrap();
+        assert_eq!(seven.status, "ok");
+        assert_eq!(seven.source, "stored claude_stream");
+        assert_eq!(seven.pct, Some(10.0));
+        assert!(!resets_still_current(
+            Some("2026-10-31T17:40:00.000Z"),
+            rfc3339::parse("2026-11-25T16:02:00.000Z").unwrap()
+        ));
+        assert!(resets_still_current(None, Timestamp::now()));
+    }
+
+    #[test]
+    fn stale_stored_row_is_kept_when_another_window_is_current() {
+        let rows = vec![
+            unknown("claude", "plan", "no credentials", "t"),
+            PlanRow {
+                provider: "claude".into(),
+                metric: "five_hour".into(),
+                used: None,
+                limit: None,
+                pct: None,
+                resets_at: Some("2026-10-31T17:40:00.000Z".into()),
+                source: "stored claude_stream (stale)".into(),
+                read_at: "t".into(),
+                error: None,
+                status: "unknown".into(),
+                reason: Some("stored claude_stream window resets_at has passed".into()),
+            },
+            PlanRow {
+                provider: "claude".into(),
+                metric: "seven_day".into(),
+                used: Some(3.0),
+                limit: Some(100.0),
+                pct: Some(3.0),
+                resets_at: Some("2026-11-28T00:00:00.000Z".into()),
+                source: "stored claude_stream".into(),
+                read_at: "t".into(),
+                error: None,
+                status: "ok".into(),
+                reason: None,
+            },
+        ];
+        let kept = hide_placeholder_when_stored_ok(rows);
+        assert!(kept.iter().all(|r| r.metric != "plan"));
+        assert!(kept
+            .iter()
+            .any(|r| r.metric == "five_hour" && r.status == "unknown"));
+        assert!(kept
+            .iter()
+            .any(|r| r.metric == "seven_day" && r.status == "ok"));
     }
 
     #[test]

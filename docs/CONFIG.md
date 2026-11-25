@@ -19,8 +19,8 @@ with SIGHUP (`atr providers` edits do that) or `atr service restart`.
 
 | Provider | Source |
 |---|---|
-| claude | `GET https://api.anthropic.com/api/oauth/usage` using `~/.claude/.credentials.json` (not stored). If that file is missing, the last `claude_stream` window already in atr's database is shown. |
-| cursor | `GET https://cursor.com/api/usage-summary` using the local Cursor `state.vscdb` session (`cursorAuth/accessToken`). The token is not logged or written to atr's database. |
+| claude | `GET https://api.anthropic.com/api/oauth/usage` using `~/.claude/.credentials.json` (not stored). If that file is missing, the last `claude_stream` window already in atr's database is shown only while its `resets_at` is still in the future. A stored window whose `resets_at` has passed is `unknown` with source `stored claude_stream (stale)`. The old utilization is not rolled forward. |
+| cursor | `GET https://cursor.com/api/usage-summary`. The session cookie is `WorkosCursorSessionToken=<user id>::<access token>`. The user id comes from the JWT `sub`, from `cursorAuth/userId`, or (when those are absent) from `cursorAuth/stripeMembershipAuthId`, `cursorAuth/cachedScopedProfile` `authId`, `glass.lastSignedInAuthId`, or `~/.cursor/cli-config.json` `authInfo.authId` (the `user_…` segment). The access token is `cursorAuth/accessToken` in `state.vscdb`. When that value is not a session JWT (Cursor sets `cursor.storage.authTokenEncryptionAtRest`), atr reads the macOS keychain item `cursor-access-token` / account `cursor-user` and does not log it. If that item is not readable, the row is `unknown` and names the missing input. The token is not written to atr's database. |
 | codex | `GET https://chatgpt.com/backend-api/wham/usage` using `~/.codex/auth.json` (`tokens.access_token`, `tokens.account_id`). An API-key login has no ChatGPT plan meter and returns `unknown`. |
 | grok | Local `grok agent stdio` JSON-RPC `_x.ai/billing` (the same probe as reported usage). Not an HTTP call. |
 | gemini | `unknown`. The Code Assist quota call that returns a remaining fraction is a POST. plan_usage does not POST. |
