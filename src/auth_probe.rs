@@ -134,7 +134,7 @@ fn claude(home: &Path, now: Timestamp) -> (Status, String) {
         .is_some_and(|t| !t.trim().is_empty());
     if !has_access && !env_set {
         return (
-            Status::Fail,
+            Status::Warn,
             "logged out (no Claude credentials and CLAUDE_CODE_OAUTH_TOKEN is unset)".into(),
         );
     }
@@ -180,7 +180,7 @@ fn grok(home: &Path, now: Timestamp) -> (Status, String) {
         .map(|rel| home.join(rel.trim_start_matches('/')))
         .find(|p| p.is_file());
     let Some(path) = path else {
-        return (Status::Fail, "logged out (no grok auth file)".into());
+        return (Status::Warn, "logged out (no grok auth file)".into());
     };
     let Ok(text) = std::fs::read_to_string(&path) else {
         return (
@@ -197,7 +197,7 @@ fn grok(home: &Path, now: Timestamp) -> (Status, String) {
         .is_some_and(|t| !t.trim().is_empty());
     let exp = grok_expiry(&v);
     if !refresh && exp.is_none() && !has_access(&v) {
-        return (Status::Fail, "logged out (grok auth has no token)".into());
+        return (Status::Warn, "logged out (grok auth has no token)".into());
     }
     match exp {
         Some(t) if t <= now && !refresh => (
@@ -275,13 +275,14 @@ fn cursor(now: Timestamp, ssh: bool) -> (Status, String) {
             "cursor login keychain is not readable in this session".into(),
         ),
         CursorKey::Missing => (
-            Status::Fail,
+            Status::Warn,
             "logged out (no cursor-access-token or cursor-refresh-token in the login keychain)"
                 .into(),
         ),
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum CursorKey {
     Usable { expires: Option<Timestamp> },
     Refreshable,
@@ -293,7 +294,7 @@ fn cursor_keychain(now: Timestamp) -> CursorKey {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = now;
-        return CursorKey::Missing;
+        CursorKey::Missing
     }
     #[cfg(target_os = "macos")]
     {
@@ -316,6 +317,7 @@ fn cursor_keychain(now: Timestamp) -> CursorKey {
     }
 }
 
+#[cfg(target_os = "macos")]
 enum Sec {
     Value(String),
     Locked,
@@ -355,7 +357,7 @@ fn security_item(service: &str) -> Sec {
 fn codex(home: &Path, now: Timestamp) -> (Status, String) {
     let path = home.join(".codex/auth.json");
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return (Status::Fail, "logged out (no ~/.codex/auth.json)".into());
+        return (Status::Warn, "logged out (no ~/.codex/auth.json)".into());
     };
     let Ok(v) = serde_json::from_str::<Value>(&text) else {
         return (Status::Fail, "codex auth.json is not json".into());
@@ -372,7 +374,7 @@ fn codex(home: &Path, now: Timestamp) -> (Status, String) {
         return (Status::Ok, "API key; no expiry".into());
     }
     let Some(access) = access else {
-        return (Status::Fail, "logged out (codex auth has no token)".into());
+        return (Status::Warn, "logged out (codex auth has no token)".into());
     };
     let refresh = v
         .pointer("/tokens/refresh_token")
@@ -397,7 +399,7 @@ fn spark() -> (Status, String) {
         Duration::from_secs(2),
     ) {
         Ok(_) => (Status::Ok, format!("{SPARK_ADDR} reachable")),
-        Err(_) => (Status::Fail, format!("{SPARK_ADDR} unreachable")),
+        Err(_) => (Status::Warn, format!("{SPARK_ADDR} unreachable")),
     }
 }
 
@@ -444,7 +446,7 @@ mod tests {
         assert!(!detail.contains("\"r\"") && !detail.contains("refresh_token"));
 
         let (st, _) = codex(home.path(), Timestamp::now());
-        assert_eq!(st, Status::Fail);
+        assert_eq!(st, Status::Warn);
         std::fs::create_dir_all(home.path().join(".codex")).unwrap();
         std::fs::write(
             home.path().join(".codex/auth.json"),
@@ -467,7 +469,7 @@ mod tests {
             },
             Note {
                 provider: "spark".into(),
-                status: Status::Fail,
+                status: Status::Warn,
                 detail: "127.0.0.1:8091 unreachable".into(),
             },
         ];

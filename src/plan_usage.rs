@@ -1123,13 +1123,32 @@ pub(crate) fn dpop_proof_es256(
     if d_bytes.len() != 32 {
         return Err("cursor dpop private scalar was not 32 bytes".into());
     }
-    use p256::ecdsa::signature::Signer;
-    use p256::ecdsa::{Signature, SigningKey};
-    let signing = SigningKey::from_slice(&d_bytes)
-        .map_err(|_| "cursor dpop private scalar was not a P-256 key".to_string())?;
-    let point = signing.verifying_key().to_encoded_point(false);
-    let x = b64url_encode(point.x().ok_or_else(|| "dpop x".to_string())?);
-    let y = b64url_encode(point.y().ok_or_else(|| "dpop y".to_string())?);
+    let jwk = v.get("publicJwk").cloned().unwrap_or(v.clone());
+    let x = jwk
+        .get("x")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| "cursor dpop key has no public x".to_string())?;
+    let y = jwk
+        .get("y")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| "cursor dpop key has no public y".to_string())?;
+    let x_bytes = b64url(x).ok_or_else(|| "cursor dpop public x was not base64url".to_string())?;
+    let y_bytes = b64url(y).ok_or_else(|| "cursor dpop public y was not base64url".to_string())?;
+    if x_bytes.len() != 32 || y_bytes.len() != 32 {
+        return Err("cursor dpop public point was not 32-byte coordinates".into());
+    }
+    let mut public = Vec::with_capacity(65);
+    public.push(0x04);
+    public.extend_from_slice(&x_bytes);
+    public.extend_from_slice(&y_bytes);
+    let rng = ring::rand::SystemRandom::new();
+    let signing = ring::signature::EcdsaKeyPair::from_private_key_and_public_key(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        &d_bytes,
+        &public,
+        &rng,
+    )
+    .map_err(|_| "cursor dpop key was not a P-256 key pair".to_string())?;
     let header = serde_json::json!({
         "typ": "dpop+jwt",
         "alg": "ES256",
@@ -1146,11 +1165,10 @@ pub(crate) fn dpop_proof_es256(
         b64url_encode(header.to_string().as_bytes()),
         b64url_encode(payload.to_string().as_bytes())
     );
-    let sig: Signature = signing.sign(signing_input.as_bytes());
-    Ok(format!(
-        "{signing_input}.{}",
-        b64url_encode(&sig.to_bytes())
-    ))
+    let sig = signing
+        .sign(&rng, signing_input.as_bytes())
+        .map_err(|_| "cursor dpop sign failed".to_string())?;
+    Ok(format!("{signing_input}.{}", b64url_encode(sig.as_ref())))
 }
 
 fn b64url_encode(data: &[u8]) -> String {
@@ -1845,19 +1863,16 @@ mod tests {
 
     #[test]
     fn dpop_proof_is_three_segments() {
-        use p256::ecdsa::SigningKey;
-        let key = SigningKey::from_slice(&[7u8; 32]).unwrap();
-        let d = b64url_encode(&key.to_bytes());
-        let point = key.verifying_key().to_encoded_point(false);
+        // P-256 scalar 0x0707…07 and its uncompressed public point (Node prime256v1).
         let jwk = serde_json::json!({
             "kind": "webcrypto-p256",
             "v": 1,
-            "privateKeyD": d,
+            "privateKeyD": b64url_encode(&[7u8; 32]),
             "publicJwk": {
                 "kty": "EC",
                 "crv": "P-256",
-                "x": b64url_encode(point.x().unwrap()),
-                "y": b64url_encode(point.y().unwrap())
+                "x": "HhhTL9R1TALzBB2cdc6zO4P_2BrHzk_ogsyxyYvFiW4",
+                "y": "pGwxHE4v9A3ZajZT5uRURdMt_khuztdcepDGoYiBwKM"
             }
         });
         let proof =
