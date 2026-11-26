@@ -527,14 +527,13 @@ function paint(d) {
   const max7 = Math.max(1, ...(d.providers || []).map(p => Number(p.tokens_7d) || 0));
   const bar = (v, m, kind) => '<span class="bar' + (kind === "out" ? " out" : "") + '" style="width:' + Math.round((Number(v) || 0) / m * 60) + 'px"></span>';
   $("providers").innerHTML = rows("providers", ["#","name","enabled","version","model",
-    {t:"5h",tip:"atr-side runs / tokens in the last 5 hours"},{t:"7d",tip:"atr-side runs / tokens in the last 7 days"},"last success","cooldown",{t:"usage",tip:"plan limits reported by the CLI, when it exposes them"},{t:"extra credits",tip:"paid extra credits (Grok); display only, never spent by atr"}], d.providers, p => [
+    {t:"5h",tip:"atr-side runs / tokens in the last 5 hours"},{t:"7d",tip:"atr-side runs / tokens in the last 7 days"},"last success","cooldown",{t:"usage",tip:"plan limits reported by the CLI, when it exposes them"}], d.providers, p => [
     esc(p.order), esc(p.name), p.enabled ? "yes" : "no", esc(p.version || "-"), esc(p.model || "default"),
     bar(p.tokens_5h, max5, "in") + num(p.runs_5h) + " runs · " + num(p.tokens_5h),
     bar(p.tokens_7d, max7, "out") + num(p.runs_7d) + " runs · " + num(p.tokens_7d),
     shortTime(p.last_success, d.now), p.cooling ? '<span class="warn">cooldown</span>' : "—",
-    usageCell(p),
-    p.extra_credits ? esc(p.extra_credits) : "-"
-  ], null, ["","","","wrap","","","","","","wrap",""]);
+    usageCell(p)
+  ], null, ["","","","wrap","","","","","","wrap"]);
   const today = d.today || [];
   const sum = k => today.reduce((a, r) => a + (Number(r[k]) || 0), 0);
   const costs = today.filter(r => r.cost_usd != null);

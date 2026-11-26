@@ -197,8 +197,23 @@ pub fn snapshot_period(
                 .provider_blocked(&p.name)
                 .unwrap_or((false, false));
             let view = crate::reported::provider_usage_view(&shared.db, &p.name);
-            let (usage, usage_reported, extra_credits) = provider_usage_cells(&view, tz, now);
+            let spark = hides_dashboard_usage(p);
+            let (usage, usage_reported) = if spark {
+                ("-".to_string(), false)
+            } else {
+                provider_usage_cells(&view, tz, now)
+            };
             let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
+            let segments = if spark {
+                Vec::new()
+            } else {
+                crate::reported::provider_usage_segments(&view, tz, now)
+            };
+            let plan_line = if spark {
+                String::new()
+            } else {
+                dashboard_plan_line(&p.name, tz)
+            };
             json!({
                 "order": i + 1,
                 "name": p.name,
@@ -206,9 +221,8 @@ pub fn snapshot_period(
                 "cooling": cooling,
                 "usage": redact(&usage, &refs),
                 "usage_reported": usage_reported,
-                "usage_segments": crate::reported::provider_usage_segments(&view, tz, now),
-                "plan_line": crate::plan_usage::line_for(&p.name),
-                "extra_credits": extra_credits,
+                "usage_segments": segments,
+                "plan_line": plan_line,
                 "model": p.model,
                 "version": crate::providers::recorded_version(&shared.config_path, &p.name).map(|(v, _)| v),
                 "last_success": last_ok.get(&p.name).map(|e| tz.format_str(e)),
@@ -535,16 +549,114 @@ fn health(cfg: &Config, config_path: &std::path::Path, now: Timestamp) -> Value 
     })
 }
 
-/// Dashboard usage cell: plan windows only (`-` when the CLI reports none),
-/// with Grok-style extra credits split out into their own field.
+/// Spark (local or a Codex-kind preset that inherits Codex auth) does not
+/// show a usage cell or `plan_line` on the dashboard.
+fn hides_dashboard_usage(p: &crate::config::Provider) -> bool {
+    spark_usage_hidden(&p.name, &p.preset, &p.model)
+}
+
+pub(crate) fn spark_usage_hidden(name: &str, preset: &str, model: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let preset = preset.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    name == "spark" || preset == "spark" || model.starts_with("spark/")
+}
+
+/// Dashboard `plan_line`: vendor meter text with short reset dates.
+/// Segments that are only billing (extra credits, billing cycle, the Grok
+/// billing probe error) are omitted.
+pub(crate) fn dashboard_plan_line(provider: &str, tz: &crate::tz::DisplayTz) -> String {
+    display_plan_line(&crate::plan_usage::line_for(provider), tz)
+}
+
+pub(crate) fn display_plan_line(raw: &str, tz: &crate::tz::DisplayTz) -> String {
+    let mut parts = Vec::new();
+    for part in raw.split("; ") {
+        if part.is_empty() || mentions_billing(part) {
+            continue;
+        }
+        let compact = compact_rfc3339(part, tz);
+        if !compact.is_empty() {
+            parts.push(compact);
+        }
+    }
+    parts.join("; ")
+}
+
+fn mentions_billing(s: &str) -> bool {
+    let l = s.to_ascii_lowercase();
+    l.contains("billing")
+        || l.contains("extra credit")
+        || l.contains("extra_credits")
+        || l.contains("_x.ai/billing")
+}
+
+fn compact_rfc3339(line: &str, tz: &crate::tz::DisplayTz) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(len) = rfc3339_len(&line[i..]) {
+            let token = &line[i..i + len];
+            if let Some(t) = crate::rfc3339::parse(token) {
+                out.push_str(&tz.format_compact(t));
+                i += len;
+                continue;
+            }
+        }
+        let ch = line[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// `2026-11-28T00:00:00.000Z` or `2026-11-28T00:00:00Z`.
+fn rfc3339_len(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.len() < 20 {
+        return None;
+    }
+    // YYYY-MM-DDTHH:MM:SS
+    let shape = b.len() >= 20
+        && b[0].is_ascii_digit()
+        && b[1].is_ascii_digit()
+        && b[2].is_ascii_digit()
+        && b[3].is_ascii_digit()
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[10] == b'T'
+        && b[13] == b':'
+        && b[16] == b':';
+    if !shape {
+        return None;
+    }
+    let mut n = 19;
+    if b.get(n) == Some(&b'.') {
+        n += 1;
+        let frac = n;
+        while b.get(n).is_some_and(|c| c.is_ascii_digit()) {
+            n += 1;
+        }
+        if n == frac {
+            return None;
+        }
+    }
+    if b.get(n) == Some(&b'Z') {
+        return Some(n + 1);
+    }
+    None
+}
+
+/// Dashboard usage cell: plan windows only (`-` when the CLI reports none).
+/// Extra credits are not a dashboard field.
 fn provider_usage_cells(
     view: &crate::reported::ProviderUsageView,
     tz: &crate::tz::DisplayTz,
     now: Timestamp,
-) -> (String, bool, Option<String>) {
-    let extra = view.extra_credits.map(|u| format!("${u:.2}"));
+) -> (String, bool) {
     if view.windows.is_empty() {
-        return ("-".into(), extra.is_some(), extra);
+        return ("-".into(), false);
     }
     let windows_only = crate::reported::ProviderUsageView {
         windows: view.windows.clone(),
@@ -553,7 +665,6 @@ fn provider_usage_cells(
     (
         crate::reported::format_provider_usage(&windows_only, tz, now),
         true,
-        extra,
     )
 }
 
@@ -1103,22 +1214,49 @@ kind = "claude"
     }
 
     #[test]
-    fn provider_usage_cells_split_extra_credits() {
+    fn provider_usage_cells_ignore_extra_credits() {
         let tz = crate::tz::DisplayTz::parse("UTC").unwrap();
         let now = Timestamp::now();
         let none = crate::reported::ProviderUsageView::default();
         assert_eq!(
             provider_usage_cells(&none, &tz, now),
-            ("-".to_string(), false, None)
+            ("-".to_string(), false)
         );
         let grok = crate::reported::ProviderUsageView {
             windows: vec![],
             extra_credits: Some(140.32),
         };
-        let (u, rep, extra) = provider_usage_cells(&grok, &tz, now);
+        let (u, rep) = provider_usage_cells(&grok, &tz, now);
         assert_eq!(u, "-");
-        assert!(rep);
-        assert_eq!(extra.as_deref(), Some("$140.32"));
+        assert!(!rep);
+        assert!(!u.contains("140") && !u.to_ascii_lowercase().contains("credit"));
+    }
+
+    #[test]
+    fn plan_line_short_dates_drop_billing_and_spark_is_blank() {
+        let tz = crate::tz::DisplayTz::parse("UTC").unwrap();
+        let claude = display_plan_line(
+            "unknown: stored claude_stream window resets_at 2026-10-31T17:40:00.000Z has passed; not a current meter; seven_day 4.0% resets 2026-11-28T00:00:00.000Z",
+            &tz,
+        );
+        assert_eq!(
+            claude,
+            "unknown: stored claude_stream window resets_at Oct 31 has passed; not a current meter; seven_day 4.0% resets Nov 28"
+        );
+        assert!(!claude.contains('T'));
+        let grok = display_plan_line("error: no billing reply", &tz);
+        assert_eq!(grok, "");
+        let weekly = display_plan_line("weekly 11.0% resets 2026-11-27T04:36:36.695Z", &tz);
+        assert_eq!(weekly, "weekly 11.0% resets Nov 27");
+        assert!(!weekly.contains("billing") && !weekly.contains("_x.ai"));
+        let codex = display_plan_line(crate::plan_usage::CODEX_API_KEY_REASON, &tz);
+        assert_eq!(codex, "codex auth is an API key; usage not supported");
+        assert!(spark_usage_hidden("spark", "", "gpt-5.1-codex"));
+        assert!(spark_usage_hidden("local", "spark", ""));
+        assert!(spark_usage_hidden("other", "", "spark/deepseek"));
+        assert!(!spark_usage_hidden("codex", "", "gpt-5.1-codex"));
+        assert!(!PAGE.contains("extra credits"));
+        assert!(!PAGE.contains("extra_credits"));
     }
 
     #[test]
