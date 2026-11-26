@@ -1,9 +1,12 @@
 //! Read-only vendor plan meters for `atr usage --plan`, MCP `plan_usage`,
 //! and the dashboard plan line.
 //!
-//! HTTP adapters are GET-only and must use [`ALLOWED_GET_URLS`]. Session
-//! tokens are read from local CLI files for the request and are never logged,
-//! returned, or written to atr's database. A provider with no proven meter
+//! HTTP GETs must use [`ALLOWED_GET_URLS`]. The only POST is
+//! [`CURSOR_REFRESH_URL`]. Session tokens are read from local CLI files or
+//! the login keychain for the request and are never logged, returned, or
+//! written to atr's database. A fresh Cursor access token is written back
+//! to the keychain item it came from, or kept in this process if that write
+//! fails. A provider with no proven meter
 //! returns `status: unknown`. One provider's failure does not drop the others.
 //! Results are cached in memory for about five minutes.
 
@@ -24,6 +27,11 @@ pub const ALLOWED_GET_URLS: &[&str] = &[
     "https://cursor.com/api/usage-summary",
     "https://chatgpt.com/backend-api/wham/usage",
 ];
+
+/// The one POST `plan_usage` may make: Cursor's OAuth refresh, same body the
+/// CLI sends (`grant_type=refresh_token`, `client_id=cli`).
+pub const CURSOR_REFRESH_URL: &str = "https://api2.cursor.sh/oauth/token";
+pub const ALLOWED_POST_URLS: &[&str] = &[CURSOR_REFRESH_URL];
 
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
@@ -73,7 +81,7 @@ fn cache_get() -> Option<Vec<PlanRow>> {
     Some(c.rows.clone())
 }
 
-fn cache_put(rows: Vec<PlanRow>) {
+pub(crate) fn cache_put(rows: Vec<PlanRow>) {
     *CACHE.lock().expect("plan cache") = Some(Cache {
         at: Instant::now(),
         rows,
@@ -546,6 +554,10 @@ pub fn allow_get(url: &str) -> bool {
     ALLOWED_GET_URLS.contains(&url)
 }
 
+pub fn allow_post(url: &str) -> bool {
+    ALLOWED_POST_URLS.contains(&url)
+}
+
 /// GET `url` only when it is on the allow-list. Redirects are off so a
 /// credential header cannot follow to another host. The error string is the
 /// status or a transport failure, never a header value.
@@ -565,6 +577,42 @@ pub fn http_get(url: &str, headers: &[(&str, &str)]) -> Result<String, String> {
         Ok(resp) => resp.into_string().map_err(|e| format!("read body: {e}")),
         Err(ureq::Error::Status(code, _)) => Err(format!("http {code}")),
         Err(e) => Err(format!("http transport: {e}")),
+    }
+}
+
+fn http_post_json(url: &str, headers: &[(&str, &str)], body: &str) -> Result<String, String> {
+    if !allow_post(url) {
+        return Err("url not on plan_usage POST allow-list".into());
+    }
+    let agent = crate::util::ureq_agent(Duration::from_secs(20));
+    let mut req = agent.post(url);
+    for (k, v) in headers {
+        req = req.set(k, v);
+    }
+    match req.send_string(body) {
+        Ok(resp) => resp.into_string().map_err(|e| format!("read body: {e}")),
+        Err(ureq::Error::Status(code, resp)) => {
+            let text = resp.into_string().unwrap_or_default();
+            Err(refresh_http_error(code, &text))
+        }
+        Err(e) => Err(format!("http transport: {e}")),
+    }
+}
+
+/// Status and a short OAuth `error` code. The body is not returned.
+fn refresh_http_error(code: u16, body: &str) -> String {
+    let code_name = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() < 40
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        });
+    match code_name {
+        Some(name) => format!("cursor token refresh http {code} {name}"),
+        None => format!("cursor token refresh http {code}"),
     }
 }
 
@@ -685,10 +733,29 @@ fn read_cursor(home: &Path) -> std::result::Result<Vec<Metric>, String> {
                 .into(),
         );
     }
+    let token = match cursor_access_for_usage(&token) {
+        Ok(t) => t,
+        Err(e) => return Err(scrub(&e)),
+    };
     let user = cursor_user_id(&token, &explicit)
         .ok_or_else(|| "unknown: Cursor session has no user id".to_string())?;
+    match cursor_usage_request(&user, &token) {
+        Ok(body) => parse_cursor_usage(&body).map_err(|e| scrub(&e.replace(&token, "[redacted]"))),
+        Err(e) if e == "http 401" => {
+            let fresh = refresh_cursor_access().map_err(|err| scrub(&err))?;
+            let user = cursor_user_id(&fresh, &explicit)
+                .ok_or_else(|| "unknown: Cursor session has no user id".to_string())?;
+            let body = cursor_usage_request(&user, &fresh)
+                .map_err(|err| scrub(&err.replace(&fresh, "[redacted]")))?;
+            parse_cursor_usage(&body).map_err(|e| scrub(&e.replace(&fresh, "[redacted]")))
+        }
+        Err(e) => Err(scrub(&e.replace(&token, "[redacted]"))),
+    }
+}
+
+fn cursor_usage_request(user: &str, token: &str) -> Result<String, String> {
     let cookie = format!("WorkosCursorSessionToken={user}%3A%3A{token}");
-    let body = http_get(
+    http_get(
         "https://cursor.com/api/usage-summary",
         &[
             ("Cookie", cookie.as_str()),
@@ -696,8 +763,123 @@ fn read_cursor(home: &Path) -> std::result::Result<Vec<Metric>, String> {
             ("Origin", "https://cursor.com"),
         ],
     )
-    .map_err(|e| scrub(&e.replace(&token, "[redacted]")))?;
-    parse_cursor_usage(&body).map_err(|e| scrub(&e.replace(&token, "[redacted]")))
+}
+
+/// Use a still-valid access token. An expired JWT is replaced from the
+/// keychain refresh token before the usage call.
+fn cursor_access_for_usage(token: &str) -> Result<String, String> {
+    if !jwt_expired(token, Timestamp::now().as_second()) {
+        return Ok(token.to_string());
+    }
+    if let Some(mem) = cursor_access_mem() {
+        if !jwt_expired(&mem, Timestamp::now().as_second()) {
+            return Ok(mem);
+        }
+    }
+    refresh_cursor_access()
+}
+
+fn cursor_access_mem() -> Option<String> {
+    CURSOR_ACCESS_MEM.lock().ok().and_then(|g| g.clone())
+}
+
+fn cursor_access_mem_put(token: String) {
+    if let Ok(mut g) = CURSOR_ACCESS_MEM.lock() {
+        *g = Some(token);
+    }
+}
+
+static CURSOR_ACCESS_MEM: Mutex<Option<String>> = Mutex::new(None);
+
+/// `exp` is in the past, or within 60s. A token with no `exp` is not treated
+/// as expired (a 401 still refreshes).
+pub(crate) fn jwt_expired(token: &str, now_unix: i64) -> bool {
+    jwt_exp_unix(token).is_some_and(|exp| exp <= now_unix.saturating_add(60))
+}
+
+pub(crate) fn jwt_exp_unix(token: &str) -> Option<i64> {
+    let jwt = token
+        .split_once("::")
+        .map(|(_, rest)| rest)
+        .unwrap_or(token);
+    let payload = jwt.split('.').nth(1)?;
+    let bytes = b64url(payload)?;
+    let v: Value = serde_json::from_slice(&bytes).ok()?;
+    v.get("exp").and_then(|n| {
+        n.as_i64()
+            .or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok()))
+            .or_else(|| n.as_f64().map(|f| f as i64))
+    })
+}
+
+pub(crate) struct RefreshedCursor {
+    access: String,
+    refresh: Option<String>,
+}
+
+pub(crate) fn parse_cursor_refresh(body: &str) -> Result<RefreshedCursor, String> {
+    let v: Value =
+        serde_json::from_str(body).map_err(|_| "cursor refresh was not json".to_string())?;
+    if v.get("shouldLogout").and_then(|b| b.as_bool()) == Some(true) {
+        return Err("cursor refresh signed the session out".into());
+    }
+    let access = v
+        .get("access_token")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "cursor refresh had no access_token".to_string())?;
+    if !cursor_session_token_usable(access) {
+        return Err("cursor refresh access_token was not a session JWT".into());
+    }
+    let refresh = v
+        .get("refresh_token")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
+    Ok(RefreshedCursor {
+        access: access.to_string(),
+        refresh,
+    })
+}
+
+fn cursor_refresh_body(refresh: &str) -> String {
+    serde_json::json!({
+        "grant_type": "refresh_token",
+        "client_id": "cli",
+        "refresh_token": refresh,
+    })
+    .to_string()
+}
+
+fn refresh_cursor_access() -> Result<String, String> {
+    let refresh = keychain_item("cursor-refresh-token")?;
+    let dpop = if refresh.starts_with("session_rt_") {
+        Some(cursor_dpop_proof()?)
+    } else {
+        None
+    };
+    let mut headers = vec![
+        ("content-type", "application/json"),
+        ("accept", "application/json"),
+    ];
+    if let Some(proof) = dpop.as_deref() {
+        headers.push(("DPoP", proof));
+    }
+    let body = cursor_refresh_body(&refresh);
+    let text = http_post_json(CURSOR_REFRESH_URL, &headers, &body)?;
+    let parsed = parse_cursor_refresh(&text).map_err(|e| scrub(&e))?;
+    cursor_access_mem_put(parsed.access.clone());
+    if let Err(e) = keychain_set("cursor-access-token", &parsed.access) {
+        tracing::warn!(error = %e, "cursor access token kept in memory; keychain write failed");
+    }
+    if let Some(next) = parsed.refresh.as_deref() {
+        if next != refresh {
+            if let Err(e) = keychain_set("cursor-refresh-token", next) {
+                tracing::warn!(error = %e, "cursor refresh token was not written back");
+            }
+        }
+    }
+    Ok(parsed.access)
 }
 
 fn cursor_state_db(home: &Path) -> PathBuf {
@@ -814,37 +996,187 @@ fn keychain_cursor_access_token() -> Result<String, String> {
 
 #[cfg(target_os = "macos")]
 fn keychain_cursor_access_token() -> Result<String, String> {
-    {
-        let out = std::process::Command::new("/usr/bin/security")
-            .args([
-                "find-generic-password",
-                "-s",
-                "cursor-access-token",
-                "-a",
-                "cursor-user",
-                "-w",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .map_err(|e| format!("could not run security for cursor-access-token: {e}"))?;
-        if !out.status.success() {
-            let code = out.status.code().unwrap_or(-1);
-            return Err(format!(
-                "macOS keychain item cursor-access-token (account cursor-user) is not readable from this session (security exit {code}). state.vscdb cursorAuth/accessToken is not a session JWT"
-            ));
+    keychain_item("cursor-access-token").map_err(|e| {
+        if e.contains("not readable") {
+            format!("{e}. state.vscdb cursorAuth/accessToken is not a session JWT")
+        } else {
+            e
         }
-        let token = String::from_utf8(out.stdout)
-            .map_err(|_| "keychain cursor-access-token was not utf-8".to_string())?;
-        let token = token.trim().to_string();
-        if token.is_empty() {
-            return Err(
-                "macOS keychain item cursor-access-token (account cursor-user) was empty".into(),
-            );
-        }
-        Ok(token)
+    })
+}
+
+/// Login-keychain generic password. Stdout is the secret and is never logged.
+/// Exit 36 is the locked / no-UI session (`errSecInteractionNotAllowed`).
+/// Exit 44 is item not found.
+#[cfg(target_os = "macos")]
+fn keychain_item(service: &str) -> Result<String, String> {
+    let out = std::process::Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-s",
+            service,
+            "-a",
+            "cursor-user",
+            "-w",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run security for {service}: {e}"))?;
+    if !out.status.success() {
+        let code = out.status.code().unwrap_or(-1);
+        return Err(format!(
+            "macOS keychain item {service} (account cursor-user) is not readable from this session (security exit {code})"
+        ));
     }
+    let token =
+        String::from_utf8(out.stdout).map_err(|_| format!("keychain {service} was not utf-8"))?;
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Err(format!(
+            "macOS keychain item {service} (account cursor-user) was empty"
+        ));
+    }
+    Ok(token)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain_item(_service: &str) -> Result<String, String> {
+    Err("cursor keychain items are only read on macOS".into())
+}
+
+/// `security -i` so the secret is not a process argument. Same update the
+/// Cursor CLI uses (`add-generic-password -U`).
+fn keychain_set(service: &str, value: &str) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("no macOS keychain".into());
+    }
+    if !keychain_safe(value) || !keychain_safe(service) {
+        return Err("refusing to write a keychain value with an unsafe character".into());
+    }
+    let line = format!("add-generic-password -a cursor-user -s {service} -w {value} -U\n");
+    let mut child = std::process::Command::new("/usr/bin/security")
+        .arg("-i")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("could not run security: {e}"))?;
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| "security stdin missing".to_string())?
+        .write_all(line.as_bytes())
+        .map_err(|e| format!("security stdin: {e}"))?;
+    drop(child.stdin.take());
+    let status = child.wait().map_err(|e| format!("security wait: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "security add-generic-password exited {}",
+            status.code().unwrap_or(-1)
+        ))
+    }
+}
+
+fn keychain_safe(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '+' | '/' | '=')
+        })
+}
+
+/// DPoP proof for `session_rt_` refresh tokens. The private key is the
+/// `cursor-dpop-key` login-keychain item (WebCrypto P-256 JWK). Hardware
+/// keys are not signed here.
+fn cursor_dpop_proof() -> Result<String, String> {
+    let raw = keychain_item("cursor-dpop-key")?;
+    dpop_proof_es256(
+        &raw,
+        CURSOR_REFRESH_URL,
+        "POST",
+        Timestamp::now().as_second(),
+    )
+}
+
+pub(crate) fn dpop_proof_es256(
+    jwk_json: &str,
+    htu: &str,
+    htm: &str,
+    iat: i64,
+) -> Result<String, String> {
+    let v: Value =
+        serde_json::from_str(jwk_json).map_err(|_| "cursor dpop key was not json".to_string())?;
+    if v.get("kind").and_then(|k| k.as_str()) == Some("hardware-p256") {
+        return Err("cursor refresh needs a hardware DPoP key this process cannot sign".into());
+    }
+    let d = v
+        .get("privateKeyD")
+        .and_then(|s| s.as_str())
+        .or_else(|| v.pointer("/d").and_then(|s| s.as_str()))
+        .ok_or_else(|| "cursor dpop key has no private scalar".to_string())?;
+    let d_bytes =
+        b64url(d).ok_or_else(|| "cursor dpop private scalar was not base64url".to_string())?;
+    if d_bytes.len() != 32 {
+        return Err("cursor dpop private scalar was not 32 bytes".into());
+    }
+    use p256::ecdsa::signature::Signer;
+    use p256::ecdsa::{Signature, SigningKey};
+    let signing = SigningKey::from_slice(&d_bytes)
+        .map_err(|_| "cursor dpop private scalar was not a P-256 key".to_string())?;
+    let point = signing.verifying_key().to_encoded_point(false);
+    let x = b64url_encode(point.x().ok_or_else(|| "dpop x".to_string())?);
+    let y = b64url_encode(point.y().ok_or_else(|| "dpop y".to_string())?);
+    let header = serde_json::json!({
+        "typ": "dpop+jwt",
+        "alg": "ES256",
+        "jwk": {"kty": "EC", "crv": "P-256", "x": x, "y": y}
+    });
+    let payload = serde_json::json!({
+        "jti": b64url_encode(&iat.to_le_bytes()),
+        "htm": htm.to_ascii_uppercase(),
+        "htu": htu,
+        "iat": iat
+    });
+    let signing_input = format!(
+        "{}.{}",
+        b64url_encode(header.to_string().as_bytes()),
+        b64url_encode(payload.to_string().as_bytes())
+    );
+    let sig: Signature = signing.sign(signing_input.as_bytes());
+    Ok(format!(
+        "{signing_input}.{}",
+        b64url_encode(&sig.to_bytes())
+    ))
+}
+
+fn b64url_encode(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        let n = (u32::from(data[i]) << 16) | (u32::from(data[i + 1]) << 8) | u32::from(data[i + 2]);
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(T[((n >> 6) & 63) as usize] as char);
+        out.push(T[(n & 63) as usize] as char);
+        i += 3;
+    }
+    if i < data.len() {
+        let mut n = u32::from(data[i]) << 16;
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        if i + 1 < data.len() {
+            n |= u32::from(data[i + 1]) << 8;
+            out.push(T[((n >> 12) & 63) as usize] as char);
+            out.push(T[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push(T[((n >> 12) & 63) as usize] as char);
+        }
+    }
+    out
 }
 
 fn cursor_user_id(token: &str, explicit: &str) -> Option<String> {
@@ -1184,12 +1516,16 @@ mod tests {
         assert!(err.contains("allow-list"), "{err}");
         let err = http_get("https://api.anthropic.com/api/oauth/usage/../admin", &[]).unwrap_err();
         assert!(err.contains("allow-list"), "{err}");
+        let err = http_post_json("https://example.com/oauth/token", &[], "{}").unwrap_err();
+        assert!(err.contains("allow-list"), "{err}");
         let src = include_str!("plan_usage.rs");
         let prod = src.split("mod tests").next().unwrap_or(src);
-        assert!(
-            !prod.contains("ureq::post") && !prod.contains(".post("),
-            "plan_usage must not POST"
+        assert_eq!(
+            prod.matches(".post(").count(),
+            1,
+            "plan_usage may POST only the Cursor refresh URL"
         );
+        assert!(prod.contains(CURSOR_REFRESH_URL));
     }
 
     #[test]
@@ -1480,5 +1816,60 @@ mod tests {
             r#"{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000,"reset_at":1700000100}}}"#
         )
         .is_ok());
+    }
+
+    #[test]
+    fn jwt_exp_and_refresh_body_do_not_echo_the_token() {
+        let header = b64url_encode(br#"{"alg":"none"}"#);
+        let payload = b64url_encode(br#"{"exp":100}"#);
+        let jwt = format!("{header}.{payload}.sig");
+        assert_eq!(jwt_exp_unix(&jwt), Some(100));
+        assert!(jwt_expired(&jwt, 50));
+        assert!(!jwt_expired(&jwt, 30));
+        let body = cursor_refresh_body("refresh-example");
+        assert!(body.contains("\"grant_type\":\"refresh_token\""));
+        assert!(body.contains("\"client_id\":\"cli\""));
+        let parsed = parse_cursor_refresh(
+            r#"{"access_token":"aaa.bbb.ccc","refresh_token":"next-refresh","shouldLogout":false}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.access, "aaa.bbb.ccc");
+        assert_eq!(parsed.refresh.as_deref(), Some("next-refresh"));
+        assert!(parse_cursor_refresh(r#"{"shouldLogout":true}"#).is_err());
+        assert!(!allow_post("https://example.com/oauth/token"));
+        assert!(allow_post(CURSOR_REFRESH_URL));
+        let err = refresh_http_error(400, r#"{"error":"invalid_grant","refresh_token":"secret"}"#);
+        assert_eq!(err, "cursor token refresh http 400 invalid_grant");
+        assert!(!err.contains("secret"));
+    }
+
+    #[test]
+    fn dpop_proof_is_three_segments() {
+        use p256::ecdsa::SigningKey;
+        let key = SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let d = b64url_encode(&key.to_bytes());
+        let point = key.verifying_key().to_encoded_point(false);
+        let jwk = serde_json::json!({
+            "kind": "webcrypto-p256",
+            "v": 1,
+            "privateKeyD": d,
+            "publicJwk": {
+                "kty": "EC",
+                "crv": "P-256",
+                "x": b64url_encode(point.x().unwrap()),
+                "y": b64url_encode(point.y().unwrap())
+            }
+        });
+        let proof =
+            dpop_proof_es256(&jwk.to_string(), CURSOR_REFRESH_URL, "POST", 1_700_000_000).unwrap();
+        assert_eq!(proof.split('.').count(), 3);
+        let header = b64url(proof.split('.').next().unwrap()).unwrap();
+        let header: serde_json::Value = serde_json::from_slice(&header).unwrap();
+        assert_eq!(header["alg"], "ES256");
+        assert_eq!(header["typ"], "dpop+jwt");
+        assert!(header["jwk"]["x"].as_str().unwrap().len() > 8);
+        assert!(
+            dpop_proof_es256(r#"{"kind":"hardware-p256"}"#, CURSOR_REFRESH_URL, "POST", 1).is_err()
+        );
     }
 }

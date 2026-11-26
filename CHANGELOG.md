@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- Daily auth probe inside `atr serve` (not over SSH) for each enabled provider: Claude login and expiry, Grok refreshability and `expires_at` only, Cursor login-keychain status, Codex auth (an API key has no expiry), and Spark `127.0.0.1:8091`. A Telegram warning goes out through the existing alert path when a CLI is logged out or expires within 24 hours. Token values are not logged. `atr doctor` shows the same check when it is not a unit test.
+- Cursor plan usage refreshes an expired access token, or a usage call that returns HTTP 401, with the login-keychain item `cursor-refresh-token` (account `cursor-user`). The POST is `https://api2.cursor.sh/oauth/token` with `grant_type=refresh_token` and `client_id=cli`, matching `cursor-agent`. A `session_rt_` refresh token sends a DPoP proof from `cursor-dpop-key`. The new access token is written back to `cursor-access-token` via `security -i`, or kept in the serve process if that write fails. Tokens are not logged.
+
 ### Fixed
 
+- The dashboard usage column is one line per provider. Stored windows and the vendor plan meter are merged, labels are short (`5h`, `7d`, `models`, `other`, `on-demand`), and a single reset date is the later one when the windows differ. Examples: `5h 1% · 7d 4% · resets Nov 28`, `weekly 12% · resets Nov 27`, `models 67.3% · other 100% · on-demand 101.1% · resets Dec 16`. Codex API-key logins show `API key; usage not supported`. Spark stays `-`. No billing or extra-credit text.
 - Dashboard provider rows no longer show an extra-credits column or billing text (`no billing reply`, `_x.ai/billing`). Spark (including a Codex-kind Spark provider) shows `-` and no `plan_line`. A Codex API-key login shows `codex auth is an API key; usage not supported`. Claude `plan_line` dates use the short form (`Nov 28`). A passed stored five-hour window (`not a current meter`) is left off that line; current meters stay, for example `seven_day 4.0% resets Nov 28`. `atr usage --plan` still reports the stale window as `unknown`.
 
 - `atr usage --plan` Cursor no longer reports `unknown` / "Cursor session has no user id" when `cursorAuth/userId` is missing and `cursorAuth/accessToken` in `state.vscdb` is not a JWT. The WorkOS user id is read from `stripeMembershipAuthId`, `cachedScopedProfile.authId`, `glass.lastSignedInAuthId`, or `~/.cursor/cli-config.json` `authInfo.authId`. On macOS an encrypted desktop token is read from the keychain item `cursor-access-token` (account `cursor-user`). If that item cannot be read, the row stays `unknown` and names that item.

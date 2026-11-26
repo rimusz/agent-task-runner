@@ -968,6 +968,7 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
         _ = crate::selfheal::selfheal_loop(heal) => {}
         _ = sighup_loop(hup) => {}
         _ = crate::keepwarm::keepwarm_loop(kw) => {}
+        _ = crate::auth_probe::daily_loop(shared.clone()) => {}
     }
     Ok(())
 }
@@ -1032,6 +1033,10 @@ pub async fn serve_background(shared: Arc<Shared>) -> Result<SocketAddr> {
     let heal = shared.clone();
     tokio::spawn(async move {
         crate::selfheal::selfheal_loop(heal).await;
+    });
+    let auth = shared.clone();
+    tokio::spawn(async move {
+        crate::auth_probe::daily_loop(auth).await;
     });
     Ok(addr)
 }
