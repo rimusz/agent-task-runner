@@ -101,6 +101,7 @@ dependencies = [
  "jiff",
  "libc",
  "ratatui",
+ "ring",
  "rusqlite",
  "semver",
  "serde",

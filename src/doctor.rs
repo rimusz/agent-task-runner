@@ -447,6 +447,26 @@ pub async fn run_with_listen(
         }
     }
 
+    if crate::auth_probe::enabled() {
+        for note in crate::auth_probe::probe_providers(&cfg.providers) {
+            let st = match note.status {
+                crate::auth_probe::Status::Ok => Status::Ok,
+                crate::auth_probe::Status::Warn => Status::Warn,
+                crate::auth_probe::Status::Fail => Status::Fail,
+            };
+            push(
+                &mut checks,
+                &format!("auth {}", note.provider),
+                st,
+                note.detail,
+                Some(
+                    "checked from this process; cursor uses the login keychain of this session"
+                        .into(),
+                ),
+            );
+        }
+    }
+
     let legacy: Vec<&str> = cfg
         .providers
         .iter()

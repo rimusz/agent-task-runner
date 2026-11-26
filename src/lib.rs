@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod app;
+pub mod auth_probe;
 pub mod checklist;
 pub mod clock;
 pub mod compare;

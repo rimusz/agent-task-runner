@@ -366,22 +366,13 @@ function shortTime(full, now) {
   const txt = same ? f.slice(11, 16) : f.slice(5, 10) + " " + f.slice(11, 16);
   return '<span title="' + esc(f) + '">' + esc(txt) + '</span>';
 }
-// Provider usage: "5h 0% · resets Oct 16; 7d 4% · resets Oct 17". Each
-// segment is nowrap so the cell wraps only between segments; the full
-// timestamp (with zone) is in the hover title.
+// One usage line per provider: "5h 1% · 7d 4% · resets Nov 28".
 function usageCell(p) {
-  const segs = p.usage_segments || [];
-  let body;
-  if (!segs.length) {
-    body = (p.usage && p.usage !== "-") ? esc(p.usage) : '<span class="empty" title="this CLI does not report plan usage">-</span>';
-  } else {
-    body = segs.map(s => '<span class="seg"' + (s.reset_full ? ' title="resets ' + esc(s.reset_full) + '"' : "") + ">" +
-      esc(s.text) + (s.reset ? " · " + esc(s.reset) : "") + "</span>").join("; ");
+  const line = p.usage_line || p.usage || "";
+  if (!line || line === "-") {
+    return '<span class="empty" title="this CLI does not report plan usage">-</span>';
   }
-  if (p.plan_line) {
-    body += '<div class="meta" title="atr usage --plan">' + esc(p.plan_line) + "</div>";
-  }
-  return body;
+  return '<span class="seg">' + esc(line) + "</span>";
 }
 // Telegram assistant task keys (tg<chat id>) read as "Telegram".
 function taskKey(k) {

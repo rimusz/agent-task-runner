@@ -673,11 +673,7 @@ impl Shared {
                     } else {
                         p.reported_usage.as_str()
                     },
-                    "usage": crate::reported::format_provider_usage(
-                        &crate::reported::provider_usage_view(&self.db, &p.name),
-                        &cfg.display_timezone,
-                        clock.now(),
-                    ),
+                    "usage": cli_status_usage(p, self, &cfg.display_timezone, clock.now()),
                     "reported": crate::reported::reported_json(
                         &self.db,
                         &p.name,
@@ -968,6 +964,7 @@ pub async fn serve(shared: Arc<Shared>) -> Result<()> {
         _ = crate::selfheal::selfheal_loop(heal) => {}
         _ = sighup_loop(hup) => {}
         _ = crate::keepwarm::keepwarm_loop(kw) => {}
+        _ = crate::auth_probe::daily_loop(shared.clone()) => {}
     }
     Ok(())
 }
@@ -1032,6 +1029,10 @@ pub async fn serve_background(shared: Arc<Shared>) -> Result<SocketAddr> {
     let heal = shared.clone();
     tokio::spawn(async move {
         crate::selfheal::selfheal_loop(heal).await;
+    });
+    let auth = shared.clone();
+    tokio::spawn(async move {
+        crate::auth_probe::daily_loop(auth).await;
     });
     Ok(addr)
 }
@@ -1332,6 +1333,27 @@ fn print_task_detail(shared: &Shared, key: &str, verbose: bool) -> Result<()> {
         tz.format_str(&t.updated)
     );
     Ok(())
+}
+
+/// `atr status` usage column. Same line as the dashboard (plan cache merged
+/// with stored windows, no billing). Spark is `-`. No meter stays
+/// `usage: not reported`.
+fn cli_status_usage(
+    p: &crate::config::Provider,
+    shared: &Shared,
+    tz: &crate::tz::DisplayTz,
+    now: jiff::Timestamp,
+) -> String {
+    if crate::dashboard::spark_usage_hidden(&p.name, &p.preset, &p.model) {
+        return "-".into();
+    }
+    let view = crate::reported::provider_usage_view(&shared.db, &p.name);
+    let line = crate::dashboard::dashboard_usage_line(&p.name, &view, tz, now);
+    if line == "-" {
+        "usage: not reported".into()
+    } else {
+        line
+    }
 }
 
 pub fn format_status_table(shared: &Shared, repo: Option<&str>) -> String {
@@ -1885,11 +1907,139 @@ cli = "/bin/true"
         assert!(text.contains("cache headline="), "{text}");
         assert!(!text.trim_start().starts_with('{'), "{text}");
         assert!(text.contains("waiting (1)"), "{text}");
+        let usage_cell = text
+            .lines()
+            .find(|l| l.contains("claude") && l.contains("usage: not reported"))
+            .unwrap_or("");
+        assert!(usage_cell.contains("usage: not reported"), "{text}");
         assert!(
             !text.contains("github auth:"),
             "GitHub not configured must not appear in status text:\n{text}"
         );
         std::mem::forget(dir);
+    }
+
+    #[test]
+    fn status_usage_column_matches_dashboard_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("p.md"), "p\n").unwrap();
+        let cfg = format!(
+            r#"
+listen = "127.0.0.1:0"
+state_db = "{db}"
+worktree_root = "{root}"
+repo_path = "{root}"
+system_prompt_file = "{root}/p.md"
+display_timezone = "UTC"
+[[provider]]
+name = "grok"
+kind = "grok"
+[[provider]]
+name = "claude"
+kind = "claude"
+[[provider]]
+name = "cursor"
+kind = "cursor"
+[[provider]]
+name = "codex"
+kind = "codex"
+[[provider]]
+name = "spark"
+kind = "opencode"
+preset = "spark"
+model = "spark/deepseek-v4-flash-0731"
+"#,
+            db = dir.path().join("s.db").display(),
+            root = dir.path().display(),
+        );
+        let raw: crate::config::RawConfig = toml::from_str(&cfg).unwrap();
+        let parsed = crate::config::Config::from_raw(raw).unwrap();
+        let shared = Shared::from_config(dir.path().join("c.toml"), parsed).unwrap();
+        shared
+            .db
+            .upsert_provider_usage(
+                "grok",
+                "weekly",
+                Some(0.12),
+                Some(140.32),
+                Some(12.0),
+                Some("2026-11-27T04:36:36Z"),
+                None,
+                "2026-11-26T09:00:00Z",
+            )
+            .unwrap();
+        crate::plan_usage::cache_clear();
+        crate::plan_usage::cache_put(vec![
+            plan_ok("claude", "five_hour", 1.0, "2026-11-26T13:40:00Z"),
+            plan_ok("claude", "seven_day", 4.0, "2026-11-28T00:00:00Z"),
+            plan_ok("cursor", "cursor_models", 67.3, "2026-12-16T00:00:00Z"),
+            plan_ok("cursor", "on_demand_usd", 101.1, "2026-12-16T00:00:00Z"),
+            plan_ok("cursor", "other_models", 100.0, "2026-12-16T00:00:00Z"),
+            crate::plan_usage::PlanRow {
+                provider: "codex".into(),
+                metric: "plan".into(),
+                used: None,
+                limit: None,
+                pct: None,
+                resets_at: None,
+                source: "codex".into(),
+                read_at: "t".into(),
+                error: None,
+                status: "unknown".into(),
+                reason: Some(crate::plan_usage::CODEX_API_KEY_REASON.into()),
+            },
+        ]);
+        let text = format_status_table(&shared, None);
+        let row = |name: &str| {
+            text.lines()
+                .find(|l| l.split_whitespace().nth(1) == Some(name))
+                .unwrap_or("")
+                .to_string()
+        };
+        let grok = row("grok");
+        assert!(
+            grok.contains("weekly 12% · resets Nov 27"),
+            "{grok}\n{text}"
+        );
+        assert!(!grok.to_ascii_lowercase().contains("credit"), "{grok}");
+        assert!(!grok.contains('$'), "{grok}");
+        assert!(
+            row("claude").contains("5h 1% · 7d 4% · resets Nov 28"),
+            "{text}"
+        );
+        assert!(
+            row("cursor").contains("models 67.3% · other 100% · on-demand 101.1% · resets Dec 16"),
+            "{text}"
+        );
+        assert!(
+            row("codex").contains("API key; usage not supported"),
+            "{text}"
+        );
+        assert!(
+            row("spark").contains(" -") || row("spark").ends_with('-'),
+            "{text}"
+        );
+        let spark = row("spark");
+        assert!(spark.trim_end().ends_with('-'), "{spark}");
+        assert!(!spark.contains("usage"), "{spark}");
+        crate::plan_usage::cache_clear();
+        std::mem::forget(dir);
+    }
+
+    fn plan_ok(provider: &str, metric: &str, pct: f64, reset: &str) -> crate::plan_usage::PlanRow {
+        crate::plan_usage::PlanRow {
+            provider: provider.into(),
+            metric: metric.into(),
+            used: Some(pct),
+            limit: Some(100.0),
+            pct: Some(pct),
+            resets_at: Some(reset.into()),
+            source: "test".into(),
+            read_at: "t".into(),
+            error: None,
+            status: "ok".into(),
+            reason: None,
+        }
     }
 
     #[test]

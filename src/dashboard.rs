@@ -198,31 +198,22 @@ pub fn snapshot_period(
                 .unwrap_or((false, false));
             let view = crate::reported::provider_usage_view(&shared.db, &p.name);
             let spark = hides_dashboard_usage(p);
-            let (usage, usage_reported) = if spark {
-                ("-".to_string(), false)
+            let usage_line = if spark {
+                "-".to_string()
             } else {
-                provider_usage_cells(&view, tz, now)
+                dashboard_usage_line(&p.name, &view, tz, now)
             };
             let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
-            let segments = if spark {
-                Vec::new()
-            } else {
-                crate::reported::provider_usage_segments(&view, tz, now)
-            };
-            let plan_line = if spark {
-                String::new()
-            } else {
-                dashboard_plan_line(&p.name, tz)
-            };
             json!({
                 "order": i + 1,
                 "name": p.name,
                 "enabled": enabled,
                 "cooling": cooling,
-                "usage": redact(&usage, &refs),
-                "usage_reported": usage_reported,
-                "usage_segments": segments,
-                "plan_line": plan_line,
+                "usage": redact(&usage_line, &refs),
+                "usage_line": redact(&usage_line, &refs),
+                "usage_reported": usage_line != "-",
+                "usage_segments": [],
+                "plan_line": "",
                 "model": p.model,
                 "version": crate::providers::recorded_version(&shared.config_path, &p.name).map(|(v, _)| v),
                 "last_success": last_ok.get(&p.name).map(|e| tz.format_str(e)),
@@ -562,14 +553,136 @@ pub(crate) fn spark_usage_hidden(name: &str, preset: &str, model: &str) -> bool 
     name == "spark" || preset == "spark" || model.starts_with("spark/")
 }
 
-/// Dashboard `plan_line`: vendor meter text with short reset dates.
-/// Segments that are only billing (extra credits, billing cycle, the Grok
-/// billing probe error) are omitted. A stored Claude window whose reset has
-/// passed (`not a current meter`) is omitted; current meters stay.
-pub(crate) fn dashboard_plan_line(provider: &str, tz: &crate::tz::DisplayTz) -> String {
-    display_plan_line(&crate::plan_usage::line_for(provider), tz)
+/// One dashboard usage string. Plan meters and stored windows are merged by
+/// label. One reset date: the later timestamp when they differ. Billing and
+/// extra-credit meters are left out. Raw keys (`cursor_models`, `seven_day`)
+/// are shown as short labels.
+pub(crate) fn dashboard_usage_line(
+    provider: &str,
+    view: &crate::reported::ProviderUsageView,
+    tz: &crate::tz::DisplayTz,
+    now: Timestamp,
+) -> String {
+    let rows = crate::plan_usage::cached_rows();
+    let mine: Vec<_> = rows.iter().filter(|r| r.provider == provider).collect();
+    if mine.iter().any(|r| {
+        r.reason.as_deref() == Some(crate::plan_usage::CODEX_API_KEY_REASON)
+            || r.error.as_deref() == Some(crate::plan_usage::CODEX_API_KEY_REASON)
+    }) {
+        return "API key; usage not supported".into();
+    }
+    let mut meters: Vec<UsageMeter> = Vec::new();
+    for r in &mine {
+        if r.status != "ok" {
+            continue;
+        }
+        let Some(label) = usage_label(&r.metric) else {
+            continue;
+        };
+        push_meter(
+            &mut meters,
+            label,
+            r.pct,
+            r.resets_at.as_deref().and_then(crate::rfc3339::parse),
+        );
+    }
+    for w in &view.windows {
+        let Some(label) = usage_label(&w.name) else {
+            continue;
+        };
+        push_meter(&mut meters, label, w.percent_used, w.resets_at);
+    }
+    if meters.is_empty() {
+        return "-".into();
+    }
+    meters.sort_by_key(|m| label_rank(&m.label));
+    let mut parts: Vec<String> = meters
+        .iter()
+        .map(|m| match m.pct {
+            Some(p) => format!("{} {}%", m.label, pct_text(p)),
+            None => m.label.clone(),
+        })
+        .collect();
+    if let Some(t) = meters.iter().filter_map(|m| m.reset).max() {
+        let _ = now;
+        parts.push(format!("resets {}", tz.format_compact(t)));
+    }
+    parts.join(" · ")
 }
 
+struct UsageMeter {
+    label: String,
+    pct: Option<f64>,
+    reset: Option<Timestamp>,
+}
+
+fn push_meter(
+    out: &mut Vec<UsageMeter>,
+    label: String,
+    pct: Option<f64>,
+    reset: Option<Timestamp>,
+) {
+    if let Some(existing) = out.iter_mut().find(|m| m.label == label) {
+        if existing.pct.is_none() {
+            existing.pct = pct;
+        }
+        if reset > existing.reset {
+            existing.reset = reset;
+        }
+        return;
+    }
+    out.push(UsageMeter { label, pct, reset });
+}
+
+fn usage_label(metric: &str) -> Option<String> {
+    let key = metric.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let lower = key.to_ascii_lowercase();
+    if lower.contains("billing")
+        || lower.contains("extra")
+        || lower.contains("credit")
+        || lower.contains("_x.ai")
+    {
+        return None;
+    }
+    let label = match lower.as_str() {
+        "five_hour" | "fivehour" | "5h" => "5h",
+        "seven_day" | "sevenday" | "7d" => "7d",
+        "weekly" => "weekly",
+        "cursor_models" | "models" => "models",
+        "other_models" | "other" => "other",
+        "on_demand_usd" | "on_demand" | "on-demand" => "on-demand",
+        _ => return Some(lower.replace('_', " ")),
+    };
+    Some(label.into())
+}
+
+fn label_rank(label: &str) -> u8 {
+    match label {
+        "5h" => 0,
+        "7d" => 1,
+        "weekly" => 2,
+        "models" => 3,
+        "other" => 4,
+        "on-demand" => 5,
+        _ => 9,
+    }
+}
+
+fn pct_text(p: f64) -> String {
+    let p = (p * 10.0).round() / 10.0;
+    if (p - p.round()).abs() < 0.05 {
+        format!("{p:.0}")
+    } else {
+        format!("{p:.1}")
+    }
+}
+
+/// Vendor meter text with short reset dates. Segments that are only billing
+/// are omitted. A stored Claude window whose reset has passed is omitted.
+#[cfg(test)]
 pub(crate) fn display_plan_line(raw: &str, tz: &crate::tz::DisplayTz) -> String {
     let mut parts = Vec::new();
     for part in raw.split("; ") {
@@ -586,6 +699,7 @@ pub(crate) fn display_plan_line(raw: &str, tz: &crate::tz::DisplayTz) -> String 
 
 /// `atr usage --plan` still reports a passed `claude_stream` window as
 /// `unknown`. The dashboard line shows only meters that are current.
+#[cfg(test)]
 fn stale_meter_note(s: &str) -> bool {
     let l = s.to_ascii_lowercase();
     // The stored-window reason itself contains "; ", so it arrives as two
@@ -594,6 +708,7 @@ fn stale_meter_note(s: &str) -> bool {
         || (l.contains("stored claude_stream") && l.contains("has passed"))
 }
 
+#[cfg(test)]
 fn mentions_billing(s: &str) -> bool {
     let l = s.to_ascii_lowercase();
     l.contains("billing")
@@ -602,6 +717,7 @@ fn mentions_billing(s: &str) -> bool {
         || l.contains("_x.ai/billing")
 }
 
+#[cfg(test)]
 fn compact_rfc3339(line: &str, tz: &crate::tz::DisplayTz) -> String {
     let bytes = line.as_bytes();
     let mut out = String::new();
@@ -623,6 +739,7 @@ fn compact_rfc3339(line: &str, tz: &crate::tz::DisplayTz) -> String {
 }
 
 /// `2026-11-28T00:00:00.000Z` or `2026-11-28T00:00:00Z`.
+#[cfg(test)]
 fn rfc3339_len(s: &str) -> Option<usize> {
     let b = s.as_bytes();
     if b.len() < 20 {
@@ -661,6 +778,7 @@ fn rfc3339_len(s: &str) -> Option<usize> {
 
 /// Dashboard usage cell: plan windows only (`-` when the CLI reports none).
 /// Extra credits are not a dashboard field.
+#[cfg(test)]
 fn provider_usage_cells(
     view: &crate::reported::ProviderUsageView,
     tz: &crate::tz::DisplayTz,
@@ -1266,12 +1384,79 @@ kind = "claude"
         assert!(!weekly.contains("billing") && !weekly.contains("_x.ai"));
         let codex = display_plan_line(crate::plan_usage::CODEX_API_KEY_REASON, &tz);
         assert_eq!(codex, "codex auth is an API key; usage not supported");
+        crate::plan_usage::cache_clear();
+        crate::plan_usage::cache_put(vec![
+            ok_row("claude", "five_hour", 1.0, "2026-11-26T13:40:00Z"),
+            ok_row("claude", "seven_day", 4.0, "2026-11-28T00:00:00Z"),
+            ok_row("grok", "weekly", 12.0, "2026-11-27T04:36:36Z"),
+            ok_row("cursor", "cursor_models", 67.3, "2026-12-16T00:00:00Z"),
+            ok_row("cursor", "on_demand_usd", 101.1, "2026-12-16T00:00:00Z"),
+            ok_row("cursor", "other_models", 100.0, "2026-12-16T00:00:00Z"),
+            crate::plan_usage::PlanRow {
+                provider: "codex".into(),
+                metric: "plan".into(),
+                used: None,
+                limit: None,
+                pct: None,
+                resets_at: None,
+                source: "codex".into(),
+                read_at: "t".into(),
+                error: None,
+                status: "unknown".into(),
+                reason: Some(crate::plan_usage::CODEX_API_KEY_REASON.into()),
+            },
+        ]);
+        let empty = crate::reported::ProviderUsageView::default();
+        let claude_view = crate::reported::ProviderUsageView {
+            windows: vec![crate::reported::UsageWindowView {
+                name: "5h".into(),
+                percent_used: Some(1.0),
+                resets_at: Some(crate::clock::utc(2026, 11, 26, 13, 40, 0)),
+            }],
+            extra_credits: Some(9.0),
+        };
+        assert_eq!(
+            dashboard_usage_line("claude", &claude_view, &tz, Timestamp::now()),
+            "5h 1% · 7d 4% · resets Nov 28"
+        );
+        assert_eq!(
+            dashboard_usage_line("grok", &empty, &tz, Timestamp::now()),
+            "weekly 12% · resets Nov 27"
+        );
+        assert_eq!(
+            dashboard_usage_line("cursor", &empty, &tz, Timestamp::now()),
+            "models 67.3% · other 100% · on-demand 101.1% · resets Dec 16"
+        );
+        assert_eq!(
+            dashboard_usage_line("codex", &empty, &tz, Timestamp::now()),
+            "API key; usage not supported"
+        );
+        assert!(
+            !dashboard_usage_line("claude", &claude_view, &tz, Timestamp::now()).contains("credit")
+        );
+        crate::plan_usage::cache_clear();
         assert!(spark_usage_hidden("spark", "", "gpt-5.1-codex"));
         assert!(spark_usage_hidden("local", "spark", ""));
         assert!(spark_usage_hidden("other", "", "spark/deepseek"));
         assert!(!spark_usage_hidden("codex", "", "gpt-5.1-codex"));
         assert!(!PAGE.contains("extra credits"));
         assert!(!PAGE.contains("extra_credits"));
+    }
+
+    fn ok_row(provider: &str, metric: &str, pct: f64, reset: &str) -> crate::plan_usage::PlanRow {
+        crate::plan_usage::PlanRow {
+            provider: provider.into(),
+            metric: metric.into(),
+            used: Some(pct),
+            limit: Some(100.0),
+            pct: Some(pct),
+            resets_at: Some(reset.into()),
+            source: "test".into(),
+            read_at: "t".into(),
+            error: None,
+            status: "ok".into(),
+            reason: None,
+        }
     }
 
     #[test]
