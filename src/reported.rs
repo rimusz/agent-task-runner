@@ -290,19 +290,6 @@ fn reset_display(
     })
 }
 
-fn format_reset_suffix(
-    window: &str,
-    resets_at: Option<Timestamp>,
-    now: Timestamp,
-    tz: &crate::tz::DisplayTz,
-) -> String {
-    match reset_display(window, resets_at, now) {
-        Some(ResetDisplay::At(t)) => format!(", resets {}", tz.format_short(t)),
-        Some(ResetDisplay::WindowReset) => ", window reset".into(),
-        None => String::new(),
-    }
-}
-
 fn json_reset_at(
     window: &str,
     resets_at: Option<Timestamp>,
@@ -418,8 +405,10 @@ fn extra_credits_usd(r: &ProviderUsageRow) -> Option<f64> {
     Some(b)
 }
 
-/// Shared formatter for status, providers, dashboard, Telegram, and MCP.
-/// Providers with no windows and no extra credits: `usage: not reported`.
+/// Shared formatter for status, providers, Telegram, and MCP.
+/// One line, same shape as the dashboard usage cell: short labels, one
+/// reset (the later date), no billing and no extra-credit dollars.
+/// Providers with no plan windows: `usage: not reported`.
 /// Past reset times are rolled forward when the window length is known,
 /// otherwise shown as `window reset`.
 pub fn format_provider_usage(
@@ -427,22 +416,87 @@ pub fn format_provider_usage(
     tz: &crate::tz::DisplayTz,
     now: Timestamp,
 ) -> String {
-    if view.windows.is_empty() && view.extra_credits.is_none() {
+    let mut meters: Vec<UsageMeterLine> = Vec::new();
+    let mut window_reset = false;
+    for w in &view.windows {
+        if usage_label_hidden(&w.name) {
+            continue;
+        }
+        let reset = match reset_display(&w.name, w.resets_at, now) {
+            Some(ResetDisplay::At(t)) => Some(t),
+            Some(ResetDisplay::WindowReset) => {
+                window_reset = true;
+                None
+            }
+            None => None,
+        };
+        if let Some(existing) = meters.iter_mut().find(|m| m.label == w.name) {
+            if existing.pct.is_none() {
+                existing.pct = w.percent_used;
+            }
+            if reset > existing.reset {
+                existing.reset = reset;
+            }
+            continue;
+        }
+        meters.push(UsageMeterLine {
+            label: w.name.clone(),
+            pct: w.percent_used,
+            reset,
+        });
+    }
+    if meters.is_empty() {
         return "usage: not reported".into();
     }
-    let mut parts = Vec::new();
-    for w in &view.windows {
-        let mut s = match w.percent_used {
-            Some(p) => format!("{} {:.1}% used", w.name, one_decimal(p)),
-            None => w.name.clone(),
-        };
-        s.push_str(&format_reset_suffix(&w.name, w.resets_at, now, tz));
-        parts.push(s);
+    meters.sort_by_key(|m| usage_label_rank(&m.label));
+    let mut parts: Vec<String> = meters
+        .iter()
+        .map(|m| match m.pct {
+            Some(p) => format!("{} {}%", m.label, pct_compact(p)),
+            None => m.label.clone(),
+        })
+        .collect();
+    if let Some(t) = meters.iter().filter_map(|m| m.reset).max() {
+        parts.push(format!("resets {}", tz.format_compact(t)));
+    } else if window_reset {
+        parts.push("window reset".into());
     }
-    if let Some(usd) = view.extra_credits {
-        parts.push(format!("extra credits ${usd:.2}"));
+    parts.join(" · ")
+}
+
+struct UsageMeterLine {
+    label: String,
+    pct: Option<f64>,
+    reset: Option<Timestamp>,
+}
+
+fn usage_label_hidden(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("billing")
+        || lower.contains("extra")
+        || lower.contains("credit")
+        || lower.contains("_x.ai")
+}
+
+fn usage_label_rank(label: &str) -> u8 {
+    match label {
+        "5h" => 0,
+        "7d" => 1,
+        "weekly" => 2,
+        "models" => 3,
+        "other" => 4,
+        "on-demand" => 5,
+        _ => 9,
     }
-    parts.join("; ")
+}
+
+fn pct_compact(p: f64) -> String {
+    let p = one_decimal(p);
+    if (p - p.round()).abs() < 0.05 {
+        format!("{p:.0}")
+    } else {
+        format!("{p:.1}")
+    }
 }
 
 /// Dashboard usage segments: `{text: "5h 0%", reset: "resets Oct 16", reset_full:
@@ -681,11 +735,11 @@ mod tests {
         let json = reported_json(&db, "claude", &tz, t0);
         assert_eq!(json["windows"].as_array().unwrap().len(), 2);
         assert!(
-            json["display"].as_str().unwrap().contains("5h 0.0% used"),
+            json["display"].as_str().unwrap().contains("5h 0%"),
             "{json}"
         );
         assert!(
-            json["display"].as_str().unwrap().contains("7d 3.0% used"),
+            json["display"].as_str().unwrap().contains("7d 3%"),
             "{json}"
         );
         assert!(reported_resets(&db, "claude", t0).len() >= 2);
@@ -866,7 +920,7 @@ for line in sys.stdin:
             }],
             extra_credits: Some(140.32),
         };
-        let expected = "weekly 1.0% used, resets Oct 16 07:36 UTC; extra credits $140.32";
+        let expected = "weekly 1% · resets Oct 16";
         for name in ["claude", "grok", "cursor", "codex", "future-agent"] {
             let _ = name;
             assert_eq!(format_provider_usage(&plan, &tz, t0()), expected);
@@ -894,10 +948,7 @@ for line in sys.stdin:
             ],
             extra_credits: None,
         };
-        assert_eq!(
-            format_provider_usage(&claude, &tz, t0()),
-            "5h 0.0% used; 7d 3.0% used"
-        );
+        assert_eq!(format_provider_usage(&claude, &tz, t0()), "5h 0% · 7d 3%");
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("s.db")).unwrap();
         let now = "2026-10-13T12:00:00.000+00:00";
@@ -943,8 +994,10 @@ for line in sys.stdin:
         let view = provider_usage_view_from_rows(&[old]);
         assert_eq!(
             format_provider_usage(&view, &tz, t0()),
-            "weekly 1.0% used, resets Oct 16 07:36 UTC; extra credits $140.32"
+            "weekly 1% · resets Oct 16"
         );
+        assert!(!format_provider_usage(&view, &tz, t0()).contains("credit"));
+        assert!(!format_provider_usage(&view, &tz, t0()).contains('$'));
         assert_eq!(view.windows[0].percent_used, Some(1.0));
         assert!((view.extra_credits.unwrap() - 140.32).abs() < 1e-9);
     }
@@ -979,7 +1032,7 @@ for line in sys.stdin:
         assert_eq!(view.windows[0].name, "weekly");
         assert_eq!(
             format_provider_usage(&view, &tz, t0()),
-            "weekly 1.0% used, resets Oct 16 07:36 UTC; extra credits $140.32"
+            "weekly 1% · resets Oct 16"
         );
     }
 
@@ -998,7 +1051,7 @@ for line in sys.stdin:
             extra_credits: None,
         };
         let text = format_provider_usage(&five, &tz, now);
-        assert_eq!(text, "5h 0.0% used, resets Oct 14 22:10 Europe/Vilnius");
+        assert_eq!(text, "5h 0% · resets Oct 14");
         assert!(
             !text.contains("17:10"),
             "must not keep the expired reset time, got {text}"
@@ -1020,7 +1073,7 @@ for line in sys.stdin:
         };
         assert_eq!(
             format_provider_usage(&unknown, &tz, now),
-            "session 10.0% used, window reset"
+            "session 10% · window reset"
         );
 
         let dir = tempfile::tempdir().unwrap();

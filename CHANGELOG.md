@@ -9,6 +9,8 @@
 
 ### Fixed
 
+- `atr status` usage cells use the same one-line plan format as the dashboard. Labels stay short, one reset date is shown, and billing / extra-credit dollars are left out. Examples: `weekly 12% · resets Nov 27`, `5h 1% · 7d 4% · resets Nov 28`. Codex API-key logins show `API key; usage not supported`. Spark stays `-`. An empty meter stays `usage: not reported`.
+
 - The dashboard usage column is one line per provider. Stored windows and the vendor plan meter are merged, labels are short (`5h`, `7d`, `models`, `other`, `on-demand`), and a single reset date is the later one when the windows differ. Examples: `5h 1% · 7d 4% · resets Nov 28`, `weekly 12% · resets Nov 27`, `models 67.3% · other 100% · on-demand 101.1% · resets Dec 16`. Codex API-key logins show `API key; usage not supported`. Spark stays `-`. No billing or extra-credit text.
 - Dashboard provider rows no longer show an extra-credits column or billing text (`no billing reply`, `_x.ai/billing`). Spark (including a Codex-kind Spark provider) shows `-` and no `plan_line`. A Codex API-key login shows `codex auth is an API key; usage not supported`. Claude `plan_line` dates use the short form (`Nov 28`). A passed stored five-hour window (`not a current meter`) is left off that line; current meters stay, for example `seven_day 4.0% resets Nov 28`. `atr usage --plan` still reports the stale window as `unknown`.
 

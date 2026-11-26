@@ -4367,7 +4367,7 @@ mod tests {
                 &tz,
                 now,
             ),
-            "weekly 1.0% used, resets Oct 16 07:36 UTC; extra credits $140.32"
+            "weekly 1% · resets Oct 16"
         );
         let runs = db.list_runs(Some("acme-m")).unwrap();
         let by = |name: &str| {
@@ -4590,7 +4590,7 @@ mod tests {
                 &tz,
                 now,
             ),
-            "weekly 1.0% used, resets Oct 16 07:36 UTC; extra credits $140.32"
+            "weekly 1% · resets Oct 16"
         );
         db.upsert_provider_usage(
             "grok",

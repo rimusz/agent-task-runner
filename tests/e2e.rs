@@ -473,8 +473,9 @@ async fn claude_stream_usage_shows_in_status() {
         .unwrap();
     assert_eq!(claude["reported_usage"], "claude_stream", "{claude}");
     let usage = claude["usage"].as_str().expect("usage");
-    assert!(usage.contains("5h 0.0% used"), "{usage}");
-    assert!(usage.contains("7d 3.0% used"), "{usage}");
+    assert!(usage.contains("5h 0%"), "{usage}");
+    assert!(usage.contains("7d 3%"), "{usage}");
+    assert!(!usage.to_ascii_lowercase().contains("credit"), "{usage}");
     assert!(!usage.contains("0.03"), "{usage}");
     let reported = &claude["reported"];
     let windows = reported["windows"].as_array().expect("windows");
@@ -554,10 +555,11 @@ async fn grok_billing_probe_shows_balance() {
         .unwrap();
     assert_eq!(grok["reported_usage"], "grok_billing");
     let usage = grok["usage"].as_str().expect("usage");
-    assert!(usage.contains("weekly 1.0% used"), "{usage}");
-    assert!(usage.contains("extra credits $140.32"), "{usage}");
+    assert!(usage.contains("weekly 1%"), "{usage}");
+    assert!(usage.contains("resets"), "{usage}");
+    assert!(!usage.to_ascii_lowercase().contains("credit"), "{usage}");
+    assert!(!usage.contains('$'), "{usage}");
     assert!(!usage.contains("14032"), "{usage}");
-    assert!(!usage.contains("0.01"), "{usage}");
     let reported = &grok["reported"];
     let windows = reported["windows"].as_array().expect("windows");
     assert!(
@@ -591,10 +593,12 @@ async fn grok_billing_refreshed_at_serve_start() {
         .unwrap();
     let usage = grok["usage"].as_str().expect("usage");
     assert!(
-        usage.contains("weekly 1.0% used"),
+        usage.contains("weekly 1%"),
         "daemon start must probe grok billing without a task: {usage}"
     );
-    assert!(usage.contains("extra credits $140.32"), "{usage}");
+    assert!(usage.contains("resets"), "{usage}");
+    assert!(!usage.to_ascii_lowercase().contains("credit"), "{usage}");
+    assert!(!usage.contains('$'), "{usage}");
     assert!(!usage.contains("14032"), "{usage}");
 }
 
