@@ -4,7 +4,7 @@
 
 ### Added
 
-- Daily auth probe inside `atr serve` (not over SSH) for each enabled provider: Claude login and expiry, Grok refreshability and `expires_at` only, Cursor login-keychain status, Codex auth (an API key has no expiry), and Spark `127.0.0.1:8091`. A Telegram warning goes out through the existing alert path when a CLI is logged out or expires within 24 hours. Token values are not logged. `atr doctor` shows the same check when it is not a unit test.
+- Daily auth probe inside `atr serve` (not over SSH) for each enabled provider: Claude login and expiry, Grok refreshability and `expires_at` only, Cursor login-keychain status, Codex auth (an API key has no expiry), and Spark. Spark is a TCP check of the host and port in `model_providers.spark.base_url` (a `/v1` path is ignored). When that override is unset, the check stays `127.0.0.1:8091`. A Telegram warning goes out through the existing alert path when a CLI is logged out or expires within 24 hours. Token values are not logged. `atr doctor` shows the same check when it is not a unit test.
 - Cursor plan usage refreshes an expired access token, or a usage call that returns HTTP 401, with the login-keychain item `cursor-refresh-token` (account `cursor-user`). The POST is `https://api2.cursor.sh/oauth/token` with `grant_type=refresh_token` and `client_id=cli`, matching `cursor-agent`. A `session_rt_` refresh token sends a DPoP proof from `cursor-dpop-key`. The new access token is written back to `cursor-access-token` via `security -i`, or kept in the serve process if that write fails. Tokens are not logged.
 
 ### Fixed

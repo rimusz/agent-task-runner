@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const WARN_BEFORE: SignedDuration = SignedDuration::from_hours(24);
-const SPARK_ADDR: &str = "127.0.0.1:8091";
+/// Default when `model_providers.spark.base_url` is not set.
+const SPARK_ADDR_DEFAULT: &str = "127.0.0.1:8091";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Note {
@@ -109,7 +110,7 @@ fn probe_one(home: &Path, p: &Provider, now: Timestamp, ssh: bool) -> Option<Not
         "grok" => grok(home, now),
         "cursor" => cursor(now, ssh),
         "codex" => codex(home, now),
-        "spark" => spark(),
+        "spark" => spark(p),
         _ => return None,
     };
     let (status, detail) = detail;
@@ -393,13 +394,57 @@ fn codex(home: &Path, now: Timestamp) -> (Status, String) {
     }
 }
 
-fn spark() -> (Status, String) {
-    match std::net::TcpStream::connect_timeout(
-        &SPARK_ADDR.parse().expect("spark addr"),
-        Duration::from_secs(2),
-    ) {
-        Ok(_) => (Status::Ok, format!("{SPARK_ADDR} reachable")),
-        Err(_) => (Status::Warn, format!("{SPARK_ADDR} unreachable")),
+fn spark(p: &Provider) -> (Status, String) {
+    let addr = spark_socket_addr(p);
+    let sock = match addr.parse() {
+        Ok(s) => s,
+        Err(_) => {
+            return (
+                Status::Warn,
+                format!("spark base URL {addr} is not a host:port"),
+            );
+        }
+    };
+    match std::net::TcpStream::connect_timeout(&sock, Duration::from_secs(2)) {
+        Ok(_) => (Status::Ok, format!("{addr} reachable")),
+        Err(_) => (Status::Warn, format!("{addr} unreachable")),
+    }
+}
+
+/// Host and port from `model_providers.spark.base_url` in Codex
+/// `config_overrides`. A `/v1` path is ignored. Unset stays the local default.
+pub(crate) fn spark_socket_addr(p: &Provider) -> String {
+    for ov in &p.config_overrides {
+        if let Some(addr) = spark_addr_from_override(ov) {
+            return addr;
+        }
+    }
+    SPARK_ADDR_DEFAULT.to_string()
+}
+
+fn spark_addr_from_override(ov: &str) -> Option<String> {
+    let key = "model_providers.spark.base_url";
+    let (_, rest) = ov.split_once(key)?;
+    let rest = rest.trim().trim_start_matches('=').trim();
+    let rest = rest.trim_matches(|c| c == '"' || c == '\'');
+    host_port(rest)
+}
+
+/// `http://100.117.255.7:8091/v1` → `100.117.255.7:8091`.
+fn host_port(raw: &str) -> Option<String> {
+    let s = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+    if s.is_empty() {
+        return None;
+    }
+    let no_scheme = s.split_once("://").map(|(_, r)| r).unwrap_or(s);
+    let hostport = no_scheme.split(['/', '?', '#']).next()?.trim();
+    if hostport.is_empty() || hostport.contains(' ') {
+        return None;
+    }
+    if hostport.contains(':') {
+        Some(hostport.to_string())
+    } else {
+        Some(format!("{hostport}:8091"))
     }
 }
 
@@ -499,5 +544,40 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let note = probe_one(home.path(), &p, Timestamp::now(), false).unwrap();
         assert!(note.detail.contains("8091"), "{:?}", note.detail);
+        assert!(note.detail.contains("127.0.0.1"), "{:?}", note.detail);
+    }
+
+    #[test]
+    fn spark_uses_configured_base_url_not_loopback() {
+        assert_eq!(
+            spark_addr_from_override(
+                r#"model_providers.spark.base_url="http://100.117.255.7:8091/v1""#
+            )
+            .as_deref(),
+            Some("100.117.255.7:8091")
+        );
+        assert_eq!(
+            host_port("http://100.117.255.7:8091/v1").as_deref(),
+            Some("100.117.255.7:8091")
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut p = provider("spark", "codex");
+        p.preset = "spark".into();
+        p.config_overrides = vec![format!(
+            r#"model_providers.spark.base_url="http://127.0.0.1:{port}/v1""#
+        )];
+        assert_eq!(spark_socket_addr(&p), format!("127.0.0.1:{port}"));
+        let home = tempfile::tempdir().unwrap();
+        let note = probe_one(home.path(), &p, Timestamp::now(), false).unwrap();
+        assert_eq!(note.status, Status::Ok, "{:?}", note.detail);
+        assert!(note.detail.contains(&port.to_string()), "{:?}", note.detail);
+        assert!(
+            !note.detail.contains("8091"),
+            "must not probe the hardcoded gateway: {:?}",
+            note.detail
+        );
+        drop(listener);
     }
 }
