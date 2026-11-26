@@ -564,7 +564,8 @@ pub(crate) fn spark_usage_hidden(name: &str, preset: &str, model: &str) -> bool 
 
 /// Dashboard `plan_line`: vendor meter text with short reset dates.
 /// Segments that are only billing (extra credits, billing cycle, the Grok
-/// billing probe error) are omitted.
+/// billing probe error) are omitted. A stored Claude window whose reset has
+/// passed (`not a current meter`) is omitted; current meters stay.
 pub(crate) fn dashboard_plan_line(provider: &str, tz: &crate::tz::DisplayTz) -> String {
     display_plan_line(&crate::plan_usage::line_for(provider), tz)
 }
@@ -572,7 +573,7 @@ pub(crate) fn dashboard_plan_line(provider: &str, tz: &crate::tz::DisplayTz) -> 
 pub(crate) fn display_plan_line(raw: &str, tz: &crate::tz::DisplayTz) -> String {
     let mut parts = Vec::new();
     for part in raw.split("; ") {
-        if part.is_empty() || mentions_billing(part) {
+        if part.is_empty() || mentions_billing(part) || stale_meter_note(part) {
             continue;
         }
         let compact = compact_rfc3339(part, tz);
@@ -581,6 +582,16 @@ pub(crate) fn display_plan_line(raw: &str, tz: &crate::tz::DisplayTz) -> String 
         }
     }
     parts.join("; ")
+}
+
+/// `atr usage --plan` still reports a passed `claude_stream` window as
+/// `unknown`. The dashboard line shows only meters that are current.
+fn stale_meter_note(s: &str) -> bool {
+    let l = s.to_ascii_lowercase();
+    // The stored-window reason itself contains "; ", so it arrives as two
+    // segments: "… has passed" and "not a current meter".
+    l.contains("not a current meter")
+        || (l.contains("stored claude_stream") && l.contains("has passed"))
 }
 
 fn mentions_billing(s: &str) -> bool {
@@ -1239,10 +1250,14 @@ kind = "claude"
             "unknown: stored claude_stream window resets_at 2026-10-31T17:40:00.000Z has passed; not a current meter; seven_day 4.0% resets 2026-11-28T00:00:00.000Z",
             &tz,
         );
-        assert_eq!(
-            claude,
-            "unknown: stored claude_stream window resets_at Oct 31 has passed; not a current meter; seven_day 4.0% resets Nov 28"
+        assert_eq!(claude, "seven_day 4.0% resets Nov 28");
+        assert!(!claude.contains("claude_stream"));
+        assert!(!claude.contains("not a current meter"));
+        let only_stale = display_plan_line(
+            "unknown: stored claude_stream window resets_at 2026-10-31T17:40:00.000Z has passed; not a current meter",
+            &tz,
         );
+        assert_eq!(only_stale, "");
         assert!(!claude.contains('T'));
         let grok = display_plan_line("error: no billing reply", &tz);
         assert_eq!(grok, "");
