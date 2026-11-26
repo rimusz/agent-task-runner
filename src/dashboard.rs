@@ -571,6 +571,14 @@ pub(crate) fn dashboard_usage_line(
     }) {
         return "API key; usage not supported".into();
     }
+    if mine.iter().any(|r| {
+        r.status == "ok" && (r.metric.starts_with("gemini_") || r.metric.starts_with("claude_gpt_"))
+    }) {
+        let owned: Vec<_> = mine.iter().map(|r| (*r).clone()).collect();
+        if let Some(line) = crate::plan_usage::agy_status_line(&owned, tz) {
+            return line;
+        }
+    }
     let mut meters: Vec<UsageMeter> = Vec::new();
     for r in &mine {
         if r.status != "ok" {
@@ -1430,6 +1438,40 @@ kind = "claude"
         assert_eq!(
             dashboard_usage_line("codex", &empty, &tz, Timestamp::now()),
             "API key; usage not supported"
+        );
+        crate::plan_usage::cache_put(vec![
+            ok_row("agy", "gemini_5h", 1.0, "2026-11-26T19:27:00Z"),
+            ok_row("agy", "gemini_7d", 1.0, "2026-12-03T14:27:00Z"),
+            crate::plan_usage::PlanRow {
+                provider: "agy".into(),
+                metric: "claude_gpt_5h".into(),
+                used: Some(0.0),
+                limit: Some(100.0),
+                pct: Some(0.0),
+                resets_at: None,
+                source: "agy -p /usage".into(),
+                read_at: "t".into(),
+                error: None,
+                status: "ok".into(),
+                reason: None,
+            },
+            crate::plan_usage::PlanRow {
+                provider: "agy".into(),
+                metric: "claude_gpt_7d".into(),
+                used: Some(0.0),
+                limit: Some(100.0),
+                pct: Some(0.0),
+                resets_at: None,
+                source: "agy -p /usage".into(),
+                read_at: "t".into(),
+                error: None,
+                status: "ok".into(),
+                reason: None,
+            },
+        ]);
+        assert_eq!(
+            dashboard_usage_line("agy", &empty, &tz, Timestamp::now()),
+            "gemini 5h 1% · 7d 1% · resets Dec 03 · claude/gpt 5h 0% · 7d 0%"
         );
         assert!(
             !dashboard_usage_line("claude", &claude_view, &tz, Timestamp::now()).contains("credit")

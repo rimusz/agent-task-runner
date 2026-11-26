@@ -7,7 +7,9 @@
 //! written to atr's database. A fresh Cursor access token is written back
 //! to the keychain item it came from, or kept in this process if that write
 //! fails. A provider with no proven meter
-//! returns `status: unknown`. One provider's failure does not drop the others.
+//! returns `status: unknown`. Antigravity (`agy`) is not an HTTP GET: the
+//! cache refresh runs `agy -p /usage --output-format text` (20s, no login).
+//! One provider's failure does not drop the others.
 //! Results are cached in memory for about five minutes.
 
 use crate::config::Provider;
@@ -170,9 +172,9 @@ fn targets_from(providers: &[Provider]) -> Vec<Target> {
             cli: p.cli.clone(),
         })
         .collect();
-    for kind in [
-        "claude", "grok", "cursor", "codex", "gemini", "opencode", "agy",
-    ] {
+    // `agy` is not synthesized. The `/usage` probe runs only for a configured
+    // provider (its `cli`), never a PATH lookup named `agy`.
+    for kind in ["claude", "grok", "cursor", "codex", "gemini", "opencode"] {
         if !out.iter().any(|t| t.kind == kind) {
             out.push(Target {
                 name: kind.to_string(),
@@ -234,6 +236,24 @@ pub async fn refresh(providers: &[Provider], db: &Db) -> Vec<PlanRow> {
     let read_at_http = read_at.clone();
     let http_job =
         tokio::task::spawn_blocking(move || read_http(&home, &http_targets, &read_at_http));
+    let agy_cli = agy_probe_cli(providers);
+    let agy_names: Vec<String> = providers
+        .iter()
+        .filter(|p| p.kind == "agy")
+        .map(|p| p.name.clone())
+        .collect();
+    let read_at_agy = read_at.clone();
+    let agy_job = tokio::task::spawn_blocking(move || {
+        let Some(cli) = agy_cli else {
+            return Vec::new();
+        };
+        map_kind(
+            &agy_names,
+            run_agy_usage(&cli),
+            "agy -p /usage",
+            &read_at_agy,
+        )
+    });
     let read_at_grok = read_at.clone();
     let grok_job = async move {
         let Some(cli) = grok_cli else {
@@ -258,7 +278,7 @@ pub async fn refresh(providers: &[Provider], db: &Db) -> Vec<PlanRow> {
                 .collect(),
         }
     };
-    let (http_rows, grok_rows) = tokio::join!(http_job, grok_job);
+    let (http_rows, grok_rows, agy_rows) = tokio::join!(http_job, grok_job, agy_job);
     let mut rows = http_rows.unwrap_or_else(|e| {
         vec![errored(
             "plan_usage",
@@ -269,6 +289,15 @@ pub async fn refresh(providers: &[Provider], db: &Db) -> Vec<PlanRow> {
         )]
     });
     rows.extend(grok_rows);
+    rows.extend(agy_rows.unwrap_or_else(|e| {
+        vec![errored(
+            "plan_usage",
+            "plan",
+            "agy -p /usage",
+            &scrub(&e.to_string()),
+            &read_at,
+        )]
+    }));
     rows.extend(stored_if_missing(&rows, stored));
     let mut rows = hide_placeholder_when_stored_ok(rows);
     rows.sort_by(|a, b| (&a.provider, &a.metric).cmp(&(&b.provider, &b.metric)));
@@ -416,13 +445,6 @@ fn read_http(home: &Path, targets: &[Target], read_at: &str) -> Vec<PlanRow> {
                 &t.name,
                 "plan",
                 "no proven GET plan meter (the Code Assist quota call that returns remaining fraction is a POST, which plan_usage will not send)",
-                read_at,
-            ));
-        } else if t.kind == "agy" {
-            rows.push(unknown(
-                &t.name,
-                "plan",
-                "no proven GET plan meter (Antigravity /usage is an interactive panel; statusline quota JSON is not a read-only GET)",
                 read_at,
             ));
         } else if t.kind == "opencode" {
@@ -1010,6 +1032,13 @@ fn keychain_cursor_access_token() -> Result<String, String> {
 /// Exit 44 is item not found.
 #[cfg(target_os = "macos")]
 fn keychain_item(service: &str) -> Result<String, String> {
+    // Unit tests must not read or write the developer login keychain. A
+    // signed-in Mac would otherwise return live Cursor usage or http 401.
+    if cfg!(test) {
+        return Err(format!(
+            "macOS keychain item {service} (account cursor-user) is not readable from this session (security exit 36)"
+        ));
+    }
     let out = std::process::Command::new("/usr/bin/security")
         .args([
             "find-generic-password",
@@ -1051,6 +1080,11 @@ fn keychain_item(_service: &str) -> Result<String, String> {
 fn keychain_set(service: &str, value: &str) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Err("no macOS keychain".into());
+    }
+    if cfg!(test) {
+        return Err(format!(
+            "macOS keychain item {service} (account cursor-user) is not readable from this session (security exit 36)"
+        ));
     }
     if !keychain_safe(value) || !keychain_safe(service) {
         return Err("refusing to write a keychain value with an unsafe character".into());
@@ -1480,6 +1514,245 @@ fn normalize_time(s: &str) -> String {
     }
 }
 
+/// CLI of the first configured `kind = "agy"` provider. `None` when none is
+/// configured, so refresh does not spawn `agy` from `PATH`.
+fn agy_probe_cli(providers: &[Provider]) -> Option<PathBuf> {
+    providers
+        .iter()
+        .find(|p| p.kind == "agy")
+        .map(|p| p.cli.clone())
+}
+
+/// `agy -p /usage --output-format text`. No other flags and no prompt.
+const AGY_USAGE_ARGS: &[&str] = &["-p", "/usage", "--output-format", "text"];
+const AGY_USAGE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// One `agy -p /usage` run. `Err` always starts with `unknown:` so
+/// [`map_kind`] keeps `status: unknown` and never starts a login.
+fn run_agy_usage(cli: &Path) -> std::result::Result<Vec<Metric>, String> {
+    let mut child = std::process::Command::new(cli)
+        .args(AGY_USAGE_ARGS)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "unknown: agy /usage failed to start ({})",
+                scrub(&e.to_string())
+            )
+        })?;
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= AGY_USAGE_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("unknown: agy /usage timed out".into());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => {
+                let _ = child.kill();
+                return Err(format!(
+                    "unknown: agy /usage failed ({})",
+                    scrub(&e.to_string())
+                ));
+            }
+        }
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = std::io::Read::read_to_string(&mut out, &mut stdout);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = std::io::Read::read_to_string(&mut err, &mut stderr);
+    }
+    interpret_agy_usage(status.success(), &stdout, &stderr)
+}
+
+fn interpret_agy_usage(
+    success: bool,
+    stdout: &str,
+    stderr: &str,
+) -> std::result::Result<Vec<Metric>, String> {
+    let blob = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    // Sign-in is only this phrase (any case) or a non-zero exit below.
+    // A bare "authentication" substring is not a sign-in failure.
+    if blob.contains("not logged into antigravity") {
+        return Err("unknown: agy not signed in in this session".into());
+    }
+    if !success {
+        return Err("unknown: agy /usage failed".into());
+    }
+    parse_agy_usage(stdout).map_err(|_| "unknown: unrecognized agy /usage output".to_string())
+}
+
+fn parse_agy_usage(text: &str) -> std::result::Result<Vec<Metric>, String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.eq_ignore_ascii_case("quota:") {
+            continue;
+        }
+        if let Some(metric) = parse_agy_usage_line(line) {
+            out.push(metric);
+        }
+    }
+    if out.is_empty() {
+        return Err("unrecognized agy /usage output".into());
+    }
+    Ok(out)
+}
+
+fn parse_agy_usage_line(line: &str) -> Option<Metric> {
+    if !line.contains("Limit Remaining") {
+        return None;
+    }
+    let group = if line.starts_with("Gemini") {
+        "gemini"
+    } else if line.to_ascii_lowercase().contains("claude") {
+        "claude_gpt"
+    } else {
+        return None;
+    };
+    let window = if line.contains("Five Hour") {
+        "5h"
+    } else if line.contains("Weekly") {
+        "7d"
+    } else {
+        return None;
+    };
+    let remaining = line
+        .split_whitespace()
+        .find(|t| t.ends_with('%') && t.len() > 1)
+        .and_then(|t| t.trim_end_matches('%').parse::<f64>().ok())
+        .filter(|n| n.is_finite())?;
+    let used = round1((100.0 - remaining).clamp(0.0, 100.0));
+    Some(Metric {
+        metric: format!("{group}_{window}"),
+        used: Some(used),
+        limit: Some(100.0),
+        pct: Some(used),
+        resets_at: agy_reset_rfc3339(line)?,
+    })
+}
+
+/// `None` when the stamp is missing (line is not a meter). `Some(None)` when
+/// the window has not started (reset at or before 1970-01-02).
+fn agy_reset_rfc3339(line: &str) -> Option<Option<String>> {
+    let stamp = agy_stamp(line)?;
+    let t = rfc3339::parse(&stamp)?;
+    let cutoff = rfc3339::parse("1970-01-03T00:00:00Z")?;
+    if t < cutoff {
+        Some(None)
+    } else {
+        Some(Some(rfc3339::millis(t)))
+    }
+}
+
+/// `2026-12-03 18:27 +04` → `2026-12-03T18:27:00+04:00`.
+fn agy_stamp(line: &str) -> Option<String> {
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i + 16 <= b.len() {
+        if b[i].is_ascii_digit()
+            && b[i + 4] == b'-'
+            && b[i + 7] == b'-'
+            && b[i + 10] == b' '
+            && b[i + 13] == b':'
+        {
+            let date = &line[i..i + 10];
+            let hm = &line[i + 11..i + 16];
+            let rest = line[i + 16..].trim();
+            let off = rest.split_whitespace().next().unwrap_or("");
+            let off = agy_offset(off)?;
+            return Some(format!("{date}T{hm}:00{off}"));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn agy_offset(off: &str) -> Option<String> {
+    let mut chars = off.chars();
+    let sign = chars.next()?;
+    if sign != '+' && sign != '-' {
+        return None;
+    }
+    let rest: String = chars.collect();
+    let (hh, mm) = if let Some((h, m)) = rest.split_once(':') {
+        (h.to_string(), m.to_string())
+    } else if rest.len() == 4 {
+        (rest[..2].to_string(), rest[2..].to_string())
+    } else if rest.len() == 2 {
+        (rest, "00".into())
+    } else {
+        return None;
+    };
+    if hh.len() != 2 || mm.len() != 2 {
+        return None;
+    }
+    Some(format!("{sign}{hh}:{mm}"))
+}
+
+/// Status line for an agy provider. Groups stay separate (Gemini, Claude/GPT).
+/// Each group lists `5h` then `7d` and one reset, the later of that group.
+pub fn agy_status_line(rows: &[PlanRow], tz: &crate::tz::DisplayTz) -> Option<String> {
+    let ok: Vec<_> = rows.iter().filter(|r| r.status == "ok").collect();
+    if ok.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for (prefix, label) in [("gemini_", "gemini"), ("claude_gpt_", "claude/gpt")] {
+        let five = ok.iter().find(|r| r.metric == format!("{prefix}5h"));
+        let week = ok.iter().find(|r| r.metric == format!("{prefix}7d"));
+        if five.is_none() && week.is_none() {
+            continue;
+        }
+        let mut group = Vec::new();
+        let mut first = true;
+        for row in [five, week].into_iter().flatten() {
+            let pct = row
+                .pct
+                .map(|p| format!(" {}%", agy_pct_text(p)))
+                .unwrap_or_default();
+            let name = if first {
+                first = false;
+                format!("{label} {}", row.metric.trim_start_matches(prefix))
+            } else {
+                row.metric.trim_start_matches(prefix).to_string()
+            };
+            group.push(format!("{name}{pct}"));
+        }
+        let reset = [five, week]
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.resets_at.as_deref())
+            .filter_map(rfc3339::parse)
+            .max();
+        if let Some(t) = reset {
+            group.push(format!("resets {}", tz.format_compact(t)));
+        }
+        parts.push(group.join(" · "));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+fn agy_pct_text(p: f64) -> String {
+    let p = round1(p);
+    if (p - p.round()).abs() < 0.05 {
+        format!("{p:.0}")
+    } else {
+        format!("{p:.1}")
+    }
+}
+
 pub fn format_text(rows: &[PlanRow]) -> String {
     let mut out = String::from(
         "provider    metric               pct   used   limit  resets_at (UTC)  status\n",
@@ -1885,6 +2158,113 @@ mod tests {
         assert!(header["jwk"]["x"].as_str().unwrap().len() > 8);
         assert!(
             dpop_proof_es256(r#"{"kind":"hardware-p256"}"#, CURSOR_REFRESH_URL, "POST", 1).is_err()
+        );
+    }
+
+    /// Captured from agy 1.5.18 on 2026-11-26.
+    const AGY_USAGE_FIXTURE: &str = "\
+Quota:
+Gemini Models          Weekly Limit Remaining     99%   2026-12-03 18:27 +04
+Gemini Models          Five Hour Limit Remaining  99%   2026-11-26 23:27 +04
+Claude and GPT models  Weekly Limit Remaining     100%  1970-01-01 04:00 +04
+Claude and GPT models  Five Hour Limit Remaining  100%  1970-01-01 04:00 +04
+";
+
+    #[test]
+    fn parses_agy_usage_fixture_and_drops_unstarted_resets() {
+        assert_eq!(AGY_USAGE_ARGS, ["-p", "/usage", "--output-format", "text"]);
+        let rows = parse_agy_usage(AGY_USAGE_FIXTURE).unwrap();
+        assert_eq!(rows.len(), 4);
+        let gemini_week = rows.iter().find(|r| r.metric == "gemini_7d").unwrap();
+        assert_eq!(gemini_week.pct, Some(1.0));
+        assert_eq!(
+            gemini_week.resets_at.as_deref(),
+            Some("2026-12-03T14:27:00.000Z")
+        );
+        let gemini_five = rows.iter().find(|r| r.metric == "gemini_5h").unwrap();
+        assert_eq!(gemini_five.pct, Some(1.0));
+        assert_eq!(
+            gemini_five.resets_at.as_deref(),
+            Some("2026-11-26T19:27:00.000Z")
+        );
+        for metric in ["claude_gpt_5h", "claude_gpt_7d"] {
+            let row = rows.iter().find(|r| r.metric == metric).unwrap();
+            assert_eq!(row.pct, Some(0.0), "{metric}");
+            assert_eq!(row.resets_at, None, "{metric} 1970 reset is not a date");
+        }
+        let tz = crate::tz::DisplayTz::parse("UTC").unwrap();
+        let plan: Vec<PlanRow> = rows
+            .iter()
+            .map(|m| PlanRow {
+                provider: "agy".into(),
+                metric: m.metric.clone(),
+                used: m.used,
+                limit: m.limit,
+                pct: m.pct,
+                resets_at: m.resets_at.clone(),
+                source: "agy -p /usage".into(),
+                read_at: "t".into(),
+                error: None,
+                status: "ok".into(),
+                reason: None,
+            })
+            .collect();
+        assert_eq!(
+            agy_status_line(&plan, &tz).as_deref(),
+            Some("gemini 5h 1% · 7d 1% · resets Dec 03 · claude/gpt 5h 0% · 7d 0%")
+        );
+        assert!(parse_agy_usage("hello\n").is_err());
+    }
+
+    #[test]
+    fn agy_auth_failure_stays_unknown_and_does_not_parse() {
+        let err = interpret_agy_usage(false, "", "not logged into Antigravity\n").unwrap_err();
+        assert_eq!(err, "unknown: agy not signed in in this session");
+        let err = interpret_agy_usage(true, "authentication required", "").unwrap_err();
+        assert_eq!(err, "unknown: unrecognized agy /usage output");
+        let with_word = format!("{AGY_USAGE_FIXTURE}\nauthentication note\n");
+        assert!(interpret_agy_usage(true, &with_word, "").is_ok());
+        let err = interpret_agy_usage(true, "", "NOT LOGGED INTO ANTIGRAVITY\n").unwrap_err();
+        assert_eq!(err, "unknown: agy not signed in in this session");
+        let err = interpret_agy_usage(false, "", "authentication failed\n").unwrap_err();
+        assert_eq!(err, "unknown: agy /usage failed");
+        let err = interpret_agy_usage(false, AGY_USAGE_FIXTURE, "").unwrap_err();
+        assert_eq!(err, "unknown: agy /usage failed");
+        let err = interpret_agy_usage(true, "Quota:\nnothing\n", "").unwrap_err();
+        assert_eq!(err, "unknown: unrecognized agy /usage output");
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("agy");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho 'not logged into Antigravity' >&2\nexit 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&bin).unwrap().permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&bin, perm).unwrap();
+        }
+        let err = run_agy_usage(&bin).unwrap_err();
+        assert_eq!(err, "unknown: agy not signed in in this session");
+    }
+
+    #[test]
+    fn agy_usage_probe_only_when_kind_agy_is_configured() {
+        assert!(agy_probe_cli(&[]).is_none());
+        let claude = crate::config::Provider::test_stub("claude");
+        assert!(agy_probe_cli(&[claude]).is_none());
+        assert!(
+            !targets_from(&[]).iter().any(|t| t.kind == "agy"),
+            "no synthetic PATH probe named agy"
+        );
+        let mut agy = crate::config::Provider::test_stub("antigravity");
+        agy.kind = "agy".into();
+        agy.cli = PathBuf::from("/opt/atr-test/agy-not-on-path");
+        assert_eq!(
+            agy_probe_cli(&[agy]).as_deref(),
+            Some(std::path::Path::new("/opt/atr-test/agy-not-on-path"))
         );
     }
 }
