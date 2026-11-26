@@ -27,6 +27,9 @@ pub const ALLOWED_GET_URLS: &[&str] = &[
 
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
+/// Shown as the Codex dashboard `plan_line` with no `unknown:` prefix.
+pub const CODEX_API_KEY_REASON: &str = "codex auth is an API key; usage not supported";
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PlanRow {
     pub provider: String,
@@ -107,10 +110,14 @@ pub fn line_for(provider: &str) -> String {
                     .unwrap_or_default();
                 format!("{}{pct}{reset}", r.metric)
             }
-            "unknown" => format!(
-                "unknown: {}",
-                r.reason.as_deref().unwrap_or("no plan meter")
-            ),
+            "unknown" => {
+                let reason = r.reason.as_deref().unwrap_or("no plan meter");
+                if reason == CODEX_API_KEY_REASON {
+                    reason.to_string()
+                } else {
+                    format!("unknown: {reason}")
+                }
+            }
             _ => format!(
                 "error: {}",
                 r.error.as_deref().unwrap_or("plan read failed")
@@ -991,9 +998,7 @@ fn read_codex(home: &Path) -> std::result::Result<Vec<Metric>, String> {
         .filter(|t| !t.is_empty());
     let Some(token) = token else {
         if v.get("OPENAI_API_KEY").and_then(|k| k.as_str()).is_some() {
-            return Err(
-                "unknown: codex auth is an API key; ChatGPT plan wham/usage does not apply".into(),
-            );
+            return Err(format!("unknown: {CODEX_API_KEY_REASON}"));
         }
         return Err("unknown: codex auth.json has no tokens.access_token".into());
     };
@@ -1376,6 +1381,30 @@ mod tests {
         assert!(kept
             .iter()
             .any(|r| r.metric == "seven_day" && r.status == "ok"));
+    }
+
+    #[test]
+    fn codex_api_key_line_has_no_unknown_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::fs::write(
+            home.path().join(".codex/auth.json"),
+            r#"{"OPENAI_API_KEY":"sk-test-not-a-real-secret"}"#,
+        )
+        .unwrap();
+        let err = read_codex(home.path()).unwrap_err();
+        assert_eq!(err, format!("unknown: {CODEX_API_KEY_REASON}"));
+        cache_clear();
+        cache_put(vec![unknown(
+            "codex",
+            "plan",
+            CODEX_API_KEY_REASON,
+            "2026-11-26T00:00:00.000Z",
+        )]);
+        assert_eq!(line_for("codex"), CODEX_API_KEY_REASON);
+        assert!(!line_for("codex").contains("unknown:"));
+        assert!(!line_for("codex").contains("wham"));
+        cache_clear();
     }
 
     #[test]

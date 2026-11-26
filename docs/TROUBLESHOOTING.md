@@ -94,8 +94,8 @@ and times never wrap; only long text (prompt, result, usage, version, path,
 progress) wraps at word boundaries, and wide tables scroll sideways on narrow
 screens. Providers `last success` uses the same short time as Finished. Today shows
 uncached input, cached and cache-write tokens separately so totals add up.
-Providers show `-` for usage when the CLI reports none, and Grok extra credits
-in their own column. Token savings shows a per-provider bar table for a single
+Providers show `-` for usage when the CLI reports none. Spark always shows
+`-` and no plan line. Token savings shows a per-provider bar table for a single
 day and the daily chart for longer periods. Filters (repo,
 status, provider, time window) and column sorting are read-only.
 

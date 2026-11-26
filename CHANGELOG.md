@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Dashboard provider rows no longer show an extra-credits column or billing text (`no billing reply`, `_x.ai/billing`). Spark (including a Codex-kind Spark provider) shows `-` and no `plan_line`. A Codex API-key login shows `codex auth is an API key; usage not supported`. Claude `plan_line` dates use the short form (`Nov 28`). A passed stored five-hour window (`not a current meter`) is left off that line; current meters stay, for example `seven_day 4.0% resets Nov 28`. `atr usage --plan` still reports the stale window as `unknown`.
+
 - `atr usage --plan` Cursor no longer reports `unknown` / "Cursor session has no user id" when `cursorAuth/userId` is missing and `cursorAuth/accessToken` in `state.vscdb` is not a JWT. The WorkOS user id is read from `stripeMembershipAuthId`, `cachedScopedProfile.authId`, `glass.lastSignedInAuthId`, or `~/.cursor/cli-config.json` `authInfo.authId`. On macOS an encrypted desktop token is read from the keychain item `cursor-access-token` (account `cursor-user`). If that item cannot be read, the row stays `unknown` and names that item.
 - A stored Claude `claude_stream` window whose `resets_at` is already past is not shown as the current meter. It is `unknown` with source `stored claude_stream (stale)`. A window that has not reset, or has no `resets_at`, is unchanged. The old utilization is not rolled forward.
 
