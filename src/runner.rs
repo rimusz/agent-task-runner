@@ -661,6 +661,9 @@ pub async fn run_cli(
     if !saw_error_event && status.success() {
         classified = None;
     }
+    // Every usage/result event counts. A recovered permission denial on an
+    // earlier event must not return true from result_needs_attention, or a
+    // later PASS is still stored as needs_attention.
     let blocked = usage_raw.iter().any(result_needs_attention);
     let outcome = if blocked {
         "needs_attention"

@@ -1411,14 +1411,16 @@ fn fill_random(buf: &mut [u8]) {
     }
 }
 
-/// Claude can exit 0 with subtype=success while permission_denials is
-/// non-empty, or say the work is unfinished. Those must not be success.
+/// Claude can exit 0 with subtype=success and still say the work is
+/// unfinished, or stop because a tool was denied. Those must not be success.
+///
+/// A non-empty `permission_denials` list on an otherwise finished successful
+/// turn is not enough. Claude keeps denials from earlier in the session on
+/// later `result` events (and on the final result) after the agent has
+/// recovered and completed the work. Failing the run on that list requeues
+/// the task; if the per-task wall clock has already elapsed, the requeue is
+/// recorded as `task_timeout` even though the CLI exited 0.
 pub fn result_needs_attention(value: &Value) -> bool {
-    if let Some(arr) = value.get("permission_denials").and_then(|v| v.as_array()) {
-        if !arr.is_empty() {
-            return true;
-        }
-    }
     let stop = value
         .get("stop_reason")
         .and_then(|v| v.as_str())
@@ -1435,7 +1437,7 @@ pub fn result_needs_attention(value: &Value) -> bool {
         .map(value_to_string)
         .unwrap_or_default();
     let r = result.to_ascii_lowercase();
-    r.contains("permission den")
+    if r.contains("permission den")
         || r.contains("don't have permission")
         || r.contains("do not have permission")
         || r.contains("wasn't able to finish")
@@ -1447,6 +1449,27 @@ pub fn result_needs_attention(value: &Value) -> bool {
         || r.contains("work is not finished")
         || r.contains("i was blocked")
         || r.contains("blocked from")
+    {
+        return true;
+    }
+    let denied = value
+        .get("permission_denials")
+        .and_then(|v| v.as_array())
+        .is_some_and(|arr| !arr.is_empty());
+    if !denied {
+        return false;
+    }
+    // Recovered denial: the turn finished and the text does not say it was blocked.
+    let subtype = value.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+    let is_error = value
+        .get("is_error")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let finished = !is_error
+        && (subtype == "success" || subtype.is_empty())
+        && (stop.is_empty() || stop.eq_ignore_ascii_case("end_turn"))
+        && !result.trim().is_empty();
+    !finished
 }
 
 pub fn is_error_event(value: &Value) -> bool {
@@ -2427,13 +2450,38 @@ pub(crate) mod tests {
 
     #[test]
     fn permission_denials_is_not_success() {
-        let denied: Value = serde_json::from_str(
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","permission_denials":[{"tool_name":"Edit"}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        // A denial with no finished text is still needs_attention.
+        let empty: Value = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"","permission_denials":[{"tool_name":"Edit"}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
         )
         .unwrap();
-        assert!(result_needs_attention(&denied));
-        match parse_value("claude", &denied).unwrap() {
+        assert!(result_needs_attention(&empty));
+        match parse_value("claude", &empty).unwrap() {
             ParsedEvent::Usage { is_error, .. } => assert!(is_error),
+            other => panic!("{other:?}"),
+        }
+
+        let errored: Value = serde_json::from_str(
+            r#"{"type":"result","subtype":"error","is_error":true,"result":"ok","permission_denials":[{"tool_name":"Bash"}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .unwrap();
+        assert!(result_needs_attention(&errored));
+
+        let stopped: Value = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"permission_denied","result":"VERDICT: PASS 48/48","permission_denials":[{"tool_name":"Bash"}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .unwrap();
+        assert!(result_needs_attention(&stopped));
+
+        // Recovered denial on a finished successful turn (Mini #277 final result,
+        // and M1 #277 intermediate result events). Must not poison the run.
+        let recovered: Value = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","result":"VERDICT: PASS. TOTAL: 48/48","permission_denials":[{"tool_name":"Bash"}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .unwrap();
+        assert!(!result_needs_attention(&recovered));
+        match parse_value("claude", &recovered).unwrap() {
+            ParsedEvent::Usage { is_error, .. } => assert!(!is_error),
             other => panic!("{other:?}"),
         }
 
