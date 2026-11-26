@@ -260,5 +260,3 @@ atr is not affiliated with or endorsed by Anthropic, xAI, Anysphere, OpenAI, Goo
 Licensed under MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`). Dependency licenses: `THIRD_PARTY_LICENSES`.
 
 shadow-edit
-
-shadow-edit
